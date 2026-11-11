@@ -1,0 +1,14 @@
+__pycache__/
+.cache/
+*.dylib
+*.o
+*.so
+build/
+compile_commands.json
+doc/*.aux
+doc/*.fdb_latexmk
+doc/*.fls
+doc/*.log
+doc/*.lst
+doc/*.out
+doc/*.toc

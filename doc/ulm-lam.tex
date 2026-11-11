@@ -1,0 +1,2086 @@
+% ulm-lam.tex -- design sketch: solving the Linear Algebra Mapping Problem
+% with MLIR.  Build: latexmk (LuaLaTeX, see latexmkrc).
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{fontspec}
+\usepackage{unicode-math}
+\setmainfont{Libertinus Serif}
+\setsansfont{Libertinus Sans}
+\setmathfont{Libertinus Math}
+\setmonofont{JuliaMono}[Scale=MatchLowercase]
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{microtype}
+\usepackage{booktabs,tabularx,array,multirow}
+\usepackage[inline]{enumitem}
+\usepackage[skip=\medskipamount]{parskip}   % no indent, \medskip between paragraphs
+\usepackage{xcolor,luacolor,lua-ul}
+\usepackage{listings}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,fit,backgrounds}
+\usepackage[hidelinks]{hyperref}
+\usepackage[nameinlink,capitalise]{cleveref}
+
+\setlist{itemsep=2pt,topsep=4pt}
+\renewcommand{\arraystretch}{1.15}
+\setlength{\emergencystretch}{3em}
+
+% ---------------------------------------------------------------- notation
+\newcommand{\T}{^{\mkern-1.5mu\mathsf{T}}}
+\newcommand{\inv}{^{-1}}
+\newcommand{\invT}{^{-\mathsf{T}}}
+
+% ---------------------------------------------------------------- listings
+\definecolor{kw}{HTML}{1F4E9A}
+\definecolor{cm}{HTML}{6B6B6B}
+\definecolor{st}{HTML}{8A3B12}
+\definecolor{ty}{HTML}{2E6B30}
+\definecolor{bg}{gray}{0.95}      % code blocks
+\definecolor{ttbg}{gray}{0.92}    % inline typewriter text
+% Grey background behind \texttt via lua-ul leaders: no effect on line
+% spacing, line breaks still possible.
+\let\origtexttt\texttt
+\renewcommand{\texttt}[1]{\highLight[ttbg]{\origtexttt{#1}}}
+
+\lstdefinelanguage{mlir}{
+  alsoletter={.,_,\%,\#,!,@},
+  morekeywords={func.func,return,func.call},
+  morekeywords=[2]{ulm_lam.mul,ulm_lam.add,ulm_lam.scale,ulm_lam.transpose,
+    ulm_lam.inverse,ulm_lam.identity,ulm_lam.assume,ulm_lamk.gemm,ulm_lamk.symm,
+    ulm_lamk.trmm,ulm_lamk.trsm,ulm_lamk.syrk,ulm_lamk.gemv,ulm_lamk.trsv,ulm_lamk.potrf,
+    ulm_lamk.getrf,ulm_lamk.getrs},
+  morekeywords=[3]{tensor,memref,f64,i32,f32,index,strided},
+  morecomment=[l]{//},
+  morestring=[b]",
+  sensitive=true}
+\lstdefinelanguage{tablegen}{
+  morekeywords={def,class,let,include,defvar,foreach,in,if,then,else,
+    dag,string,list,code,bit,int,bits,ifndef,define,endif},
+  morekeywords=[2]{ins,outs},
+  morecomment=[l]{//},
+  morestring=[b]",
+  sensitive=true}
+\lstdefinestyle{base}{
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{kw}\bfseries,
+  keywordstyle=[2]\color{kw},
+  keywordstyle=[3]\color{ty},
+  commentstyle=\color{cm}\itshape,
+  stringstyle=\color{st},
+  backgroundcolor=\color{bg},
+  frame=none,
+  xleftmargin=4pt, xrightmargin=4pt,
+  framexleftmargin=4pt, framexrightmargin=4pt,
+  aboveskip=6pt, belowskip=6pt,
+  columns=fullflexible, keepspaces=true,
+  showstringspaces=false, breaklines=true,
+  upquote=true, tabsize=8}
+\lstdefinestyle{mlir}{style=base,language=mlir}
+\lstdefinestyle{td}{style=base,language=tablegen}
+\lstdefinestyle{sh}{style=base,language=bash,morekeywords={}}
+\lstdefinestyle{c}{style=base,language=C}
+\lstdefinestyle{py}{style=base,language=Python,morekeywords={with,as}}
+\lstset{style=mlir}
+
+% Excerpts from the real sources (see ulm-lam-doc.lua).
+\directlua{ulmlamdoc = dofile("ulm-lam-doc.lua")}
+\newcommand{\code}[1]{\texttt{\directlua{ulmlamdoc.code("\luaescapestring{\detokenize{#1}}")}}}
+\let\file\code
+\newcommand{\srcdef}[3][]{%
+  \directlua{ulmlamdoc.def("\luaescapestring{#2}", "\luaescapestring{#3}",
+                         "\jobname-#3.lst")}%
+  \lstinputlisting[style=td,#1]{\jobname-#3.lst}}
+\newcommand{\srcbetween}[5][]{%
+  \directlua{ulmlamdoc.between("\luaescapestring{#2}", "\luaescapestring{#3}",
+                             "\luaescapestring{#4}", "\jobname-#5.lst")}%
+  \lstinputlisting[#1]{\jobname-#5.lst}}
+
+\newcommand{\src}{../}
+
+% ---------------------------------------------------------------- document
+\title{ulm.lam: Ulm Linear Algebra Mapping\\[4pt]
+  \large Solving the Linear Algebra Mapping Problem with MLIR and ulmBLAS}
+\author{Design draft}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+\noindent
+The \emph{Linear Algebra Mapping Problem} (LAMP) asks for the cheapest
+sequence of calls to kernels like BLAS (Basic Linear Algebra Subprograms)
+and LAPACK (Linear Algebra PACKage) that evaluates a linear
+algebra expression such as $b = (X\T M\inv X)\inv X\T M\inv y$.
+Linnea~\cite{linnea-toms,linnea-thesis} solves it with a Python search
+built on term rewriting.
+This note sketches the same compiler on MLIR (Multi-Level Intermediate
+Representation)~\cite{mlir}.
+It uses two dialects.
+\code{ulm_lam} is the algebra, with matrix properties carried as tensor
+encodings.
+\code{ulm_lamk} is the kernels, in destination-passing style (DPS).
+They are connected by a kernel-selection pass and continue into upstream
+bufferization and a lowering to the C++ interface of
+ulmBLAS~\cite{ulmblas}, which provides BLAS and LAPACK routines as
+header-only templates on strided matrices.
+Both dialects and the passes are implemented, generated from TableGen
+files in ODS (Operation Definition Specification) format, and loaded into
+\code{mlir-opt} as a plugin.
+From the normal form of the worked example, kernel selection finds the
+expected derivation by itself: two Cholesky factorisations, triangular
+solves and a common subexpression up to transposition.
+The generated C++ is $3.7\times$ faster than evaluating the explicit
+inverses with the same library.
+Inside a loop in which only $y$ changes, as in a Kalman measurement update,
+everything else runs once before the loop, and each step costs
+$O(n^2)$ instead of $O(n^3)$.
+The note also points out where MLIR does \emph{not} help: the cost-driven
+search and the matching of associative-commutative expressions have to be
+built.
+\end{abstract}
+
+\setcounter{tocdepth}{1}
+\tableofcontents
+
+% =====================================================================
+\section{Introduction}
+% =====================================================================
+
+A linear algebra problem is written as mathematics:
+\begin{equation}\label{eq:gls}
+  b \;=\; (X\T M\inv X)\inv X\T M\inv y,
+  \qquad M \text{ symmetric positive definite (SPD)},\; X \text{ of full rank},
+\end{equation}
+the generalised least-squares estimator.
+It is executed as a sequence of calls to tuned kernels:
+\code{potrf}, \code{trsm}, \code{syrk}, \code{gemv}, \code{trsv}.
+Choosing that sequence is the LAMP~\cite{lamp-paper}.
+The choice includes parenthesisations, which inverses become solves,
+which factorisations to compute, which properties to exploit, and which
+subexpressions to share.
+The problem is NP-complete (NP: nondeterministic polynomial time) in
+general~\cite{lamp-paper}.
+Mainstream languages and libraries (Matlab, Julia, Eigen, Armadillo, NumPy,
+TensorFlow, PyTorch) solve it only partially~\cite{lamp-paper,tfpt}.
+
+Linnea~\cite{linnea-toms,linnea-thesis} is the reference solution.
+It normalises the input by term rewriting with MatchPy~\cite{matchpy}, infers
+matrix properties, and runs a best-first search over a graph of
+derivations.
+It emits Julia code that calls BLAS/LAPACK and reaches expert-level
+performance.
+It is also a Python research prototype, last changed in 2021.
+
+\paragraph{Why MLIR.}
+MLIR provides what Linnea had to build by hand, and much that it lacks:
+\begin{itemize}
+  \item a typed, verified intermediate representation (IR) and a textual format that are stable;
+  \item rewrite infrastructure, common subexpression elimination (CSE), and \code{lit}/\code{FileCheck}
+        testing;
+  \item One-Shot Bufferize, which decides in-place updates and copies.
+        This replaces Linnea's hand-written ``overwriting'' logic;
+  \item lowering to LLVM (originally ``Low Level Virtual Machine'', today
+        just the project's name), and a code-generation fallback (\code{linalg})
+        when no library kernel fits;
+  \item frontends, Python bindings and an ecosystem that is maintained.
+\end{itemize}
+
+\paragraph{What MLIR does not provide.}
+The core of the LAMP is not covered by any upstream component:
+\begin{itemize}
+  \item \textbf{search instead of greedy rewriting.}
+        MLIR's pattern driver applies rewrites greedily.
+        Kernel selection must compare alternatives under a cost model;
+  \item \textbf{associative-commutative matching.}
+        MLIR patterns match DAGs (directed acyclic graphs) structurally, while kernels have to be
+        found inside products and sums of any length;
+  \item \textbf{a dialect at the right level.}
+        \code{linalg} has no inverse, no notion of SPD, and no transpose
+        as an algebraic operator.
+\end{itemize}
+The design below keeps these parts explicit and small, and uses upstream
+MLIR for everything else.
+
+\paragraph{What this repository contains.}
+\Cref{tab:files} lists the files.
+The ODS files are \emph{checked}: \file{scripts/check-ods.sh} runs every
+\code{mlir-tblgen} backend the dialect needs, including validation of the
+custom assembly formats.
+The dialects are \emph{implemented}: \file{lib/} contains both dialects,
+generated from the ODS, and a first set of passes, built as a plugin for
+\code{mlir-opt} (\cref{sec:impl}).
+The worked example is partly automatic.
+Its stages~1–4 are written by hand as a design: they show Linnea's
+derivation.
+They parse and verify with the implemented dialects, and stage~3
+bufferizes into exactly the copies that stage~4 shows.
+From stage~2 on, the passes produce C++ calling ulmBLAS by themselves;
+it is compiled, run and verified numerically (\cref{sec:example}).
+The loop example (\cref{sec:loops}) and eight kernel selection cases with
+inverses, solves and sums are compiled the same way and checked against
+naive evaluations.
+
+\begin{table}[t]
+\centering\small
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+File & Content \\
+\midrule
+\file{include/ulm_lam/UlmLamBase.td} & the \code{ulm_lam} and \code{ulm_lamk} dialects \\
+\file{include/ulm_lam/UlmLamAttrs.td} & property encoding \code{#ulm_lam.props}, kernel flags \\
+\file{include/ulm_lam/UlmLamInterfaces.td} & property inference and cost interfaces \\
+\file{include/ulm_lam/UlmLamOps.td} & \code{ulm_lam} operations \\
+\file{include/ulm_lam/UlmLamKernelOps.td} & \code{ulm_lamk} operations (BLAS/LAPACK) \\
+\file{include/ulm_lam/UlmLamPasses.td} & passes of the pipeline \\
+\file{include/ulm_lam/UlmLamKernels.td} & declarative kernel catalogue \\
+\file{examples/gls/0[1-4]-*.mlir} & the worked example: design stages 1–4 \\
+\file{examples/gls/run.sh}, \file{driver.cc} & from stage 2 to C++: compile, run, verify \\
+\file{examples/gls/gls_inout.mlir} & GLS with $M$, $y$ declared \code{inout} \\
+\file{examples/cases/} & inverses, solves and sums, checked numerically \\
+\file{examples/kalman/} & formula (1) in a loop: changing $y$; covariance updated in place (\cref{sec:kalman}) \\
+\file{examples/compose/} & workspaces of functions that call functions with workspaces \\
+\file{examples/*/generated/} & the C++ generated from each example (\cref{app:generated}) \\
+\file{examples/loop/} & temporaries in loops (\cref{sec:loops}) \\
+\file{lib/UlmLamResultsToOutParams.cpp} & implemented pass: matrices by reference \\
+\file{lib/ConvertUlmLamkToUlmBLAS.cpp} & lowering to C++ calling ulmBLAS \\
+\file{lib/UlmLamWorkspace.cpp} & temporaries from a caller-provided workspace \\
+\file{examples/workspace.h} & the workspace convention for the C++ drivers \\
+\file{python/ulm/lam/} & the Python frontend and runtime (\cref{sec:python}) \\
+\file{python/examples/}, \file{python/tests/} & Python example and unit tests \\
+\file{scripts/ulm-lam-compile.sh} & the pipeline: \code{ulm_lam} ops to C++ (all stages) \\
+\file{scripts/build-plugin.sh} & build the \code{mlir-opt} pass plugin \\
+\file{scripts/check-ods.sh} & run all \code{mlir-tblgen} backends \\
+\file{scripts/check-stages.sh} & stages 1–4 parse and verify; stage 3 bufferizes as stage 4 \\
+\file{lib/UlmLamDialect.{h,cpp}}, \file{UlmLamkDialect.cpp} & the dialects: inference, verifiers, patterns, costs, bufferization \\
+\file{lib/UlmLamPasses.cpp} & normal form, property inference, kernel selection, property stripping \\
+\file{lib/Plugin.cpp} & \code{mlir-opt} dialect and pass plugin entry points \\
+\file{doc/} & this document (LuaLaTeX) \\
+\bottomrule
+\end{tabularx}
+\caption{Repository contents. Toolchain used: Homebrew LLVM/MLIR 23.1.4,
+ulmBLAS (commit c2273e7, November 2026).}
+\label{tab:files}
+\end{table}
+
+% =====================================================================
+\section{Related work}
+% =====================================================================
+
+\paragraph{Linnea.}
+Linnea~\cite{linnea-toms,linnea-thesis} works in four steps:
+\begin{enumerate}
+  \item it rewrites the input into a normal form, with associative
+        operators flattened, transposes and inverses pushed to the
+        leaves, and properties propagated;
+  \item it represents the program as a graph of derivations, where each
+        edge applies a kernel or a factorisation;
+  \item it explores that graph best-first, with FLOPs (floating-point
+        operations) as cost.
+        The search is \emph{anytime}: a first solution typically comes in
+        under a second, and better ones follow if it runs longer;
+  \item it finds matrix products with the generalised matrix chain (GMC)
+        algorithm~\cite{gmc}.
+\end{enumerate}
+GMC is a dynamic programme over parenthesisations.
+It chooses a kernel for every binary product and takes transposes,
+inverses and properties into account.
+Matching uses MatchPy's associative-commutative matching with sequence
+variables~\cite{matchpy}.
+The implementation is Python.
+Its kernel definitions exist for Julia and C, and it generates Julia
+(see \url{https://github.com/HPAC/linnea}).
+
+\paragraph{MOM / MLIR-Linnea.}
+Chelini et al.~\cite{mom} proposed a matrix dialect for MLIR that carries
+properties in the types, has n-ary multiplication, and contains a
+generalised matrix-chain pass.
+It lowers to \code{linalg}.
+The prototype\footnote{\url{https://github.com/Algebraic-Programming/MLIR-Linnea},
+last commit June 2022.} has property propagation and matrix-chain
+reordering.
+Kernel detection is stubbed: \code{isTRSM()} returns \code{false}.
+It has no search, and it is pinned to a 2022 LLVM.
+This sketch follows MOM in putting properties into types.
+It differs in three ways:
+\begin{itemize}
+  \item it uses the builtin tensor type with an encoding, as
+        \code{sparse_tensor} does, instead of a new type;
+  \item it adds a kernel dialect in destination-passing style, so that
+        upstream bufferization can do the memory planning;
+  \item it makes the search a separate, explicit component.
+\end{itemize}
+
+\paragraph{Equality saturation.}
+Equality saturation (egg~\cite{egg}, egglog~\cite{egglog}) explores all
+rewrites at once and extracts a cheapest term.
+SPORES~\cite{spores} applies it to linear algebra in a relational setting.
+Two MLIR integrations exist:
+\begin{itemize}
+  \item the \code{eqsat} dialect~\cite{eqsat}, which represents an
+        e-graph inside MLIR and is driven by PDL (Pattern Description
+        Language);
+  \item DialEgg~\cite{dialegg}, which translates any MLIR dialect to
+        egglog and back.
+\end{itemize}
+Neither has been applied to the LAMP.
+They are the natural alternative to a hand-written search
+(\cref{sec:egraph}).
+
+\paragraph{Library calls from MLIR.}
+LAPIS~\cite{lapis} lowers MLIR linear algebra to Kokkos Kernels calls.
+That is the ``op $\to$ library call'' step, but it does not use matrix
+properties.
+
+\paragraph{FLENS.}
+FLENS~\cite{flens,flens-github} pursued the same goal, a convenient
+notation with an efficient evaluation, as a header-only C++ library.
+Overloaded operators build closures that are evaluated by BLAS calls: an
+assignment such as \code{y = beta*y + alpha*transpose(A)*x + z} becomes
+one \code{mv} (\code{gemv}) and one \code{axpy}, which inlining turns into
+direct calls of the BLAS.
+Matrix properties are part of the types (\code{GeMatrix},
+\code{SyMatrix}, \code{TrMatrix}), and they select the kernel: \code{mv}
+is \code{gemv}, \code{symv} or \code{trmv}, \code{mm} is \code{gemm},
+\code{symm} or \code{trmm}.
+By default FLENS never creates a temporary: an expression that BLAS cannot
+evaluate without one is a compile-time error, or a run-time assertion where
+the compiler cannot decide it.
+LAPACK functionality is available through FLENS-LAPACK, called
+explicitly (e.g.\ \code{lapack::sv} for a linear system).
+
+FLENS also shows where a library has to stop.
+Expression templates see one statement at a time, at the compile time of
+C++, and matrix sizes only at run time.
+They can map a fixed expression structure onto a fixed call, but they
+cannot choose a parenthesisation by cost, replace an inverse by a
+factorisation and share it, infer the properties of intermediate results,
+find common subexpressions across statements, move invariant work out of
+loops, or plan the memory of a whole function.
+Those decisions need the whole program as data, the sizes and a cost
+model: a compiler.
+ulm.lam keeps the principles of FLENS and moves them there:
+properties in types become \code{\#ulm_lam.props}; ``no hidden
+temporaries'' becomes the caller-owned workspace with its query
+(\cref{sec:workspace}) and the parameter intents that say what a function
+overwrites; the notation becomes Python, traced at run time
+(\cref{sec:python}); and the efficient evaluation is done by kernel
+selection and ulmBLAS.
+
+% =====================================================================
+\section{Architecture}
+% =====================================================================
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+    node distance=5mm and 9mm,
+    stage/.style={draw, rounded corners=2pt, fill=bg, align=left,
+                  minimum width=52mm, inner sep=4pt, font=\small},
+    pass/.style={font=\footnotesize\ttfamily, align=left},
+    arr/.style={-{Latex[length=2mm]}, thick},
+    note/.style={font=\footnotesize, align=left, text width=50mm}]
+  \node[stage] (fe)  {frontend: domain-specific\\ language (DSL), Python bindings,\\or textual \code{ulm_lam} IR};
+  \node[stage, below=of fe] (l1) {\code{ulm_lam} on tensors\\
+     n-ary \code{mul}/\code{add}, \code{transpose}, \code{inverse}\\
+     properties in \lstinline|#ulm_lam.props| encodings};
+  \node[stage, below=12mm of l1] (k1) {\code{ulm_lamk} on tensors\\
+     one op per kernel, DPS};
+  \node[stage, below=12mm of k1] (k2) {\code{ulm_lamk} on memrefs};
+  \node[stage, below=12mm of k2] (rt) {\code{emitc}: calls of\\
+     \code{ulmBLAS::gemm}, \code{trlsm}, \code{potrf}, \dots};
+  \node[stage, below=of rt] (ll) {C++17 $+$ ulmBLAS (header only)};
+
+  \draw[arr] (fe) -- (l1);
+  \draw[arr] (l1) -- node[pass, right=2mm] {ulm-lam-normalize, cse,\\
+      ulm-lam-infer-properties,\\ ulm-lam-select-kernels} (k1);
+  \draw[arr] (k1) -- node[pass, right=2mm] {ulm-lam-strip-properties,\\
+      ulm-lam-results-to-out-params,\\ one-shot-bufferize,\\
+      buffer-loop-hoisting,\\ ulm-lam-workspace} (k2);
+  \draw[arr] (k2) -- node[pass, right=2mm] {convert-ulm-lamk-to-ulmblas} (rt);
+  \draw[arr] (rt) -- node[pass, right=2mm] {mlir-translate --mlir-to-cpp} (ll);
+
+  \node[note, left=8mm of l1] {algebra: normal form and property
+    inference are \emph{local} rewrites (greedy is fine)};
+  \node[note, left=8mm of k1.north west, anchor=north east, yshift=8mm]
+    {the LAMP: \emph{global} search with a cost model; the only
+     non-standard component};
+  \node[note, left=8mm of k2] {memory: in-place updates and copies decided
+    by upstream bufferization};
+\end{tikzpicture}
+\caption{The pipeline.  Everything below \code{ulm_lamk} on tensors is
+upstream MLIR plus two small passes.}
+\label{fig:pipeline}
+\end{figure}
+
+\Cref{fig:pipeline} shows the pipeline.
+It splits into three concerns, and each uses the MLIR mechanism that fits
+it:
+\begin{description}[font=\normalfont\itshape]
+  \item[Algebra] (\code{ulm_lam}).
+        Normal form and property inference are local and confluent.
+        Canonicalisation patterns and \code{InferTypeOpInterface} are the
+        right tools.
+  \item[Selection] (\code{ulm_lam} $\to$ \code{ulm_lamk}).
+        A global optimisation problem.
+        One pass owns it and keeps its own search data structure
+        (\cref{sec:select}).
+  \item[Memory and calls] (\code{ulm_lamk} $\to$ C++).
+        Destination-passing style lets One-Shot Bufferize plan buffers.
+        Each kernel becomes one call of the ulmBLAS C++ interface.
+\end{description}
+
+Two dialects, rather than one, make the boundary checkable.
+After \code{ulm-lam-select-kernels}, a conversion target that marks
+\code{ulm_lam} illegal proves that every operation was mapped.
+Lowering passes never need to understand algebra.
+
+% =====================================================================
+\section{The \texttt{ulm\_lam} dialect}\label{sec:ulmlam}
+% =====================================================================
+
+\subsection{Values and properties}
+
+Every operand is a rank-2 builtin tensor:
+\begin{itemize}
+  \item a column vector is $n\times1$ and a row vector is $1\times n$;
+  \item scalars are plain floats;
+  \item properties are a tensor \emph{encoding}:
+\end{itemize}
+\begin{lstlisting}
+tensor<2000x2000xf64, #ulm_lam.props<spd>>
+tensor<2000x200xf64,  #ulm_lam.props<full_rank>>
+\end{lstlisting}
+\code{sparse_tensor} attaches its storage format the same way.
+The benefits:
+\begin{itemize}
+  \item standard tensor infrastructure (CSE, \code{tensor.empty},
+        function signatures, the parser and printer) works unchanged;
+  \item properties show up in the textual IR, so tests can
+        \code{FileCheck} them.
+\end{itemize}
+
+The encoding is a bit set (\cref{lst:props}).
+Its meaning follows three rules:
+\begin{itemize}
+  \item the set is an \emph{assertion}, and a missing bit means
+        ``unknown'', never ``false''.
+        Dropping bits is therefore always sound;
+  \item sets are read modulo an implication closure
+        (\code{ulm_lam::closure}), e.g.\ spd $\Rightarrow$ symmetric,
+        non-singular;
+  \item facts implied by a static shape (\code{square} on a
+        $200\times200$ tensor) are not stored.
+\end{itemize}
+\code{full_rank} means $\operatorname{rank} = \min(\text{rows},\text{cols})$.
+For square matrices that is \code{non_singular}.
+The attribute implements \code{VerifiableTensorEncoding}, which rejects
+contradictions such as \code{zero} together with \code{non_singular}.
+
+\begin{figure}[t]
+\srcbetween[style=td]{\src include/ulm_lam/UlmLamAttrs.td}{def UlmLam_PropNone}{// Kernel flags}{props}
+\caption{The property encoding (\file{UlmLamAttrs.td}).}
+\label{lst:props}
+\end{figure}
+
+\subsection{Property inference}\label{sec:props}
+
+Every op implements \code{InferTypeOpInterface}.
+Builders therefore compute result properties automatically, and every
+newly created value is typed as strongly as local reasoning allows.
+\Cref{tab:rules} shows the rules.
+They are local, but they look at operand \emph{identity}, not only at
+operand properties.
+For example, $A\T A$ is symmetric positive semi-definite (SPSD) only because both
+factors are the same SSA (static single assignment) value.
+
+\begin{table}[t]
+\centering\small
+\begin{tabularx}{\linewidth}{@{}>{\raggedright}p{36mm}X@{}}
+\toprule
+Expression & Inferred properties (beyond closure) \\
+\midrule
+$A\T$ & lower\,$\leftrightarrow$\,upper swapped; all symmetric, definite,
+  diagonal, orthogonal, rank properties preserved \\
+$A\inv$ & requires non-singular; triangular, unit diagonal, diagonal,
+  symmetric, spd, orthogonal, permutation preserved \\
+$A_1\cdots A_k$ & lower (upper) if all are; unit diagonal, diagonal,
+  orthogonal, permutation, non-singular if all are; zero if any is \\
+$A\T A$ \;/\; $A A\T$ & spsd; spd if $A$ has full column (row) rank \\
+$A\T P A$ & spd if $P$ spd and $A$ full column rank; spsd if $P$ spsd \\
+$N A$, $A N$ & full rank if $A$ is and $N$ is non-singular \\
+$A_1+\dots+A_k$ & symmetric / spsd / triangular / diagonal if all are;
+  spd if all spsd and one spd \\
+$\alpha A$ & structure preserved; spd, spsd only for constant $\alpha>0$;
+  non-singular for constant $\alpha\neq0$ \\
+\code{ulm_lamk} results & the same functions, through
+  \code{PropertyInferenceOpInterface}: e.g.\ \code{trsm} result $L\inv X$ is
+  full rank if $X$ is \\
+\bottomrule
+\end{tabularx}
+\caption{Local property inference rules (selection).}
+\label{tab:rules}
+\end{table}
+
+\paragraph{Relaxed type compatibility.}
+By default, \code{InferTypeOpInterface} requires the result type to
+\emph{equal} the inferred type.
+That rule would make rewriting fragile.
+Replacing an operand by a value with stronger properties would invalidate
+every user until its type was recomputed.
+The \code{ulm_lam} ops therefore override \code{isCompatibleReturnTypes}.
+A result type is accepted if its shape matches and its properties are
+\emph{implied by} the inferred ones (\cref{lst:mul}).
+Weaker types are always valid.
+\code{ulm-lam-infer-properties} strengthens all types in one topological
+sweep.
+Facts that inference cannot derive enter only through function signatures
+or \code{ulm_lam.assume}.
+The \code{checked} form of \code{ulm_lam.assume} turns an assumption into a
+run-time test: for spd, a failing Cholesky factorisation aborts with a
+diagnostic.
+
+\subsection{Operations}
+
+\begin{table}[t]
+\centering\small
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+Op & Semantics \\
+\midrule
+\code{ulm_lam.mul} & n-ary product $A_1\cdots A_k$; associative, no parenthesisation \\
+\code{ulm_lam.add} & n-ary sum; associative and commutative (\code{Commutative} trait) \\
+\code{ulm_lam.scale} & $\alpha A$; subtraction is \code{add(A, scale(-1, B))} \\
+\code{ulm_lam.transpose} & $A\T$ \\
+\code{ulm_lam.inverse} & $A\inv$; verifier requires square; never computed unless requested \\
+\code{ulm_lam.identity} & identity matrix (with dynamic sizes as operands) \\
+\code{ulm_lam.assume} & add properties (trusted, or \code{checked} at run time) \\
+\bottomrule
+\end{tabularx}
+\caption{\code{ulm_lam} operations. All are \code{Pure}.}
+\label{tab:ulmlamops}
+\end{table}
+
+\Cref{tab:ulmlamops} lists the operations.
+\code{ulm_lam.mul} is n-ary on purpose.
+A product denotes the mathematical object $A_1\cdots A_k$.
+Choosing a parenthesisation is a decision of kernel selection, not of the
+frontend.
+
+\begin{figure}[t]
+\srcdef{\src include/ulm_lam/UlmLamOps.td}{UlmLam_MulOp}
+\caption{\code{ulm_lam.mul} in ODS.  The common base class (not shown)
+adds \code{Pure}, \code{InferTypeOpInterface} with relaxed compatibility,
+and \code{PropertyInferenceOpInterface}.}
+\label{lst:mul}
+\end{figure}
+
+\subsection{Normal form}\label{sec:normal}
+
+\code{ulm-lam-normalize} applies canonicalisation patterns greedily and then
+runs CSE.
+The patterns are:
+\begin{enumerate}
+  \item flatten nested \code{mul} and \code{add};
+  \item push transposes to the leaves:
+        $(AB)\T\to B\T A\T$, $(A+B)\T\to A\T+B\T$, $(A\T)\T\to A$, and
+        $A\T\to A$ for symmetric $A$;
+  \item push inverses to the leaves for square non-singular factors:
+        $(AB)\inv\to B\inv A\inv$ and $(A\T)\inv\to(A\inv)\T$.
+        A leaf is then $A$, $A\T$, $A\inv$ or $A\invT$;
+  \item hoist scales out of products and merge them;
+  \item remove identities from products and zeros from sums;
+        a product with a zero factor is zero.
+\end{enumerate}
+Each pattern strictly decreases a well-founded measure: the depth of
+transpose and inverse nodes, and the nesting of \code{mul} and \code{add}.
+The driver therefore terminates.
+Normalising is a precondition for inference.
+In \cref{sec:example}, the frontend's binary product $(X\T M\inv)X$ is not
+recognised as spd.
+The flattened product $X\T M\inv X$ is.
+
+The normal form is not unique for the purposes of the LAMP.
+Distributing a product over a sum can help or hurt, and so can factoring
+one out.
+Such rewrites are therefore \emph{not} canonicalisations.
+They are moves of the search.
+
+% =====================================================================
+\section{The \texttt{ulm\_lamk} dialect}\label{sec:ulm_lamk}
+% =====================================================================
+
+\code{ulm_lamk} has one operation per kernel (\cref{tab:ulm_lamk}), with BLAS
+flags as enum attributes.
+The design follows four rules.
+
+\paragraph{Destination-passing style.}
+The operand that BLAS overwrites is the \code{outs} operand: $C$ for
+\code{gemm}, $B$ for \code{trsm}, $A$ for \code{potrf}.
+On tensors, the op returns the updated value.
+On memrefs, it returns nothing.
+This is the contract of \code{DestinationStyleOpInterface}.
+It is exactly what One-Shot Bufferize needs to update \code{outs} buffers
+in place and to copy only when an overwritten value is still live
+(\cref{sec:lowering}).
+
+\paragraph{Precise partial results.}
+\code{potrf} and \code{syrk} define only one triangle.
+On tensors, their semantics are those of BLAS: the \code{uplo} triangle
+receives the result, and the strict other triangle keeps the init's values.
+With a \code{tensor.empty} init those values are undefined.
+Kernel selection guarantees that every consumer reads only the defined
+triangle.
+It inserts an explicit symmetrisation when a full matrix is needed.
+
+\paragraph{Costs.}
+Every op implements \code{KernelCostOpInterface}, with FLOPs and bytes
+moved.
+Sizes come from static shapes.
+For dynamic dimensions they come from a \code{ulm_lam.size_hint} attribute on
+function arguments.
+Kernel selection needs sizes, as Linnea does.
+Multi-versioning with a run-time dispatch on sizes is future work.
+
+\paragraph{Scalars.}
+\code{alpha} and \code{beta} are SSA values whose type must match the
+matrix element type (\code{TypesMatchWith}).
+Scales and accumulations folded into kernels need no special case.
+
+\begin{table}[t]
+\centering\small
+\begin{tabularx}{\linewidth}{@{}llX>{\raggedleft\arraybackslash}p{30mm}@{}}
+\toprule
+Op & ulmBLAS & Semantics & FLOPs \\
+\midrule
+\code{gemm} & \code{gemm} & $C \leftarrow \alpha\,\mathrm{op}(A)\,\mathrm{op}(B)+\beta C$ & $2mnk$ \\
+\code{symm} & \code{sylmm} & $C \leftarrow \alpha S B+\beta C$, $S$ symmetric & $2m^2n$ \\
+\code{trmm} & \code{trlmm}/\code{trumm} & $B \leftarrow \alpha\,\mathrm{op}(L) B$ & $m^2n$ \\
+\code{trsm} & \code{trlsm}/\code{trusm} & $B \leftarrow \alpha\,\mathrm{op}(L)\inv B$ & $m^2n$ \\
+\code{syrk} & \code{sylrk} & $C \leftarrow \alpha A\T A+\beta C$ (one triangle) & $n^2k$ \\
+\code{gemv} & \code{gemv} & $y \leftarrow \alpha\,\mathrm{op}(A)x+\beta y$ & $2mn$ \\
+\code{trsv} & \code{trlsv}/\code{trusv} & $x \leftarrow \mathrm{op}(L)\inv x$ & $n^2$ \\
+\code{potrf} & \code{potrf} & $A = LL\T$, in place & $n^3/3$ \\
+\code{getrf} & \code{getrf} & $PA = LU$ (lower--upper), in place & $2n^3/3$ \\
+\code{getrs} & \code{getrs} & $B \leftarrow \mathrm{op}(A)\inv B$ from LU & $2n^2k$ \\
+\code{geaxpy} & \code{geaxpy} & $Y \leftarrow \alpha X + Y$ (matrices) & $2mn$ \\
+\code{gescal} & \code{gescal} & $X \leftarrow \alpha X$ (matrices) & $mn$ \\
+\code{call} & -- & external function updating its \code{outs} in place & -- \\
+\bottomrule
+\end{tabularx}
+\caption{\code{ulm_lamk} operations and the ulmBLAS routines they are
+lowered to.  The BLAS-like operations keep the familiar \code{trans} and
+\code{side} attributes; in the lowering they become strides
+(\cref{sec:ulmblas}).  \code{symm}, \code{trmm} and \code{syrk} are
+defined but not yet produced by kernel selection.}
+\label{tab:ulm_lamk}
+\end{table}
+
+\begin{figure}[t]
+\srcdef{\src include/ulm_lam/UlmLamKernelOps.td}{UlmLamk_TrsmOp}
+\caption{\code{ulm_lamk.trsm} in ODS.  The base class \code{UlmLamk_Op} adds
+\code{DestinationStyleOpInterface} (with \code{B} as init), memory
+effects, property inference and the cost interface.}
+\label{lst:trsm}
+\end{figure}
+
+% =====================================================================
+\section{Kernel selection}\label{sec:select}
+% =====================================================================
+
+\subsection{Problem}
+
+The input is a function of \code{ulm_lam} ops in normal form, with
+properties inferred.
+The output is a sequence of \code{ulm_lamk} ops (and \code{tensor.empty})
+that computes the same values at minimal cost.
+Plain pattern rewriting cannot do this for three reasons:
+\begin{itemize}
+  \item kernels match \emph{subsequences} of n-ary products;
+  \item choices interact.
+        A Cholesky factorisation of $M$ pays off only because both
+        occurrences of $M\inv$ reuse it;
+  \item the best choice is visible only in the total cost.
+\end{itemize}
+
+\subsection{The kernel catalogue}
+
+Kernels are declared, not hand-coded (\cref{lst:catalogue}).
+A record has five parts:
+\begin{itemize}
+  \item a pattern over the normal form;
+  \item constraints on properties, vector shapes and operand identity;
+  \item the \code{ulm_lamk} op and its flags;
+  \item the operand that is overwritten;
+  \item a FLOP formula.
+\end{itemize}
+A custom TableGen backend (\code{ulm-lam-tblgen -gen-kernel-catalogue}) would
+generate the matchers, cost functions and builders.
+Today the file is checked for syntax with \code{mlir-tblgen
+--print-records}, which yields 31 records.
+Supporting another library, or a fused vendor kernel, means adding
+records.
+Linnea's kernel description plays the same role.
+
+A \code{mul} pattern with $k$ operands matches any $k$ \emph{consecutive}
+factors of a longer product.
+This restricted form of associative matching is all that products need,
+and it is linear in the product length.
+Commutative matching is needed only for sums.
+Sums are short in practice, so subsets can be enumerated.
+Full associative-commutative matching in the style of MatchPy is not
+required.
+
+Factorisations are expression rewrites, as in Linnea.
+Cholesky replaces an spd leaf $A$ by $LL\T$, with $L$ lower triangular and
+non-singular.
+Normal form then turns $A\inv$ into $L\invT L\inv$.
+The ordinary \code{trsm}/\code{trsv} patterns pick up the solves, and no
+kernel needs to know about factorisations.
+
+\begin{figure}[t]
+\srcbetween[style=td]{\src include/ulm_lam/UlmLamKernels.td}{// Triangular solves with a matrix}{// BLAS 2}{trsm-cat}
+\srcdef{\src include/ulm_lam/UlmLamKernels.td}{Cholesky}
+\caption{Excerpt of the kernel catalogue (\file{UlmLamKernels.td}).}
+\label{lst:catalogue}
+\end{figure}
+
+\subsection{Inner solver: generalised matrix chain}
+
+For a single product $A_1\cdots A_k$, whose leaves are decorated with
+$\T$ and $\inv$, the GMC algorithm~\cite{gmc} is a dynamic programme over
+intervals:
+\[
+  \mathrm{cost}(i,j) \;=\; \min_{i\le s<j}\;
+  \min_{\kappa \in \mathcal{K}(T_{i,s},\,T_{s+1,j})}
+  \bigl[\mathrm{cost}(i,s)+\mathrm{cost}(s+1,j)+\mathrm{flops}_\kappa\bigr],
+\]
+where:
+\begin{itemize}
+  \item $T_{i,s}$ is the temporary for the interval $A_i\cdots A_s$,
+        with the properties inferred for it;
+  \item $\mathcal{K}$ is the set of catalogue kernels that match the
+        binary product of the two temporaries.
+\end{itemize}
+Because temporaries carry inferred properties, structure propagates
+through the chain.
+For example, $L\inv X$ stays full rank, so $(L\inv X)\T(L\inv X)$ becomes
+\code{syrk} with an spd result.
+The cost is $O(k^3\,|\mathcal{K}|)$.
+GMC alone is a complete but myopic strategy (\code{strategy=gmc}).
+
+\subsection{Implemented: \texttt{strategy=gmc}}\label{sec:impl}
+
+The implementation of \code{ulm-lam-select-kernels}
+(\file{lib/UlmLamPasses.cpp}) handles products, sums and inverses:
+\begin{itemize}
+  \item \textbf{Inverses.}
+        Every inverted matrix $M$ is factorised once, right after its
+        definition, chosen by its properties.
+        A triangular $M$ is used as it is; for an spd $M$, \code{potrf}
+        gives $M=LL\T$ and $M\inv$ becomes the two solves $L\invT L\inv$;
+        any other $M$ is factorised by \code{getrf}, and $M\inv$ becomes an
+        LU solve.
+        The factorisation is shared by all products in which $M\inv$
+        occurs, and it stays outside a loop in which $M$ is invariant.
+        An inverse is never formed explicitly; an inverse that is not a
+        factor of a product is diagnosed.
+  \item \textbf{Products.}
+        Every product is parenthesised by the generalised matrix chain
+        dynamic programme above.
+        An interval is computed by a \code{gemm} (\code{gemv} for a
+        vector), by a solve applied from the left to the rest (\code{trsm},
+        \code{trsv}, \code{getrs}, in place), by a triangular solve applied
+        from the right (\code{trsm} with \code{side(right)}), or as $Z\T Z$
+        when its left half is the transpose of its right half.
+        The last case is Linnea's common subexpression up to
+        transposition: $X\T L\invT L\inv X = (L\inv X)\T(L\inv X)$.
+        Transposition is always a kernel flag, never a copy.
+        For example, $A\,B\,x$ with $1000\times1000$ matrices becomes
+        $A(Bx)$, and $A\inv B C$ becomes $A\inv(BC)$ when $C$ has fewer
+        columns than $B$.
+  \item \textbf{Reuse across products.}
+        Every interval that a product computes as a plain product is
+        remembered.
+        In a later product, the same interval, or its transpose, costs
+        nothing if the remembered value dominates the product.
+        So the second product of GLS reuses $W=L\inv X$ from the first:
+        $X\T L\invT L\inv y = W\T(L\inv y)$, one triangular solve
+        instead of two.
+        This is a first step towards the sharing that Linnea's search
+        finds (\cref{sec:search}).
+  \item \textbf{Sums.}
+        $Y_1+a_2Y_2+\dots+b_1P_1+\dots$ accumulates into the first plain
+        term: \code{gescal} for its scale, \code{geaxpy} for every further
+        plain term, and the last kernel of every product writes into the
+        accumulator (\code{gemm} with $\beta=1$; a solve through
+        \code{geaxpy}).
+        $X+2A\T B$ is therefore a single \code{gemm} with
+        \code{trans_a(trans)}, $\alpha=2$ and $\beta=1$ that writes into
+        $X$.
+  \item \textbf{Diagnosed, not miscompiled:} explicit inverses, right
+        solves with an LU factorisation, transposed accumulators,
+        transposes that are not kernel operands, and dynamic shapes.
+\end{itemize}
+\code{syrk} is not used yet for $Z\T Z$, because it defines only one
+triangle and the consumer may read both; \code{gemm} computes the full
+product (twice the FLOPs of \code{syrk}).
+
+The other passes are \code{ulm-lam-normalize} (flattening of products and
+sums, folding of double transposes and inverses, of transposes of
+symmetric matrices and of scaling by one), \code{ulm-lam-infer-properties}
+and \code{ulm-lam-strip-properties}.
+The dialects implement the property inference rules of \cref{tab:rules}
+for products, sums, scaling, transposes and inverses, the relaxed type
+compatibility, the verifiers, FLOP and byte costs for every kernel, and
+bufferization of every \code{ulm_lamk} op in destination-passing style.
+
+\subsection{Outer solver: search over derivations}\label{sec:search}
+
+The default strategy is Linnea's search, ported.
+\begin{itemize}
+  \item \textbf{State}: a hash-consed expression DAG of what remains to
+        compute, plus the kernels emitted so far and their cost.
+        Hash-consing makes CSE free.
+        Nodes are canonicalised \emph{modulo transposition}, so
+        $X\T L\invT$ is found as $(L\inv X)\T$ once $W=L\inv X$ exists.
+  \item \textbf{Moves}:
+        \begin{enumerate*}[label=(\roman*)]
+          \item apply a factorisation to a leaf
+                (all its occurrences change together);
+          \item compute a subexpression with GMC and replace it by a new
+                leaf whose properties are inferred;
+          \item apply a non-canonical algebraic rewrite
+                (distribute, factor out).
+        \end{enumerate*}
+  \item \textbf{Order}: best-first by cost so far plus a lower bound on
+        the cost of the remainder.
+        The search stops on a time budget (\code{budget-ms}).
+        Like Linnea, it is anytime: the first complete derivation comes
+        from a greedy descent, and better ones replace it.
+\end{itemize}
+
+The search works on its own data structure, not on IR.
+Cloning functions for every state would be wasteful.
+A search state is also not a valid program: partly selected expressions
+mix factors and pending products.
+The DAG reuses the C++ property functions of the ops, so inference in the
+search and in the IR cannot disagree.
+Only the winning derivation is materialised as \code{ulm_lamk} ops.
+A debug option dumps the explored derivation graph.
+
+\subsection{Alternative: equality saturation}\label{sec:egraph}
+
+\code{strategy=egraph} is the experimental route.
+It translates the \code{ulm_lam} function into an e-graph, through the
+\code{eqsat} dialect~\cite{eqsat} or DialEgg/egglog~\cite{dialegg}.
+It saturates with the algebraic identities and the catalogue rules, then
+extracts the cheapest term.
+The idea is attractive, because the moves of \cref{sec:search} become
+plain rewrite rules.
+There are three difficulties:
+\begin{itemize}
+  \item properties are per e-class facts.
+        egglog lattices with \code{:merge} can represent them, but
+        rewrites become conditional on analyses;
+  \item extraction with sharing is NP-hard, and integer programming is
+        the usual approach.
+        This matches the NP-completeness of the LAMP;
+  \item associativity makes the e-graphs of products blow up.
+        GMC as a custom extractor for chain e-classes is one way out.
+\end{itemize}
+A comparison of both strategies on the LAMP benchmark~\cite{lamp-paper} would
+itself be a contribution.
+
+\subsection{Soundness and numerics}
+
+Kernel selection must not change the result beyond rounding.
+Rewrites with side conditions are checked against inferred properties:
+\begin{itemize}
+  \item $(AB)\inv = B\inv A\inv$ only for square non-singular factors;
+  \item $A\T=A$ only for symmetric $A$.
+\end{itemize}
+Explicit inverses are never formed unless the inverse itself is an
+output.
+Factorisations are chosen by structure: Cholesky for spd, LU with pivoting
+otherwise, and QR (orthogonal $Q$ times upper triangular $R$) where
+requested.
+Every factorisation is \code{checked} by default, so a violated property
+assumption aborts with a diagnostic instead of producing garbage.
+
+% =====================================================================
+\section{Bufferization and lowering}\label{sec:lowering}
+% =====================================================================
+
+\paragraph{Buffers.}
+After \code{ulm-lam-strip-properties}, the IR consists of \code{ulm_lamk} ops on
+plain tensors.
+\code{ulm-lam-results-to-out-params} first makes every matrix result a
+by-reference parameter (\cref{sec:loops}).
+The pipeline then runs upstream passes in four steps:
+\begin{enumerate}
+  \item \code{one-shot-bufferize\{bufferize-function-boundaries\}};
+  \item \code{buffer-results-to-out-params\{hoist-static-allocs\}};
+  \item \code{buffer-loop-hoisting}, which moves allocations of
+        loop-invariant size out of loops (\cref{sec:loops});
+  \item \code{buffer-deallocation-pipeline}.
+\end{enumerate}
+\code{ulm-lam-results-to-out-params} marks the matrices passed by value
+\code{bufferization.writable = false}.
+The analysis therefore copies an input only when a kernel overwrites it.
+In the example these are $M$ (\code{potrf}), $X$ (\code{trsm}) and $y$
+(\code{trsv}).
+Intermediate results that end in the output are computed directly in the
+result buffer.
+That is Linnea's memory optimisation, here obtained from upstream
+bufferization.
+
+\subsection{Lowering to ulmBLAS}\label{sec:ulmblas}
+
+\code{convert-ulm-lamk-to-ulmblas} (\file{lib/ConvertUlmLamkToUlmBLAS.cpp})
+lowers the bufferized program to EmitC, MLIR's dialect for emitting C and
+C++.
+Every kernel becomes one call of the C++ interface of
+ulmBLAS~\cite{ulmblas}, and \code{mlir-translate --mlir-to-cpp} prints
+C++17.
+Loops, arithmetic and functions use the upstream
+\code{\{scf,arith,func\}-to-emitc} patterns with the type converter of the
+pass.
+
+\paragraph{Why ulmBLAS and not CBLAS/LAPACK.}
+ulmBLAS is header only, its element type is a template parameter, and
+every matrix is a pointer with two strides (\code{incRow}, \code{incCol}),
+for BLAS and LAPACK routines alike.
+Strides are what an MLIR \code{memref} carries, so the lowering is direct:
+\begin{itemize}
+  \item a transposed operand is the same pointer with swapped strides, so
+        \code{trans} flags disappear, and the transpose of a lower
+        triangular matrix is an upper triangular one
+        (\code{trusv} on $L$ with strides $(1,n)$ solves with $L\T$);
+  \item a triangular solve from the right is a solve from the left on
+        transposed views: $B\,\mathrm{op}(T)\inv =
+        (\mathrm{op}(T)\invT B\T)\T$, so \code{side} disappears too;
+  \item row-major versus column-major is not an issue: LAPACK routines
+        such as \code{potrf}, \code{getrf} and \code{getrs} take strides
+        as well.
+        With CLAPACK, row-major data needs tricks (a row-major lower
+        triangle is the column-major upper one; \code{getrf} factorises
+        $A\T$) and \code{getrs} with several right-hand sides cannot be
+        used at all;
+  \item factorisations return \code{info}.
+        The lowering wraps \code{potrf} and \code{getrf} in a small
+        template (emitted into the output) that aborts with a diagnostic
+        if a \code{checked} factorisation fails.
+\end{itemize}
+
+\paragraph{The ulm.lam ABI.}
+\begin{itemize}
+  \item A static row-major \code{memref} is a pointer (\code{double *},
+        \code{float *}, pivots \code{int32_t *}) with strides
+        (columns, 1); \code{index} is \code{size_t}.
+        So \code{foo(index, memref<500x500xf64>)} is
+        \code{void foo(size_t, double *)}.
+  \item Matrices are passed by reference.
+        A function with a matrix output receives a pointer to it; the
+        caller allocates and frees the matrix and owns it.
+        No function returns a matrix, so ownership never moves from callee
+        to caller, and an external function cannot leak.
+        \code{ulm-lam-results-to-out-params} and
+        \code{buffer-results-to-out-params} establish the convention;
+        \code{convert-ulm-lamk-to-ulmblas} rejects a function that violates
+        it.
+  \item Every matrix parameter has an intent, \code{in}, \code{inout}
+        or \code{out}, declared in the parameter list (see below).
+  \item An external function that updates a matrix receives it by
+        reference and changes it in place: a declaration whose result is
+        marked \code{\{ulm_lam.inout = k\}} becomes a \code{ulm_lamk.call}
+        (\cref{sec:adaptive}).
+  \item A function that needs memory for temporaries gets it from the
+        caller, in the style of LAPACK's \code{lwork}
+        (\cref{sec:workspace}).
+  \item Functions are \code{extern "C"}: C code calls the generated C++,
+        and the generated C++ calls C functions.
+\end{itemize}
+\paragraph{Parameter intents.}
+LAPACK routines commonly overwrite the matrices they receive; the caller
+learns it from the documentation (``on exit, A is destroyed'').
+In ulm.lam the parameter list says it:
+\begin{itemize}
+  \item \code{\{ulm_lam.in\}} (the default for matrix arguments): read only.
+        If a kernel would overwrite the matrix, the function works on a
+        copy, which lives in its workspace.
+  \item \code{\{ulm_lam.inout\}}: the function may overwrite the matrix and
+        use it as workspace.
+        If a result is marked \code{\{ulm_lam.inout = k\}}, argument $k$ holds
+        that result on exit (the loop example updates $X$ this way);
+        otherwise its contents on exit are unspecified.
+  \item \code{\{ulm_lam.out\}} (the default for results): an out parameter;
+        the caller provides the buffer, the function writes it and also
+        computes in it (\code{gemv} and the triangular solves of GLS work
+        in the caller's $b$).
+\end{itemize}
+\code{ulm-lam-results-to-out-params} turns the intents into bufferization
+attributes (\code{in} arguments are not writable, \code{inout}
+arguments are), so One-Shot Bufferize decides copies and in-place updates
+accordingly.
+\file{examples/gls/gls_inout.mlir} is GLS with $M$ and $y$ declared
+\code{inout}: the Cholesky factorisation of $M$ and the solve with $y$
+work on the caller's matrices, only $X$ (\code{in}) is copied for the
+in-place solve $W=L\inv X$, and the workspace shrinks from 35.5\,MB to
+3.5\,MB.
+The result is bit-identical to that of \code{gls}.
+
+Because the caller has to know the intents, the generated code states
+them: every public function is preceded by a comment generated from its
+parameter attributes,
+\begin{lstlisting}[style=c]
+/* gls_inout: matrices by reference (row-major), owned by the caller
+ *   v1  double[2000][200]   in     read only
+ *   v2  double[2000][2000]  inout  may be overwritten (unspecified on exit)
+ *   v3  double[2000][1]     inout  may be overwritten (unspecified on exit)
+ *   v4  double[200][1]      out    written
+ *   v5  int8_t *            work   workspace (bytes)
+ *   v6  int64_t *           info   -1: query, 0: allocate, >0: size of work
+ */
+\end{lstlisting}
+
+Memory: \code{memref.alloc}, \code{dealloc} and \code{copy} become
+\code{aligned_alloc} (size rounded up to the alignment, as C++17
+requires), \code{free} and \code{memcpy}.
+Upstream \code{convert-memref-to-emitc} is not used: it types arguments as
+C arrays (\code{double[500][500]}) but allocations as pointers, which
+leaves unresolved casts.
+
+\paragraph{Workspaces.}\label{sec:workspace}
+A generated function does not allocate memory behind the caller's back.
+\code{ulm-lam-workspace} (\file{lib/UlmLamWorkspace.cpp}) runs after
+bufferization.
+A public function with temporaries gets two trailing parameters:
+\begin{lstlisting}[style=c]
+void gls(double *X, double *M, double *y, double *b,
+         int8_t *work, int64_t *workspace_info);
+\end{lstlisting}
+\begin{itemize}
+  \item \code{*workspace_info == -1}: a query.
+        The function sets \code{*workspace_info} to the required size in
+        bytes and returns without computing anything.
+  \item \code{*workspace_info == 0}: the function allocates one block of
+        the required size, uses it, and frees it before it returns.
+  \item \code{*workspace_info > 0}: the size of \code{work}.
+        If it is too small, the function calls the global function
+        \code{ulm_lam_workspace_error(required, given)} and returns;
+        otherwise all temporaries live in \code{work}.
+\end{itemize}
+The sizes are in bytes, because the temporaries mix element types
+(matrices and \code{int32_t} pivots).
+All temporaries, including those of loops, become slots of the one block
+at 64-byte aligned offsets that are computed at compile time; in the C++
+each is \code{(double *)(work + offset)}.
+The generated code contains a weak default of \code{ulm_lam_workspace_error}
+that prints a message and aborts; a program can define its own, and then
+the function returns without computing.
+Functions without temporaries keep their plain signature.
+
+\paragraph{Accumulation.}
+As a LAPACK routine that calls other routines, a function that calls
+functions with a workspace answers a query with its own requirement plus
+those of its callees.
+\code{ulm-lam-workspace} decides transitively which functions take a
+workspace: those with temporaries, and those that call a function with a
+workspace.
+An external function declares that it follows the convention with the
+attribute \code{\{ulm_lam.workspace\}}; its last two parameters are then
+\code{work} and \code{workspace_info}.
+At entry, a function queries each such call (\code{*workspace_info = -1};
+the matrix arguments are dummies, which a query does not touch; scalars
+that are not available at entry, such as a loop index, are 0) and
+restores its own \code{*workspace_info}.
+Its block is laid out as [own temporaries | callee 1 | callee 2 | \dots],
+each part 64-byte aligned, and every call gets its part and its size.
+Afterwards the function restores \code{*workspace_info}, as LAPACK leaves
+\code{lwork} unchanged.
+So the requirement of an external function with a workspace may depend
+only on its matrix sizes, which are static in ulm.lam, and on scalar
+arguments that are available at entry.
+Recursion between functions with a workspace is rejected.
+
+\file{examples/compose/compose.mlir} has a generated function
+\code{estimate_all} that calls the generated \code{gls} and the external
+\code{postprocess} in a loop (\cref{lst:compose}).
+Its query returns 35\,555\,200 bytes: its own 17\,600 ($y_i$ and $b_i$)
+plus the 35\,536\,000 of \code{gls} plus the 1\,600 of
+\code{postprocess}.
+\file{examples/compose/driver.cc} checks the accumulation, that every
+call of \code{postprocess} gets a large enough part of the caller's
+workspace, that the estimates equal separate calls of \code{gls}, both with
+a given workspace and with \code{*workspace_info = 0}, that
+\code{*workspace_info} is unchanged after the call, and that a workspace
+one byte too small calls the error function and computes nothing.
+
+\begin{figure}[t]
+\begin{lstlisting}[style=c]
+void estimate_all(double *X, double *M, size_t n,
+                  int8_t *work, int64_t *workspace_info)
+{
+    int64_t given = *workspace_info;
+    *workspace_info = -1;                         // query the callees
+    gls(dummy, dummy, dummy, dummy, work, workspace_info);
+    int64_t q1 = *workspace_info;
+    *workspace_info = -1;
+    postprocess(0, dummy, work, workspace_info);
+    int64_t q2 = *workspace_info;
+    *workspace_info = given;
+    int64_t required = 17600 + up64(q1) + up64(q2);
+    if (given == -1) { *workspace_info = required; return; }
+    if (given > 0 && given < required) { ulm_lam_workspace_error(required, given); return; }
+    int8_t *ws = given == 0 ? aligned_alloc(64, required) : work;
+    double *y = (double *)(ws + 0), *b = (double *)(ws + 16000);
+    for (size_t i = 0; i < n; ++i) {
+        observe(i, y);
+        *workspace_info = q1;  gls(X, M, y, b, ws + 17600, workspace_info);
+        *workspace_info = q2;  postprocess(i, b, ws + 17600 + up64(q1), workspace_info);
+    }
+    *workspace_info = given;
+    if (given == 0) free(ws);
+}
+\end{lstlisting}
+\caption{The structure of the generated \code{estimate_all}
+(\file{examples/compose/compose.mlir}), written out by hand with readable
+names; the generated code is in \cref{app:generated}.  \code{dummy} stands
+for pointers that a query does not touch, \code{up64} for rounding up to a
+multiple of 64.}
+\label{lst:compose}
+\end{figure}
+GLS needs 35.5\,MB (copies of $M$, $X$, $y$ and the matrix $S$); the
+driver queries the size once and passes the same workspace to every call.
+\file{examples/cases/driver.cc} checks all four cases: the query computes
+nothing, a given workspace gives the same result, and a workspace that is
+one byte too small calls the error function (here a replacement that
+counts) and computes nothing.
+
+\begin{table}[t]
+\centering\small
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+\code{ulm_lamk} op & ulmBLAS call (row-major $m\times n$ storage: strides $(n,1)$) \\
+\midrule
+\code{gemm} & \code{gemm(m, n, k, alpha, false, A, incRowA, incColA, false, B, ..., beta, C, ...)} \\
+\code{gemv} & \code{gemv(m, n, alpha, A, incRowA, incColA, x, incX, beta, y, incY)} \\
+\code{trsm} & \code{trlsm} / \code{trusm(m, n, alpha, false, unitDiag, A, ..., B, ...)} \\
+\code{trsv} & \code{trlsv} / \code{trusv(n, unitDiag, A, incRowA, incColA, x, incX)} \\
+\code{geaxpy} & \code{geaxpy(m, n, alpha, X, incRowX, incColX, Y, incRowY, incColY)} \\
+\code{gescal} & \code{gescal(m, n, alpha, X, incRowX, incColX)} \\
+\code{potrf} & \code{info = potrf(lower, n, A, incRowA, incColA)} \\
+\code{getrf} & \code{info = getrf(m, n, A, incRowA, incColA, piv, incPiv)} (0-based pivots) \\
+\code{getrs} & \code{getrs(trans, false, n, nrhs, LU, ..., piv, incPiv, B, ...)} \\
+\bottomrule
+\end{tabularx}
+\caption{The ulmBLAS routines used by \code{convert-ulm-lamk-to-ulmblas}.
+\code{trans} selects the strides; \code{trans} and \code{uplo} together
+select \code{trl*} or \code{tru*}.}
+\label{tab:ulmcalls}
+\end{table}
+
+\paragraph{What ulm.lam needs from ulmBLAS next.}
+ulm.lam also shows how missing ulmBLAS routines should look: in the style of
+the existing ones, with strides for every matrix, a template element type,
+\code{bool} flags only where strides cannot express the choice, and
+\code{info} as the return value of factorisations.
+\begin{itemize}
+  \item \emph{The triangle of a product} (\code{gemmtr}, in the
+        \code{ulmBLAS-gemmtr} branch, and \code{sylrk}): with them, $Z\T
+        Z$ costs half, once kernel selection tracks which triangle a
+        consumer reads.
+  \item \emph{QR factorisation} for least squares without normal
+        equations, and for full-rank inverses that are not spd:
+\begin{lstlisting}[style=c]
+template <typename IndexType, typename T>
+    IndexType
+    geqrf(IndexType m, IndexType n, T *A, IndexType incRowA,
+          IndexType incColA, T *tau, IndexType incTau);
+
+//  C := op(Q) C (left) or C op(Q) (right), Q from geqrf
+template <typename IndexType, typename T>
+    void
+    ormqr(bool left, bool trans, IndexType m, IndexType n, IndexType k,
+          const T *A, IndexType incRowA, IndexType incColA,
+          const T *tau, IndexType incTau,
+          T *C, IndexType incRowC, IndexType incColC);
+\end{lstlisting}
+  \item \emph{Symmetric indefinite factorisation} $PAP\T = LDL\T$
+        (Bunch--Kaufman) for inverses of symmetric matrices that are not
+        known to be definite, with \code{sytrf} and \code{sytrs} shaped
+        like \code{getrf} and \code{getrs} (pivots 0-based, increment
+        \code{incPiv}).
+\end{itemize}
+  The workspace convention of ulm.lam (\cref{sec:workspace}) is the one of
+  LAPACK-level routines: BLAS routines never need workspace, LAPACK
+  routines such as \code{getri} do.
+  A routine that calls other routines with a workspace answers a query
+  with the accumulated requirement of its own temporaries and of its
+  callees.
+
+Everything the implemented kernel selection emits is already in ulmBLAS:
+\code{gemm}, \code{gemv}, \code{trlsm}/\code{trusm},
+\code{trlsv}/\code{trusv}, \code{geaxpy}, \code{gescal}, \code{potrf},
+\code{getrf} and \code{getrs}.
+
+\paragraph{Reference lowering.}
+\code{convert-ulm-lamk-to-linalg} (planned) lowers kernels without a library:
+\code{gemm} to \code{linalg.matmul}, triangular solves and factorisations
+to \code{scf} loops.
+Running it next to \code{convert-ulm-lamk-to-ulmblas} gives differential
+tests.
+
+\paragraph{Loops and temporaries.}\label{sec:loops}
+Consider matrix operations inside a loop:
+\[
+  \textbf{for } i = 0,\dots,n-1:\quad B = \mathrm{foo}(i),\quad
+  X \mathrel{+}= ABC .
+\]
+Suppose kernel selection chose $(AB)C$.
+The loop body is then a \code{gemm} into a temporary $T=AB$ with
+$\beta=0$, followed by a \code{gemm} $X = TC + X$ with $\beta=1$ into the
+loop-carried $X$.
+\file{examples/loop/} contains this loop, written with \code{ulm_lam} ops as
+a frontend would emit it (\cref{lst:loopin}).
+\code{ulm-lam-select-kernels} turns it into exactly these two gemms
+(\cref{lst:loopsel}).
+With upstream passes alone, the result then bufferizes badly:
+\begin{itemize}
+  \item One-Shot Bufferize allocates $T$ \emph{inside} the loop, and the
+        deallocation pass adds run-time ownership bookkeeping to every
+        iteration;
+  \item $\mathrm{foo}$ allocates $B$ itself, so $B$ is freed in every
+        iteration.
+        \code{buffer-results-to-out-params} rewrites only functions with a
+        body, and \code{foo} is external;
+  \item $X$ is returned by value.
+        Even with \code{modify-public-functions}, the result becomes a
+        separate out parameter, and the updated $X$ is copied into it after
+        the loop.
+        \code{drop-equivalent-buffer-results} skips public functions.
+\end{itemize}
+
+\paragraph{Matrices by reference.}
+\code{ulm-lam-results-to-out-params} fixes the calling convention before
+bufferization.
+It is implemented in \file{lib/UlmLamResultsToOutParams.cpp} and does two
+things:
+\begin{itemize}
+  \item $X = \mathrm{foo}(i)$ is rewritten into $\mathrm{foo}(i, X)$ with
+        $X$ passed by reference.
+        The external declaration gets one \code{memref} parameter per
+        matrix result and returns nothing.
+        Every call becomes a \code{memref.alloc}, the call
+        \code{foo(i, X)}, and a \code{bufferization.to_tensor restrict
+        writable} that makes the written buffer available to the tensor
+        program.
+        In C, this is the signature \code{void foo(size_t i, double *X)}
+        (EmitC maps \code{index} to \code{size_t});
+  \item a result marked \code{\{ulm_lam.inout = 2\}} is the updated value
+        of argument~2.
+        The argument becomes a \code{memref}, it is read once with
+        \code{to_tensor}, the final value is written back with
+        \code{bufferization.materialize_in_destination}, and the result is
+        dropped.
+        $X$ is updated in place through the reference.
+        Such functions must not be called inside the module; the pass
+        rejects that case with a diagnostic.
+\end{itemize}
+After this pass, the upstream passes \code{one-shot-bufferize},
+\code{buffer-loop-hoisting} and \code{buffer-deallocation-pipeline} place
+every buffer (\cref{lst:loopin,lst:loop}):
+\begin{itemize}
+  \item $B$ and $T$ get their buffers once, before the loop: after
+        \code{ulm-lam-workspace} they are two slots of the caller's workspace;
+  \item $X$ is updated in place;
+  \item the loop body contains only the four calls, with no allocation,
+        copy or deallocation.
+\end{itemize}
+\file{examples/loop/check.sh} (\code{make loop}) runs the pipeline and
+checks these properties.
+
+\paragraph{The loop in C++.}
+The loop example is lowered from \code{ulm_lam} ops to C++ calling ulmBLAS
+by passes alone (\file{scripts/ulm-lam-compile.sh}); there is no hand-written
+stage.
+\Cref{lst:loopc} shows the result: two calls of \code{ulmBLAS::gemm} per
+iteration, the second one with $\beta=1$ into $X$, and \code{foo} writing
+$B$ into memory that \code{accumulate} allocated and owns.
+\file{examples/loop/run.sh} (\code{make loop}) compiles it with
+\code{c++ -std=c++17 -Wall -Wextra -pedantic} (no warnings in the generated
+code), links it with a C driver that defines \code{foo}, and compares the
+result with naive C loops.
+For $n=500$ and 4 iterations (one run), it takes 13.2\,ms against
+118\,ms for the naive loops; the relative difference is
+$1.3\cdot10^{-15}$.
+The loop needs a 4\,MB workspace for $B$ and $T$.
+
+\begin{figure}[t]
+\lstinputlisting[style=mlir]{\src examples/loop/accumulate.mlir}
+\caption{The loop of \cref{sec:loops} as the frontend emits it
+(\file{examples/loop/accumulate.mlir}).}
+\label{lst:loopin}
+\end{figure}
+
+\begin{figure}[t]
+\IfFileExists{\src build/loop/accumulate.selected.mlir}{%
+  \lstinputlisting[style=mlir]{\src build/loop/accumulate.selected.mlir}}{%
+  \fbox{run \code{make loop} to generate this listing}}
+\caption{The loop of \cref{lst:loopin} after \code{ulm-lam-normalize},
+\code{ulm-lam-infer-properties}, \code{ulm-lam-select-kernels} and
+\code{ulm-lam-strip-properties}.
+The matrix chain chose $(AB)C$: the first gemm writes $T=AB$ into a new
+tensor ($\beta=0$, \texttt{\%cst}), the second accumulates $TC$ into the
+loop-carried $X$ (\texttt{\%arg5}, $\beta=1$, \texttt{\%cst\_0}).}
+\label{lst:loopsel}
+\end{figure}
+
+\begin{figure}[t]
+\IfFileExists{\src build/loop/accumulate.bufferized.mlir}{%
+  \lstinputlisting[style=mlir,basicstyle=\ttfamily\scriptsize]{\src build/loop/accumulate.bufferized.mlir}}{%
+  \fbox{run \code{make loop} to generate this listing}}
+\caption{The loop of \cref{lst:loopsel} after
+\code{ulm-lam-results-to-out-params}, One-Shot Bufferize,
+\code{buffer-loop-hoisting}, deallocation and \code{ulm-lam-workspace}
+(generated by \file{scripts/ulm-lam-compile.sh}).
+$B$ (\texttt{\%view}) and $T$ (\texttt{\%view\_1}) are slots of the
+workspace, set up before the \code{scf.for}; the \code{scf.if} around the
+body implements the workspace query and check.
+\code{foo} writes $B$ by reference, and $X$ (\texttt{\%arg2}) is updated
+in place.}
+\label{lst:loop}
+\end{figure}
+
+\begin{figure}[t]
+\IfFileExists{\src examples/loop/generated/accumulate.cpp}{%
+  \srcbetween[style=c]{\src examples/loop/generated/accumulate.cpp}{accumulate(double}{}{loopcpp}}{%
+  \fbox{run \code{make loop} to generate this listing}}
+\caption{The loop of \cref{lst:loopin} in C++, generated from the
+\code{ulm_lam} ops by kernel selection, \code{ulm-lam-results-to-out-params},
+upstream bufferization, \code{convert-ulm-lamk-to-ulmblas},
+\code{mlir-translate --mlir-to-cpp} and \code{clang-format}: the function
+\code{extern "C" void accumulate(...)}, without the \code{\#include}
+lines and the weak \code{ulm_lam_workspace_error} in front of it.
+$B$ (\texttt{v18}) and $T$ (\texttt{v20}) live in the workspace; \code{foo}
+writes $B$ by reference; $X$ (\texttt{v3}) is updated in place by the
+second \code{ulmBLAS::gemm} ($\beta=1$).}
+\label{lst:loopc}
+\end{figure}
+
+\paragraph{The full pipeline.}
+\file{scripts/ulm-lam-compile.sh} runs it in three steps and keeps every
+stage as a file:
+\begin{lstlisting}[style=sh]
+mlir-opt --load-dialect-plugin=UlmLamPasses.dylib \
+         --load-pass-plugin=UlmLamPasses.dylib --pass-pipeline='builtin.module(
+    func.func(ulm-lam-normalize, ulm-lam-infer-properties, ulm-lam-select-kernels),
+    ulm-lam-strip-properties, canonicalize,
+    ulm-lam-results-to-out-params,
+    one-shot-bufferize{bufferize-function-boundaries
+                       function-boundary-type-conversion=identity-layout-map},
+    buffer-results-to-out-params{hoist-static-allocs modify-public-functions},
+    func.func(buffer-loop-hoisting), buffer-deallocation-pipeline,
+    canonicalize, ulm-lam-workspace, canonicalize,
+    convert-ulm-lamk-to-ulmblas, reconcile-unrealized-casts, form-expressions)'
+mlir-translate --mlir-to-cpp gls.emitc.mlir -o gls.cpp
+clang-format -i gls.cpp
+c++ -std=c++17 -O3 -mcpu=native -isystem $ULMBLAS_DIR -c gls.cpp
+\end{lstlisting}
+\code{ARCHFLAGS} (default \code{-mcpu=native}) selects the micro kernels of
+ulmBLAS, e.g.\ \code{-mcpu=apple-m4} or \code{-mavx -mfma}.
+
+% =====================================================================
+\section{Worked example: generalised least squares}\label{sec:example}
+% =====================================================================
+
+The example is \cref{eq:gls} with $n=2000$ observations and $m=200$
+parameters.
+The five files in \file{examples/gls/} show the IR after each step.
+
+\paragraph{Stage 1: frontend output.}
+The frontend builds binary products left to right and shares nothing.
+Builders infer local properties: $M\inv$ is spd, $X\T$ is full rank.
+The binary product $(X\T M\inv)X$ is not yet known to be spd.
+\lstinputlisting{\src examples/gls/01-input.mlir}
+
+\paragraph{Stage 2: normal form.}
+Products are flattened, and the duplicated $X\T$ and $M\inv$ are shared.
+$X\T M\inv X$ is now recognised as spd by the rule $A\T P A$.
+\lstinputlisting{\src examples/gls/02-normal.mlir}
+
+\paragraph{Derivation.}
+\Cref{tab:derivation} shows Linnea's derivation, which stages 3 and 4
+spell out by hand, next to the one \code{ulm-lam-select-kernels} finds from
+stage~2 by itself.
+Both use Cholesky on $M$, which turns both occurrences of $M\inv$ into
+$L\invT L\inv$, compute $W=L\inv X$ once, form $S=W\T W$ from it (the
+common subexpression up to transposition), and reuse it for the
+right-hand side, $W\T z$ with $z=L\inv y$.
+$S$ is spd, so the second Cholesky factorisation turns $S\inv$ into
+solves.
+They differ in one place: ulm.lam forms $W\T W$ with \code{gemm}, because
+\code{syrk} defines only one triangle (\cref{sec:impl}).
+This costs $2\%$ more FLOPs.
+
+\begin{table}[t]
+\centering\small
+\begin{tabular}{@{}llr@{\quad}lr@{}}
+\toprule
+& \multicolumn{2}{c}{Linnea (stages 3, 4)} & \multicolumn{2}{c}{ulm.lam, \code{strategy=gmc}} \\
+Step & Kernel & FLOPs & Kernel & FLOPs \\
+\midrule
+$M=LL\T$ & \code{potrf} & $2.67\cdot10^9$ & \code{potrf} & $2.67\cdot10^9$ \\
+$W=L\inv X$ & \code{trsm} & $8.00\cdot10^8$ & \code{trsm} & $8.00\cdot10^8$ \\
+$S=W\T W$ & \code{syrk} & $8.00\cdot10^7$ & \code{gemm} & $1.60\cdot10^8$ \\
+$S=KK\T$ & \code{potrf} & $2.67\cdot10^6$ & \code{potrf} & $2.67\cdot10^6$ \\
+$c=W\T L\inv y$ & \code{trsv}, \code{gemv} & $4.80\cdot10^6$ & \code{trsv}, \code{gemv} & $4.80\cdot10^6$ \\
+$b=K\invT K\inv c$ & $2\times$\code{trsv} & $8.00\cdot10^4$ & $2\times$\code{trsv} & $8.00\cdot10^4$ \\
+\midrule
+total & & $3.55\cdot10^9$ & & $3.63\cdot10^9$ \\
+\bottomrule
+\end{tabular}
+\caption{The derivation for \cref{eq:gls}, with $n=2000$ and $m=200$.
+Evaluating \code{inv(X'*inv(M)*X)*X'*inv(M)*y} literally, with
+\code{getrf}+\code{getri} ($2n^3$) for each inverse, costs
+$1.78\cdot10^{10}$ FLOPs.}
+\label{tab:derivation}
+\end{table}
+
+\paragraph{Stage 3: kernels on tensors (design).}
+\lstinputlisting{\src examples/gls/03-kernels.mlir}
+
+\paragraph{Stage 4: bufferized (design).}
+Bufferization inserts exactly three copies, one for each overwritten
+input.
+$c$, $d$ and $b$ share the result buffer.
+\lstinputlisting{\src examples/gls/04-bufferized.mlir}
+
+\paragraph{Stage 5: generated.}
+\file{examples/gls/run.sh} compiles stage~2 with
+\file{scripts/ulm-lam-compile.sh}.
+\Cref{lst:glssel} shows the kernels that \code{ulm-lam-select-kernels}
+chooses, \cref{lst:glscpp} the C++ after bufferization and
+\code{convert-ulm-lamk-to-ulmblas}.
+Bufferization copies exactly $M$, $X$ and $y$, the inputs that kernels
+overwrite, and $b$ is written into the caller's buffer.
+In the C++, the solve with $K\T$ is \code{ulmBLAS::trusv} on the same
+factor $K$ with strides $(1, 200)$, and $W\T$ is the same pointer as $W$
+with strides $(1, 200)$, in the \code{gemm} for $W\T W$ and in the
+\code{gemv} for $W\T z$.
+
+\begin{figure}[tbp]
+\IfFileExists{\src build/gls/gls.selected.mlir}{%
+  \lstinputlisting[style=mlir]{\src build/gls/gls.selected.mlir}}{%
+  \fbox{run \code{make gls} to generate this listing}}
+\caption{GLS after \code{ulm-lam-select-kernels}, generated from stage~2.}
+\label{lst:glssel}
+\end{figure}
+
+\begin{figure}[tbp]
+\IfFileExists{\src examples/gls/generated/gls.cpp}{%
+  \srcbetween[style=c]{\src examples/gls/generated/gls.cpp}{gls(double}{}{glscpp}}{%
+  \fbox{run \code{make gls} to generate this listing}}
+\caption{GLS in C++ calling ulmBLAS, generated from stage~2: the
+function \code{extern "C" void gls(...)}, without the \code{\#include}
+lines and the helpers in front of it (\code{ulm_lam_potrf}, the info check of
+\cref{sec:ulmblas}, and the weak \code{ulm_lam_workspace_error}).  The outer
+\code{if}s implement the workspace convention (\cref{sec:workspace}).}
+\label{lst:glscpp}
+\end{figure}
+
+\paragraph{Results.}
+\file{driver.cc} uses ulmBLAS for everything:
+\begin{itemize}
+  \item it builds a random $X$, an spd $M=AA\T+nI$ and a random $y$;
+  \item it calls the generated \code{gls};
+  \item it verifies the result through the normal equations
+        $X\T M\inv(Xb-y)=0$, with $M\inv$ applied by an independent LU
+        solve (\code{getrf}, \code{getrs});
+  \item it compares against a literal evaluation with explicit inverses
+        (\code{getrf}, \code{getri}, \code{gemm}, \code{gemv}).
+\end{itemize}
+\Cref{tab:results} shows the outcome.
+The speedup ($3.7\times$) is smaller than the FLOP ratio ($4.9\times$):
+the explicit version consists of large \code{gemm}-like operations that
+run at about 140\,GFLOP/s (billions of floating-point operations per
+second), while the Cholesky factorisation and the triangular solves of
+the derived version run at about 110\,GFLOP/s.
+
+\begin{table}[t]
+\centering\small
+\begin{tabular}{@{}lr@{}}
+\toprule
+Kernel sequence chosen by ulm.lam & 29.6\,ms \\
+Explicit inverses (same library) & 110.3\,ms \\
+Speedup & $3.7\times$ \\
+Relative residual $\|X\T M\inv(Xb-y)\|/\|X\T M\inv y\|$ & $1.2\cdot10^{-15}$ \\
+$\|b-b_{\text{inv}}\|/\|b\|$ & $2.7\cdot10^{-15}$ \\
+\bottomrule
+\end{tabular}
+\caption{The generated GLS code on an Apple M5 (10 cores), ulmBLAS with
+\code{-mcpu=native}, best of 5 runs after warm-up.}
+\label{tab:results}
+\end{table}
+
+% =====================================================================
+\section{Formula (1) in a loop: a Kalman measurement update}\label{sec:kalman}
+% =====================================================================
+
+In applications, \cref{eq:gls} is rarely evaluated once.
+A sensor array with observation matrix $H$ ($n=2000$ sensors, $m=200$
+states) and noise covariance $R$ (spd, correlated) delivers a new
+measurement $y_i$ in every time step, and the estimate
+\[
+  b_i = (H\T R\inv H)\inv H\T R\inv y_i
+\]
+is needed in every step.
+This is the measurement update of a Kalman filter in information form,
+$b=(P\inv+H\T R\inv H)\inv(P\inv b_{\text{prior}}+H\T R\inv y)$, with an
+uninformative prior ($P\inv=0$).
+\file{examples/kalman/estimate.mlir} writes the formula inside the loop,
+as on paper (\cref{lst:kalmanin}).
+
+\begin{figure}[t]
+\srcbetween[style=mlir]{\src examples/kalman/estimate.mlir}{func.func private @observe}{}{kalmanin}
+\caption{Formula (1) in a loop (\file{examples/kalman/estimate.mlir},
+without the header comment and the type aliases).
+\code{observe} delivers $y_i$, \code{record} consumes $b_i$.}
+\label{lst:kalmanin}
+\end{figure}
+
+Only $y_i$ changes from step to step, so the pipeline has to do three
+things, all of which it does without help:
+\begin{itemize}
+  \item \code{loop-invariant-code-motion}, an upstream pass, runs before
+        kernel selection and hoists the \code{ulm_lam} ops that do not depend
+        on $y_i$ out of the loop.
+        They are \code{Pure}, so this is safe.
+  \item Kernel selection factorises $R$ and $S$ right after their
+        definitions, i.e.\ before the loop, and reuses $W=L\inv H$, which
+        it computes for $S=W\T W$, for $H\T R\inv y_i = W\T(L\inv y_i)$ in
+        the loop.
+  \item \code{ulm-lam-results-to-out-params} turns $y_i=\mathrm{observe}(i)$
+        into $\mathrm{observe}(i, y)$, and \code{buffer-loop-hoisting}
+        moves the buffers of $y$ and $b$ out of the loop.
+\end{itemize}
+The loop body that results (\cref{lst:kalmanloop}) consists of one
+triangular solve with the $2000\times2000$ factor $L$, one \code{gemv}
+with $W$ and two triangular solves with the $200\times200$ factor $K$:
+$n^2+2nm+2m^2 \approx 4.9\cdot10^6$ FLOPs per step, against
+$3.6\cdot10^9$ for evaluating the formula from scratch.
+\file{examples/kalman/check.sh} checks this structure.
+
+\begin{figure}[t]
+\srcbetween[style=c]{\src examples/kalman/generated/estimate.cpp}{for (size_t}{free(}{kalmanloop}
+\caption{The loop body of the generated C++ (\file{scripts/ulm-lam-compile.sh}
+on \cref{lst:kalmanin}).  The factorisations, $W$ and $S$ are computed
+before the loop.}
+\label{lst:kalmanloop}
+\end{figure}
+
+\file{examples/kalman/driver.cc} compares five versions
+(\cref{tab:kalman}).
+Every version is timed with 200 steps and with 0 steps (its one-time part),
+best of 3; the table shows the one-time part, the time per step, and the
+total for 20 steps.
+\begin{itemize}
+  \item \emph{ulm.lam}: the pipeline.
+  \item \emph{ulm.lam without \code{loop-invariant-code-motion}}: $R$ is still
+        factorised once (it is a function argument), but $S$ is formed and
+        factorised in every step.
+  \item \emph{explicit inverses}: formula (1) evaluated literally in every
+        step, with \code{getrf} and \code{getri}.
+        This is the same input ulm.lam gets, so the difference to ulm.lam is
+        mostly the hoisting that ulm.lam does by itself.
+  \item \emph{explicit, hoisted}: written by hand: the invariant inverses
+        $R\inv$ and $S\inv$ once before the loop, two \code{gemv} per step.
+  \item \emph{operator $G$, hoisted}: written by hand: the operator
+        $G=(H\T R\inv H)\inv H\T R\inv$ ($200\times2000$) once, one
+        \code{gemv} per step.
+\end{itemize}
+Every estimate is checked through the normal equations with an
+independent LU solve, and all versions agree.
+
+\begin{table}[t]
+\centering\small
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+& before the loop & per step & 20 steps & \\
+\midrule
+ulm.lam & 32.8\,ms & 0.55\,ms & 43.8\,ms & $1\times$ \\
+ulm.lam without \code{loop-invariant-code-motion} & 25.2\,ms & 7.78\,ms & 180.9\,ms & $4.1\times$ \\
+explicit inverses in every step & 0.2\,ms & 118.9\,ms & 2378.5\,ms & $54\times$ \\
+explicit inverses, hoisted by hand & 122.7\,ms & 0.13\,ms & 125.3\,ms & $2.9\times$ \\
+operator $G$, hoisted by hand & 111.1\,ms & 0.22\,ms & 115.6\,ms & $2.6\times$ \\
+\midrule
+worst normal-equation residual over all steps & \multicolumn{4}{r}{$1.0\cdot10^{-15}$} \\
+largest relative difference between the versions & \multicolumn{4}{r}{$2.1\cdot10^{-15}$} \\
+\bottomrule
+\end{tabular}
+\caption{Formula (1) in a loop, $n=2000$, $m=200$, on an Apple M5,
+ulmBLAS with \code{-mcpu=native}.  The time per step includes
+\code{observe}, which computes $Hx_i$ plus noise.}
+\label{tab:kalman}
+\end{table}
+
+The hand-hoisted versions pay more before the loop (the explicit inverse
+of the $2000\times2000$ matrix $R$) and less per step: one or two
+\code{gemv} instead of a triangular solve with the $2000\times2000$ factor
+$L$.
+They are faster than ulm.lam from about 210 to 240 steps on; the FLOP count
+predicts the same: forming $G$ once (with solves) costs about
+$10^9$\,FLOPs and saves about $4\cdot10^6$ per step.
+So ulm.lam's choice is right for short runs and wrong for long ones.
+The fix belongs into kernel selection: in a loop, a product can be split
+into a loop-invariant subchain ($G$, computed before the loop, with
+solves rather than explicit inverses) and the rest, and the decision
+depends on the trip count.
+The trip count is known only at run time here, so this needs a hint or a
+run-time choice between two versions; it is not implemented yet.
+
+\subsection{The covariance changes in every step}\label{sec:adaptive}
+
+In many applications the noise covariance itself changes: it is
+re-estimated online (an adaptive filter), or the noise of the sensors
+drifts.
+\file{examples/kalman/adaptive.mlir} carries $R$ through the loop and
+updates it in every step by calling an external function
+(\cref{lst:adaptivein}):
+\[
+  R_i = \mathrm{update\_covariance}(i, R_{i-1}),\qquad
+  b_i = (H\T R_i\inv H)\inv H\T R_i\inv y_i .
+\]
+
+\begin{figure}[t]
+\srcbetween[style=mlir]{\src examples/kalman/adaptive.mlir}{// update_covariance(i, R) updates}{}{adaptivein}
+\caption{The covariance updated in every step
+(\file{examples/kalman/adaptive.mlir}, without the header comment and the
+type aliases).}
+\label{lst:adaptivein}
+\end{figure}
+
+\paragraph{In-place updates by reference.}
+The result of \code{update_covariance} is marked
+\code{\{ulm_lam.inout = 1\}}: the function updates its argument~1 in place.
+This extends the by-reference convention of \cref{sec:ulmblas} to
+external functions that modify a matrix.
+\code{ulm-lam-results-to-out-params} turns the declaration into
+\code{void update_covariance(size_t, double *)} and every call into
+\code{ulm_lamk.call @update_covariance(\%i) outs(\%R)}.
+That op is in destination-passing style, like the kernels, so One-Shot
+Bufferize keeps the loop-carried $R$ in one buffer.
+A plain call that returns a new matrix would not work here: the loop
+would have to yield a new allocation in every step, and deallocating it
+needs ownership bookkeeping at run time.
+If the matrix is still used after the call, the call updates a copy, so
+value semantics are preserved.
+\code{ulm_lamk.call} reads and writes memory as far as the compiler knows, so
+it is never hoisted, duplicated or removed.
+
+\paragraph{What runs in every step.}
+Now $R_i\inv$ changes in every step, so the Cholesky factorisation of
+$R_i$, $W=L_i\inv H$, $S=W\T W$ and its factorisation must run in every
+step; only what depends on $H$ alone could stay outside.
+Kernel selection still shares the factorisation of $R_i$ between both
+occurrences of $R_i\inv$ and reuses $W$ for $H\T R_i\inv y_i$
+(\cref{lst:adaptiveloop}).
+Bufferization copies $R_i$ before the in-place factorisation and $H$
+before the in-place solve; the caller's $R_0$
+is copied once, before the loop, into the workspace and is not
+overwritten.
+There is no allocation inside the loop.
+
+The two copies are necessary with in-place kernels.
+$R_i$ has two consumers: \code{potrf} overwrites it, and the next call of
+\code{update_covariance} reads all of it, so $R_i$ must exist twice.
+$H$ is needed in every step, and \code{trsm} overwrites its right-hand
+side.
+A copy followed by the in-place kernel is what an out-of-place variant
+($L := \mathrm{chol}(A)$, $W := L\inv H$) would do; ulm.lam generates it
+inline where an input is still needed, so ulmBLAS keeps only the in-place
+kernels.
+With the factorisation at about 25\,ms per step, the copies are a small
+part of the time.
+
+\begin{figure}[t]
+\srcbetween[style=c]{\src examples/kalman/generated/adaptive.cpp}{for (size_t}{free(}{adaptiveloop}
+\caption{The loop body generated from \cref{lst:adaptivein}: an in-place
+update of $R$, two copies, two Cholesky factorisations, one
+\code{trlsm}, and the solves of \cref{lst:kalmanloop}.}
+\label{lst:adaptiveloop}
+\end{figure}
+
+\file{examples/kalman/driver_adaptive.cc} defines an
+\code{update_covariance} that moves $R$ towards a base covariance and
+changes the noise level with the step, which keeps $R$ spd.
+Over 10 steps, ulm.lam's version takes 338\,ms (34\,ms per step, dominated by
+the Cholesky factorisation of the $2000\times2000$ matrix $R_i$),
+against 1177\,ms for formula (1) with explicit inverses on the same
+covariances ($3.5\times$).
+Its workspace is 67.5\,MB: the copy of $R$ that is updated in place,
+the factor $L_i$, $W$, $S$, $y_i$ and $b_i$.
+The worst normal-equation residual over all steps is
+$9.8\cdot10^{-16}$, and both versions agree to $2.1\cdot10^{-15}$.
+
+A full Kalman filter also updates the state covariance $P$ and predicts
+with the state transition.
+In information form the measurement update is a sum,
+$P\inv \leftarrow P\inv + H\T R\inv H$, so it needs inverses as terms of
+sums and the identity matrix, which kernel selection does not handle yet.
+
+% =====================================================================
+\section{Python frontend}\label{sec:python}
+% =====================================================================
+
+\code{python/ulm/lam/} lets the linear algebra be written in Python and
+compiled by ulm.lam (\cref{lst:pykalman}): \code{from ulm import lam}.
+It has two parts: a frontend that turns Python into \code{ulm_lam} IR, and
+a runtime that compiles it and calls the result.
+
+\begin{figure}[t]
+\srcbetween[style=py]{\src python/examples/kalman.py}{observe = lam.extern}{def best(}{pykalman}
+\caption{Formula (1) in a loop, in Python (from
+\file{python/examples/kalman.py}).  \code{observe} and \code{record} are
+external functions, implemented in Python by callbacks.}
+\label{lst:pykalman}
+\end{figure}
+
+\paragraph{The language.}
+A function decorated with \code{@lam.function} is traced: it is called with
+symbolic values, and the Python operators build \code{ulm_lam} operations
+(\code{@} is \code{ulm_lam.mul}, \code{+} and \code{-} are \code{ulm_lam.add},
+a number times a matrix is \code{ulm_lam.scale}, \code{.T} is
+\code{ulm_lam.transpose}, \code{.inv} is \code{ulm_lam.inverse}).
+\begin{itemize}
+  \item Parameters have types with properties: \code{Matrix(n, n, "spd")},
+        \code{Vector(n)}, \code{Index}.
+        Intermediate results get their properties from
+        \code{ulm-lam-infer-properties}.
+  \item Parameters have intents: a matrix is \code{in} by default;
+        \code{InOut(Matrix(...))} may be overwritten, and with
+        \code{lam.update(param, value)} it holds \code{value} on exit.
+        Return values are \code{out}.
+  \item \code{with lam.loop(n, carry=[X]) as L:} is a loop with
+        loop-carried matrices (\code{L.carried}, \code{L.next(...)},
+        \code{L.results}); the formula can be written inside the loop, and
+        \code{loop-invariant-code-motion} and kernel selection move what does
+        not depend on the loop out of it.
+  \item \code{lam.extern(name, params, result, updates=k,
+        workspace=True)} declares an external function; a lamp function
+        can also call another one, and their workspaces accumulate.
+  \item Shapes are checked while tracing: a dimension mismatch, or a loop
+        value used outside its loop, is a Python exception at the line that
+        causes it.
+\end{itemize}
+The frontend writes the IR as text in the syntax of the dialects; it needs
+neither the MLIR Python bindings nor any package beyond the Python standard
+library.
+
+\paragraph{The runtime.}
+\code{lam.compile(functions)} writes the module, runs
+\file{scripts/ulm-lam-compile.sh}, and compiles the C++ with ulmBLAS into a
+shared library, which it loads with \code{ctypes}.
+An unchanged program reuses its library, so recompiling is only needed
+after a change.
+Each function of the library is a Python callable whose signature comes
+from the interface comment the compiler generates
+(\cref{sec:workspace}):
+\begin{itemize}
+  \item \code{in} matrices are any C-contiguous \code{float64} buffer of
+        the right size (NumPy arrays, \code{array.array}, nested lists);
+        other layouts are copied;
+  \item \code{inout} matrices must be writable and C-contiguous, because
+        the function may overwrite them;
+  \item \code{out} matrices are allocated by the runtime and returned
+        (NumPy arrays if NumPy is installed);
+  \item the workspace is queried (\code{workspace_info = -1}) and
+        allocated by the runtime.
+\end{itemize}
+The generated C++ is available from Python: \code{lib.estimate.cpp} is
+the code of one function, with its interface comment, and
+\code{lib.source} the whole file; the examples print it.
+External functions can be implemented in Python
+(\code{lib.bind(observe=..., record=...)}).
+The compiler generates a C trampoline for each of them; matrix arguments
+reach the callback as NumPy views of the caller's memory (or memoryviews),
+a returned matrix is copied into the caller's buffer, and an exception in a
+callback is raised again when the compiled function returns.
+
+\paragraph{Results.}
+\file{python/examples/kalman.py} runs the loop of \cref{lst:pykalman}
+with $n=4000$ sensors, $m=200$ states and 20 steps, measurements and
+estimates passing through Python callbacks, and compares it with NumPy
+(linked to OpenBLAS):
+
+\begin{center}
+\small
+\begin{tabular}{@{}lr@{}}
+\toprule
+ulm.lam (generated C++, ulmBLAS) & 194.5\,ms \\
+NumPy, the formula as written in the loop & 16515.6\,ms \\
+NumPy, the operator $G$ computed by hand before the loop & 266.1\,ms \\
+\midrule
+relative difference to NumPy & $4.4\cdot10^{-15}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+Written as on paper, the Python program is faster than the version a
+NumPy programmer optimises by hand ($1.4\times$), and 85 times faster than
+the formula written literally.
+\file{python/tests/test_lam.py} (19 tests, \code{make python}) checks
+GLS with lists, buffers and NumPy arrays, \code{inout} parameters, loops
+with carried matrices and callbacks, functions calling functions, two
+results, NumPy layouts, exceptions in callbacks, and the errors of the
+frontend.
+
+\paragraph{The adaptive filter in Python.}
+\file{python/examples/adaptive_kalman.py} is the adaptive filter of
+\cref{sec:adaptive}: the covariance $R$ is carried through the loop and
+updated in place in every step by \code{update_covariance}, declared
+with \code{updates=1} and implemented in Python, where it changes $R$
+through a NumPy view of the generated code's memory
+(\cref{lst:pyadaptive}).
+
+\begin{figure}[t]
+\srcbetween[style=py]{\src python/examples/adaptive_kalman.py}{update_covariance = lam.extern}{def main(}{pyadaptive}
+\caption{The adaptive filter in Python (from
+\file{python/examples/adaptive_kalman.py}): $R$ is loop-carried and updated
+in place by an external function, a Python callback.}
+\label{lst:pyadaptive}
+\end{figure}
+
+With $n=4000$, $m=200$ and 10 steps the Cholesky factorisation of $R_i$
+dominates, and nothing expensive can move out of the loop.
+NumPy has no Cholesky solve, so the best one can write by hand is one LU
+solve per step for $[H, y_i]$:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lr@{}}
+\toprule
+ulm.lam (generated C++, ulmBLAS) & 1758.7\,ms \\
+NumPy, the formula as written in the loop & 8099.1\,ms \\
+NumPy, one LU solve per step, by hand & 2888.8\,ms \\
+\midrule
+relative difference to NumPy & $7.9\cdot10^{-15}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+ulm.lam is $1.6\times$ faster than the hand-written NumPy version
+(Cholesky instead of LU, and $W=L_i\inv H$ reused for $H\T R_i\inv y_i$)
+and $4.6\times$ faster than the formula as written.
+All three times include the Python callback that updates $R$ ($O(n^2)$
+per step), and the caller's $R_0$ (an \code{in} parameter) is not
+overwritten.
+
+% =====================================================================
+\section{Testing strategy}
+% =====================================================================
+
+\begin{itemize}
+  \item \textbf{Per pass}: \code{lit}/\code{FileCheck} tests on textual IR.
+        Properties are part of the types, so tests of inference rules are
+        one-liners.
+  \item \textbf{Property soundness}: random matrices that satisfy the
+        input properties are generated, every inferred property is
+        evaluated numerically, and the test fails on any property that
+        does not hold.
+        This catches wrong inference rules, the most dangerous class of
+        bug.
+  \item \textbf{Numerical} (implemented): every example is compiled to
+        C++ and compared with an independent evaluation.
+        \file{examples/cases/} covers the LU solve, plain and transposed,
+        upper triangular solves, right solves with $L\inv$ and $L\invT$,
+        a Cholesky solve with a vector, a sum of three plain terms and
+        $A\inv BC + D$, against naive triple loops and Gaussian
+        elimination; all agree to $\le 6\cdot10^{-16}$.
+        It also checks that inputs passed by value are unchanged.
+  \item \textbf{Structural} (implemented, scripts): kernel selection and
+        memory placement are checked on the generated IR, e.g.\ two
+        Cholesky factorisations and three copies for GLS, no allocation in
+        the loop.
+  \item \textbf{Differential}: \code{convert-ulm-lamk-to-linalg} against
+        \code{convert-ulm-lamk-to-ulmblas}.
+  \item \textbf{Quality}: the LAMP benchmark~\cite{lamp-paper}
+        (\url{https://github.com/HPAC/LAMP_benchmark}) and Linnea's 25
+        application problems.
+        Each derivation is compared against Linnea's FLOP count and
+        run time.
+\end{itemize}
+
+% =====================================================================
+\section{Status and plan}
+% =====================================================================
+
+\paragraph{Done.}
+\begin{itemize}
+  \item ODS for both dialects, interfaces and passes, checked by all
+        \code{mlir-tblgen} backends, and a kernel catalogue whose TableGen
+        syntax is checked;
+  \item the \code{ulm_lam} and \code{ulm_lamk} dialects, generated from the
+        ODS and loaded into \code{mlir-opt} as a plugin: property
+        inference, relaxed type compatibility, verifiers, canonicalisation
+        patterns, kernel costs and bufferization;
+  \item \code{ulm-lam-normalize}, \code{ulm-lam-infer-properties},
+        \code{ulm-lam-select-kernels} with \code{strategy=gmc} including
+        inverses, factorisations, solves, $Z\T Z$ and sums
+        (\cref{sec:impl}), and \code{ulm-lam-strip-properties};
+  \item parameter intents \code{in}, \code{inout}, \code{out}, and a
+        generated comment that documents them for the caller;
+  \item \code{ulm-lam-results-to-out-params}: matrices by reference, the
+        caller owns them ($X=\mathrm{foo}(i)$ becomes
+        $\mathrm{foo}(i,X)$, in/out results are updated in place, also by
+        external functions via \code{ulm_lamk.call}, inputs passed by value
+        are read-only);
+  \item \code{ulm-lam-workspace}: temporaries from a caller-provided
+        workspace (query, allocate, or check), with queries accumulated over
+        calls of generated and external functions;
+  \item \code{convert-ulm-lamk-to-ulmblas} for all kernels kernel selection
+        emits;
+  \item the Python frontend and runtime (\code{from ulm import lam}):
+        tracing, loops, external functions as Python callbacks,
+        workspaces, NumPy or plain buffers;
+  \item GLS from its normal form, formula (1) in a loop (with a constant
+        and with an updated covariance), the loop example and eight kernel
+        selection cases, compiled to C++ with
+        ulmBLAS by passes alone and verified numerically; the hand-written
+        GLS stages 1–4 parse and verify.
+\end{itemize}
+
+\paragraph{Plan.}
+\begin{enumerate}[label=M\arabic*]
+  \item \emph{Largely done.} Dialects, verifiers, property closure and
+        inference.
+        Missing: a CMake build with a \code{ulm-lam-opt} tool and
+        \code{lit} tests in place of the scripts.
+  \item \emph{Partly done.} \code{ulm-lam-normalize} lacks pushing
+        transposes and inverses to the leaves and hoisting scales.
+  \item \emph{Done for what kernel selection emits.} \code{ulm_lamk} with DPS,
+        bufferization and the ulmBLAS lowering.
+        Missing: lowerings of \code{symm}, \code{trmm}, \code{syrk}.
+  \item \emph{Partly done.} \code{strategy=gmc} with gemm, gemv, solves,
+        factorisations and $Z\T Z$.
+        Missing: \code{syrk}/\code{gemmtr} for $Z\T Z$ (tracking which
+        triangle a consumer reads), and the catalogue backend, so that new
+        kernels are added as records.
+  \item \code{strategy=search}: sharing across products beyond reuse of
+        computed intervals, factorisation choices, anytime search; the LAMP
+        benchmark; a full Kalman filter (\cref{sec:kalman}).
+  \item Loop-aware selection: split loop-invariant subchains off products
+        (the operator $G$ of \cref{sec:kalman}) depending on the trip count.
+  \item \emph{Done for Python} (\cref{sec:python}): a frontend that
+        traces Python to \code{ulm_lam} IR, with a runtime and callbacks.
+        Open: \code{strategy=egraph} experiments; QR and $LDL\T$ once
+        ulmBLAS has them (\cref{sec:ulmblas}); dynamic sizes in the
+        frontend.
+\end{enumerate}
+
+\paragraph{Open questions.}
+\begin{itemize}
+  \item Dynamic sizes: should the compiler use size hints or
+        multi-version code with run-time dispatch?
+  \item Cost model: FLOPs mispredict memory-bound kernels.
+        Measured per-kernel efficiency (\code{cost-model=measured}) is the
+        obvious next step.
+  \item Should storage formats (packed triangular, banded) become a second
+        encoding dimension, or a separate type?
+  \item Batched and tensor contractions: should \code{ulm_lam} be
+        generalised, or interoperate with \code{linalg}?
+\end{itemize}
+
+% =====================================================================
+\appendix
+\section{Generated code}\label{app:generated}
+% =====================================================================
+
+\code{make} compiles every example with \file{scripts/ulm-lam-compile.sh}
+and keeps the C++ in \file{examples/*/generated/}.
+The files are reproduced here in full, as generated (EmitC's variable
+names, formatted with \code{clang-format}).
+
+\newcommand{\generated}[2]{%
+  \subsection{\texorpdfstring{\code{#1}}{#1}}
+  #2
+  \IfFileExists{\src #1}{%
+    \lstinputlisting[style=c,basicstyle=\ttfamily\scriptsize]{\src #1}}{%
+    \fbox{run \code{make} to generate this file}}}
+
+\generated{examples/gls/generated/gls.cpp}{Generalised least squares from
+its normal form (\cref{sec:example}).}
+\generated{examples/gls/generated/gls_inout.cpp}{GLS with $M$ and $y$
+declared \code{inout} (\cref{sec:ulmblas}).}
+\generated{examples/loop/generated/accumulate.cpp}{$X \mathrel{+}= ABC$ in a
+loop (\cref{sec:loops}).}
+\generated{examples/kalman/generated/estimate.cpp}{Formula (1) in a loop with
+a constant covariance (\cref{sec:kalman}).}
+\generated{examples/kalman/generated/adaptive.cpp}{Formula (1) in a loop with
+the covariance updated in every step (\cref{sec:adaptive}).}
+\generated{examples/compose/generated/compose.cpp}{Functions with workspaces
+calling functions with workspaces (\cref{sec:workspace}).}
+\generated{examples/cases/generated/cases.cpp}{The kernel selection cases
+of \file{examples/cases/cases.mlir}.}
+
+% =====================================================================
+\begin{thebibliography}{99}\small
+\bibitem{lamp-paper} C.~Psarras, H.~Barthels, P.~Bientinesi.
+  The Linear Algebra Mapping Problem. Current state of linear algebra
+  languages and libraries. \emph{ACM TOMS}, 2022.
+  \href{https://doi.org/10.1145/3549935}{doi:10.1145/3549935}.
+\bibitem{linnea-toms} H.~Barthels, C.~Psarras, P.~Bientinesi.
+  Linnea: Automatic generation of efficient linear algebra programs.
+  \emph{ACM TOMS}, 2021.
+\bibitem{linnea-thesis} H.~Barthels.
+  \emph{Linnea: A compiler for mapping linear algebra problems onto
+  high-performance kernel libraries}. PhD thesis, RWTH Aachen, 2022.
+  \href{https://doi.org/10.18154/RWTH-2023-01193}{doi:10.18154/RWTH-2023-01193}.
+\bibitem{gmc} H.~Barthels, M.~Copik, P.~Bientinesi.
+  The generalized matrix chain algorithm. \emph{CGO}, 2018.
+\bibitem{matchpy} M.~Krebber, H.~Barthels.
+  MatchPy: Pattern matching in Python. \emph{JOSS}, 2018.
+\bibitem{tfpt} A.~Sankaran, N.~A.~Alashti, C.~Psarras, P.~Bientinesi.
+  Benchmarking the linear algebra awareness of TensorFlow and PyTorch.
+  \href{https://arxiv.org/abs/2202.09888}{arXiv:2202.09888}, 2022.
+\bibitem{mom} L.~Chelini, H.~Barthels, P.~Bientinesi, M.~Copik,
+  T.~Grosser, D.~G.~Spampinato.
+  MOM: Matrix operations in MLIR.
+  \href{https://arxiv.org/abs/2208.10391}{arXiv:2208.10391}, 2022.
+\bibitem{mlir} C.~Lattner et al.
+  MLIR: Scaling compiler infrastructure for domain specific computation.
+  \emph{CGO}, 2021.
+\bibitem{egg} M.~Willsey et al.
+  egg: Fast and extensible equality saturation. \emph{POPL}, 2021.
+\bibitem{egglog} Y.~Zhang et al.
+  Better together: Unifying Datalog and equality saturation.
+  \emph{PLDI}, 2023.
+\bibitem{spores} Y.~R.~Wang, S.~Hutchison, J.~Leang, B.~Howe, D.~Suciu.
+  SPORES: Sum-product optimization via relational equality saturation
+  for large scale linear algebra. \emph{PVLDB}, 2020.
+\bibitem{eqsat} eqsat: An equality saturation dialect for non-destructive
+  rewriting. \emph{EGRAPHS}, 2025.
+  \href{https://arxiv.org/abs/2505.09363}{arXiv:2505.09363}.
+\bibitem{dialegg} DialEgg: Dialect-agnostic MLIR optimizer using equality
+  saturation with egglog. \emph{CGO}, 2025.
+  \href{https://doi.org/10.1145/3696443.3708957}{doi:10.1145/3696443.3708957}.
+\bibitem{flens} M.~Lehn, A.~Stippler, K.~Urban.
+  FLENS -- A flexible library for efficient numerical solutions.
+  \emph{Proceedings of Equadiff 11}, 2005.
+  \url{https://www.dml.cz/bitstream/handle/10338.dmlcz/700445/Equadiff_11-2005-2_55.pdf}.
+\bibitem{flens-github} M.~Lehn.
+  FLENS: Flexible Library for Efficient Numerical Solutions.
+  \url{https://github.com/michael-lehn/FLENS}.
+\bibitem{ulmblas} M.~Lehn.
+  ulmBLAS: a BLAS implementation in C++.
+  \url{https://github.com/michael-lehn/ulmBLAS}.
+\bibitem{lapis} LAPIS: A performance portable, high productivity compiler
+  framework. 2025.
+  \href{https://arxiv.org/abs/2509.25605}{arXiv:2509.25605}.
+\end{thebibliography}
+
+\end{document}
