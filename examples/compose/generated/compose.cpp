@@ -7,13 +7,15 @@
 #include <ulmblas/ulmblas.h>
 template <typename T>
 static void
-ulm_lam_potrf(bool lower, int n, T *A, int incRow, int incCol, bool checked)
+ulm_lam_potrf(bool lower, std::ptrdiff_t n, T *A, std::ptrdiff_t incRow,
+              std::ptrdiff_t incCol, bool checked)
 {
-    int info = ulmBLAS::potrf(lower, n, A, incRow, incCol);
+    std::ptrdiff_t info = ulmBLAS::potrf(lower, n, A, incRow, incCol);
     if (checked && info != 0) {
 	std::fprintf(
 	    stderr,
-	    "ulm_lam: matrix is not positive definite (potrf info %d)\n", info);
+	    "ulm_lam: matrix is not positive definite (potrf info %td)\n",
+	    info);
 	std::abort();
     }
 }
@@ -43,19 +45,19 @@ postprocess(size_t, double *, int8_t *, int64_t *);
 extern "C" void
 gls(double *v1, double *v2, double *v3, double *v4, int8_t *v5, int64_t *v6)
 {
-    double v7 = 1.00000000000000000e+00;
-    double v8 = 0.0e+00;
-    int64_t v9 = 0;
-    int64_t v10 = 35536000;
+    int64_t v7 = 35536000;
+    double v8 = 1.00000000000000000e+00;
+    double v9 = 0.0e+00;
+    int64_t v10 = 0;
     size_t v11 = 0;
     int64_t v12 = v6[v11];
     if (v12 == -1) {
-	v6[v11] = v10;
+	v6[v11] = v7;
     } else {
-	if (v12 > v9 & v12 < v10) {
-	    ulm_lam_workspace_error(v10, v12);
+	if (v12 > v10 & v12 < v7) {
+	    ulm_lam_workspace_error(v7, v12);
 	} else {
-	    bool v13 = v12 == v9;
+	    bool v13 = v12 == v10;
 	    int8_t *v14;
 	    if (v13) {
 		void *v15 = aligned_alloc(64, 35536000);
@@ -73,18 +75,20 @@ gls(double *v1, double *v2, double *v3, double *v4, int8_t *v5, int64_t *v6)
 	    int64_t v21 = (int64_t)32320000;
 	    double *v22 = (double *)(v16 + v21);
 	    memcpy(v22, v1, 3200000);
-	    ulmBLAS::trlsm(2000, 200, v7, false, false, v18, 2000, 1, v22, 200,
-	                   1);
-	    ulmBLAS::gemm(200, 200, 2000, v7, false, v22, 1, 200, false, v22,
-	                  200, 1, v8, v20, 200, 1);
+	    ulmBLAS::trlsm<std::ptrdiff_t>(2000, 200, v8, false, false, v18,
+	                                   2000, 1, v22, 200, 1);
+	    ulmBLAS::gemm<std::ptrdiff_t>(200, 200, 2000, v8, false, v22, 1,
+	                                  200, false, v22, 200, 1, v9, v20, 200,
+	                                  1);
 	    ulm_lam_potrf(true, 200, v20, 200, 1, true);
 	    int64_t v23 = (int64_t)35520000;
 	    double *v24 = (double *)(v16 + v23);
 	    memcpy(v24, v3, 16000);
-	    ulmBLAS::trlsv(2000, false, v18, 2000, 1, v24, 1);
-	    ulmBLAS::gemv(200, 2000, v7, v22, 1, 200, v24, 1, v8, v4, 1);
-	    ulmBLAS::trlsv(200, false, v20, 200, 1, v4, 1);
-	    ulmBLAS::trusv(200, false, v20, 1, 200, v4, 1);
+	    ulmBLAS::trlsv<std::ptrdiff_t>(2000, false, v18, 2000, 1, v24, 1);
+	    ulmBLAS::gemv<std::ptrdiff_t>(200, 2000, v8, v22, 1, 200, v24, 1,
+	                                  v9, v4, 1);
+	    ulmBLAS::trlsv<std::ptrdiff_t>(200, false, v20, 200, 1, v4, 1);
+	    ulmBLAS::trusv<std::ptrdiff_t>(200, false, v20, 1, 200, v4, 1);
 	    if (v13) {
 		free(v16);
 	    }
@@ -128,58 +132,56 @@ estimate_all(double *v1, double *v2, size_t v3, int8_t *v4, int64_t *v5)
     uint64_t v27 = (uint64_t)v26;
     uint64_t v28 = (uint64_t)17600;
     int64_t v29 = (int64_t)(v27 + v28);
-    int64_t v30 = (int64_t)v10;
-    double *v31 = (double *)(v4 + v30);
     v5[v10] = v9;
-    postprocess(v10, v31, v4, v5);
-    int64_t v32 = v5[v10];
-    uint64_t v33 = (uint64_t)v32;
-    uint64_t v34 = (uint64_t)v8;
-    int64_t v35 = (int64_t)(v33 + v34);
-    uint64_t v36 = (uint64_t)v35;
-    uint64_t v37 = (uint64_t)v7;
-    int64_t v38 = (int64_t)(v36 & v37);
-    uint64_t v39 = (uint64_t)v29;
-    uint64_t v40 = (uint64_t)v38;
-    int64_t v41 = (int64_t)(v39 + v40);
+    postprocess(v10, v19, v4, v5);
+    int64_t v30 = v5[v10];
+    uint64_t v31 = (uint64_t)v30;
+    uint64_t v32 = (uint64_t)v8;
+    int64_t v33 = (int64_t)(v31 + v32);
+    uint64_t v34 = (uint64_t)v33;
+    uint64_t v35 = (uint64_t)v7;
+    int64_t v36 = (int64_t)(v34 & v35);
+    uint64_t v37 = (uint64_t)v29;
+    uint64_t v38 = (uint64_t)v36;
+    int64_t v39 = (int64_t)(v37 + v38);
     v5[v10] = v11;
     if (v11 == v9) {
-	v5[v10] = v41;
+	v5[v10] = v39;
     } else {
-	if (v11 > v6 & v11 < v41) {
-	    ulm_lam_workspace_error(v41, v11);
+	if (v11 > v6 & v11 < v39) {
+	    ulm_lam_workspace_error(v39, v11);
 	} else {
-	    bool v42 = v11 == v6;
-	    int8_t *v43;
-	    if (v42) {
-		ptrdiff_t v44 = (ptrdiff_t)v41;
-		size_t v45 = (size_t)v44;
-		void *v46 = aligned_alloc(64, v45);
-		v43 = (int8_t *)v46;
+	    bool v40 = v11 == v6;
+	    int8_t *v41;
+	    if (v40) {
+		ptrdiff_t v42 = (ptrdiff_t)v39;
+		size_t v43 = (size_t)v42;
+		void *v44 = aligned_alloc(64, v43);
+		v41 = (int8_t *)v44;
 	    } else {
-		v43 = v4;
+		v41 = v4;
 	    }
-	    int8_t *v47 = v43;
-	    int64_t v48 = (int64_t)v10;
-	    double *v49 = (double *)(v47 + v48);
-	    int64_t v50 = (int64_t)16000;
-	    double *v51 = (double *)(v47 + v50);
-	    for (size_t i52 = v10; i52 < v3; i52 += 1) {
-		observe(i52, v49);
-		int64_t v53 = (int64_t)17600;
-		int8_t *v54 = v47 + v53;
+	    int8_t *v45 = v41;
+	    int64_t v46 = (int64_t)v10;
+	    double *v47 = (double *)(v45 + v46);
+	    int64_t v48 = (int64_t)16000;
+	    double *v49 = (double *)(v45 + v48);
+	    for (size_t i50 = v10; i50 < v3; i50 += 1) {
+		observe(i50, v47);
+		int64_t v51 = (int64_t)17600;
+		int8_t *v52 = v45 + v51;
 		v5[v10] = v20;
-		gls(v1, v2, v49, v51, v54, v5);
-		ptrdiff_t v55 = (ptrdiff_t)v29;
-		size_t v56 = (size_t)v55;
-		int64_t v57 = (int64_t)v56;
-		int8_t *v58 = v47 + v57;
-		v5[v10] = v32;
-		postprocess(i52, v51, v58, v5);
+		gls(v1, v2, v47, v49, v52, v5);
+		ptrdiff_t v53 = (ptrdiff_t)v29;
+		size_t v54 = (size_t)v53;
+		int64_t v55 = (int64_t)v54;
+		int8_t *v56 = v45 + v55;
+		v5[v10] = v30;
+		postprocess(i50, v49, v56, v5);
 	    }
 	    v5[v10] = v11;
-	    if (v42) {
-		free(v47);
+	    if (v40) {
+		free(v45);
 	    }
 	}
     }

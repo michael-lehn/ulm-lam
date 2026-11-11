@@ -48,7 +48,22 @@
 //     so X is updated in place through the reference and never copied.
 //     Such functions must not have callers inside the module.
 //
-//  3. Tensor arguments of public functions (passed by value) are marked
+//  3. The other tensor results of public functions without callers in the
+//     module become out parameters (appended, attribute bufferize.result):
+//
+//       func.func @f(...) -> (tensor<?x1xf64> {ulm_lam.dims = [1]})
+//
+//     becomes
+//
+//       func.func @f(..., %b: memref<?x1xf64> {ulm_lam.dims = [1],
+//                                               bufferize.result})
+//       bufferization.materialize_in_destination %r in restrict writable %b
+//
+//     and eliminate-empty-tensors lets the kernel that computes the result
+//     write into %b directly (also for dynamic shapes, which
+//     buffer-results-to-out-params{hoist-static-allocs} cannot do).
+//
+//  4. Tensor arguments of public functions (passed by value) are marked
 //     bufferization.writable = false: the caller's matrix is never
 //     overwritten, bufferization copies where a kernel works in place.
 //
@@ -64,6 +79,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/SymbolTable.h"
+#include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/StringSet.h"
@@ -119,13 +135,110 @@ struct UlmLamResultsToOutParams
     runOnOperation() override
     {
 	ModuleOp module = getOperation();
-	if (failed(rewriteDeclarations(module)) || failed(rewriteInOut(module)))
+	if (failed(rewriteDeclarations(module)) ||
+	    failed(rewriteInOut(module)) || failed(rewriteResults(module)))
 	    return signalPassFailure();
 	if (failed(markIntents(module)))
 	    return signalPassFailure();
     }
 
-    // -- 3. parameter intents: in, inout, out --------------------------------
+    // -- 3. results of public functions --------------------------------------
+    /// The kernels that compute `result` update their destination in place
+    /// (a chain of DPS ops).  If the chain starts from a matrix other than a
+    /// new one (tensor.empty, which eliminate-empty-tensors replaces by the
+    /// out parameter), e.g. from a copy of a read-only argument B in
+    /// X = A^-1 B, the chain starts from a copy in the out parameter
+    /// instead: the solve then works in `out` and the final
+    /// materialize_in_destination is a copy to itself, which
+    /// canonicalisation removes.
+    static void
+    startInDestination(Value result, Value out)
+    {
+	Value v = result;
+	OpOperand *first = nullptr;
+	while (auto dps = v.getDefiningOp<DestinationStyleOpInterface>()) {
+	    OpOperand *init = dps.getTiedOpOperand(cast<OpResult>(v));
+	    if (!init)
+		break;
+	    first = init;
+	    v = init->get();
+	}
+	if (!first || v.getDefiningOp<tensor::EmptyOp>())
+	    return;
+	Operation *op = first->getOwner();
+	if (isa<ulm_lamk::CallOp>(op))
+	    return; // an external function updates its own argument
+	OpBuilder b(op);
+	Location loc = op->getLoc();
+	auto t = bufferization::ToTensorOp::create(b, loc, v.getType(), out);
+	t.setRestrict(true);
+	t.setWritable(true);
+	Value c = bufferization::MaterializeInDestinationOp::create(
+	              b, loc, v.getType(), v, t.getResult())
+	              .getResult();
+	first->set(c);
+    }
+
+    static LogicalResult
+    rewriteResults(ModuleOp module)
+    {
+	MLIRContext *ctx = module.getContext();
+	for (auto f : module.getOps<func::FuncOp>()) {
+	    if (f.isExternal() || f.isPrivate() || f.getNumResults() == 0)
+		continue;
+	    if (auto uses = SymbolTable::getSymbolUses(f, module);
+	        !uses || !uses->empty())
+		continue; // called in the module: buffer-results-to-out-params
+	    SmallVector<unsigned> results;
+	    for (unsigned j = 0, e = f.getNumResults(); j < e; ++j)
+		if (isa<RankedTensorType>(f.getResultTypes()[j]))
+		    results.push_back(j);
+	    if (results.empty())
+		continue;
+	    unsigned n = f.getNumArguments();
+	    SmallVector<unsigned> idx(results.size(), n);
+	    SmallVector<Type> types;
+	    SmallVector<DictionaryAttr> attrs;
+	    SmallVector<Location> locs(results.size(), f.getLoc());
+	    for (unsigned j : results) {
+		types.push_back(bufferTypeFor(f.getResultTypes()[j]));
+		NamedAttrList a;
+		a.set("bufferize.result", UnitAttr::get(ctx));
+		if (Attribute d = f.getResultAttr(j, ulm_lam::kDimsAttr))
+		    a.set(ulm_lam::kDimsAttr, d);
+		attrs.push_back(a.getDictionary(ctx));
+	    }
+	    if (failed(f.insertArguments(idx, types, attrs, locs)))
+		return f.emitError("cannot add out parameters");
+	    llvm::BitVector drop(f.getNumResults());
+	    for (unsigned j : results)
+		drop.set(j);
+	    SmallVector<func::ReturnOp> returns;
+	    f.walk([&](func::ReturnOp r) { returns.push_back(r); });
+	    for (func::ReturnOp ret : returns) {
+		OpBuilder rb(ret);
+		for (auto [k, j] : llvm::enumerate(results)) {
+		    Value out = f.getArgument(n + k);
+		    startInDestination(ret.getOperand(j), out);
+		    auto m = bufferization::MaterializeInDestinationOp::create(
+		        rb, ret.getLoc(), TypeRange{}, ret.getOperand(j), out);
+		    m.setRestrict(true);
+		    m.setWritable(true);
+		}
+		SmallVector<Value> kept;
+		for (unsigned j = 0, e = ret.getNumOperands(); j < e; ++j)
+		    if (!drop.test(j))
+			kept.push_back(ret.getOperand(j));
+		func::ReturnOp::create(rb, ret.getLoc(), kept);
+		ret.erase();
+	    }
+	    if (failed(f.eraseResults(drop)))
+		return f.emitError("cannot drop results");
+	}
+	return success();
+    }
+
+    // -- 4. parameter intents: in, inout, out --------------------------------
     //
     // As in LAPACK, a routine may overwrite the matrices it receives; here
     // the parameter list says so.  A matrix argument of a public function

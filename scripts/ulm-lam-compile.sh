@@ -19,11 +19,11 @@ opt() {
 		--load-pass-plugin="$PLUGIN" "$@"
 }
 SELECT="func.func(ulm-lam-normalize, ulm-lam-infer-properties${LICM-, loop-invariant-code-motion}, ulm-lam-select-kernels), ulm-lam-strip-properties, canonicalize"
-BUFFERIZE='ulm-lam-results-to-out-params,
+BUFFERIZE='ulm-lam-results-to-out-params, eliminate-empty-tensors,
 	one-shot-bufferize{bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map},
 	buffer-results-to-out-params{hoist-static-allocs modify-public-functions add-result-attr},
 	func.func(buffer-loop-hoisting), buffer-deallocation-pipeline, canonicalize,
-	ulm-lam-workspace, canonicalize'
+	ulm-lam-workspace, canonicalize, cse'
 LOWER='convert-ulm-lamk-to-ulmblas, reconcile-unrealized-casts, form-expressions'
 
 opt "$IN" --pass-pipeline="builtin.module($SELECT)" -o "$OUT.selected.mlir"

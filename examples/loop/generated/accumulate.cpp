@@ -29,19 +29,19 @@ extern "C" void
 accumulate(double *v1, double *v2, double *v3, size_t v4, int8_t *v5,
            int64_t *v6)
 {
-    double v7 = 1.00000000000000000e+00;
-    double v8 = 0.0e+00;
-    int64_t v9 = 0;
-    int64_t v10 = 4000000;
+    int64_t v7 = 4000000;
+    double v8 = 1.00000000000000000e+00;
+    double v9 = 0.0e+00;
+    int64_t v10 = 0;
     size_t v11 = 0;
     int64_t v12 = v6[v11];
     if (v12 == -1) {
-	v6[v11] = v10;
+	v6[v11] = v7;
     } else {
-	if (v12 > v9 & v12 < v10) {
-	    ulm_lam_workspace_error(v10, v12);
+	if (v12 > v10 & v12 < v7) {
+	    ulm_lam_workspace_error(v7, v12);
 	} else {
-	    bool v13 = v12 == v9;
+	    bool v13 = v12 == v10;
 	    int8_t *v14;
 	    if (v13) {
 		void *v15 = aligned_alloc(64, 4000000);
@@ -56,10 +56,12 @@ accumulate(double *v1, double *v2, double *v3, size_t v4, int8_t *v5,
 	    double *v20 = (double *)(v16 + v19);
 	    for (size_t i21 = v11; i21 < v4; i21 += 1) {
 		foo(i21, v18);
-		ulmBLAS::gemm(500, 500, 500, v7, false, v1, 500, 1, false, v18,
-		              500, 1, v8, v20, 500, 1);
-		ulmBLAS::gemm(500, 500, 500, v7, false, v20, 500, 1, false, v2,
-		              500, 1, v7, v3, 500, 1);
+		ulmBLAS::gemm<std::ptrdiff_t>(500, 500, 500, v8, false, v1, 500,
+		                              1, false, v18, 500, 1, v9, v20,
+		                              500, 1);
+		ulmBLAS::gemm<std::ptrdiff_t>(500, 500, 500, v8, false, v20,
+		                              500, 1, false, v2, 500, 1, v8, v3,
+		                              500, 1);
 	    }
 	    if (v13) {
 		free(v16);

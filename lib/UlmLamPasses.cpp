@@ -158,6 +158,17 @@ struct UlmLamInferProperties
 
 constexpr double kInf = std::numeric_limits<double>::infinity();
 
+/// The size assumed for a dynamic dimension when costs are compared at
+/// compile time.
+constexpr double kNominal = 1000;
+
+/// A dimension for the cost model.
+double
+costSize(int64_t d)
+{
+    return ShapedType::isDynamic(d) ? kNominal : static_cast<double>(d);
+}
+
 /// A factor of a product after inverses have been replaced by solves.
 struct Leaf
 {
@@ -312,10 +323,15 @@ class Selector
 	return arith::ConstantOp::create(b, loc, elt, b.getFloatAttr(elt, v));
     }
 
+    /// A new matrix with the rows of op(l) and the columns of op(r).
     Value
-    empty(int64_t m, int64_t n, Type elt, Location loc)
+    empty(const Leaf &l, const Leaf &r, Type elt, Location loc)
     {
-	return tensor::EmptyOp::create(b, loc, ArrayRef<int64_t>{m, n}, elt);
+	auto t = RankedTensorType::get({l.rows(), r.cols()}, elt);
+	FailureOr<SmallVector<Value>> sizes =
+	    dynamicSizes(b, loc, t, l.v, l.trans ? 1 : 0, r.v, r.trans ? 0 : 1);
+	assert(succeeded(sizes) && "dimensions checked by leavesOf");
+	return tensor::EmptyOp::create(b, loc, t, *sizes);
     }
 
     /// `v` = alpha * inner for constant alpha (ulm_lam.scale), else alpha = 1.
@@ -363,8 +379,10 @@ class Selector
 	    } else {
 		auto pivTy = RankedTensorType::get(
 		    {t.getDimSize(0)}, IntegerType::get(b.getContext(), 32));
-		Value piv = tensor::EmptyOp::create(b, loc, pivTy.getShape(),
-		                                    pivTy.getElementType());
+		SmallVector<Value> n;
+		if (pivTy.isDynamicDim(0))
+		    n.push_back(dimValue(b, loc, m, 0));
+		Value piv = tensor::EmptyOp::create(b, loc, pivTy, n);
 		auto getrf =
 		    lk::GetrfOp::create(b, loc, TypeRange{m.getType(), pivTy},
 		                        m, piv, /*checked=*/true);
@@ -408,10 +426,12 @@ class Selector
 	    }
 	}
 	auto t = cast<RankedTensorType>(v.getType());
-	if (!t.hasStaticShape())
-	    return user->emitError(
-	        "ulm-lam-select-kernels: dynamic shapes need "
-	        "ulm_lam.size_hint (not supported yet)");
+	for (unsigned d = 0; d < 2; ++d)
+	    if (!dimOf(v, d))
+		return user->emitError(
+		           "ulm-lam-select-kernels: unknown size of "
+		           "a dynamic dimension (missing ")
+		       << kDimsAttr << "?)";
 	if (!inv) {
 	    out.push_back({Leaf::Mat, v, {}, trans, true});
 	    return success();
@@ -478,7 +498,7 @@ class Selector
 	for (int len = 2; len <= k; ++len)
 	    for (int i = 0; i + len - 1 < k; ++i) {
 		int j = i + len - 1;
-		double m = L[i].rows(), n = L[j].cols();
+		double m = costSize(L[i].rows()), n = costSize(L[j].cols());
 		// computed by an earlier product (not the whole product: that
 		// would be a common subexpression, which CSE removes)
 		if (len < k) {
@@ -495,7 +515,7 @@ class Selector
 			continue;
 		}
 		for (int s = i; s < j; ++s) {
-		    double inner = L[s].cols();
+		    double inner = costSize(L[s].cols());
 		    // gemm / gemv of two computable parts
 		    if (c.cost[i][s] < kInf && c.cost[s + 1][j] < kInf)
 			consider(i, j,
@@ -523,7 +543,7 @@ class Selector
 		    for (int t = 0; t < len / 2 && mirror; ++t)
 			mirror = L[i + t].isTransposeOf(L[j - t]);
 		    if (mirror && c.cost[h][j] < kInf) {
-			double zr = L[h].rows();
+			double zr = costSize(L[h].rows());
 			double cost = c.cost[h][j] + 2 * n * zr * n;
 			if (cost < c.cost[i][j]) {
 			    c.cost[i][j] = cost;
@@ -597,7 +617,7 @@ class Selector
     {
 	Type elt = elementType(l.v);
 	if (!dest)
-	    dest = empty(l.rows(), r.cols(), elt, loc);
+	    dest = empty(l, r, elt, loc);
 	auto t = [](bool x) { return x ? lk::Trans::trans : lk::Trans::none; };
 	if (isVector(r.cols()) && !r.trans)
 	    return lk::GemvOp::create(b, loc, TypeRange{dest.getType()},
@@ -684,8 +704,14 @@ class Selector
 	Choice top = c.choice[0][k - 1];
 	if (!dest && (top.kind == Choice::Gemm || top.kind == Choice::Gram)) {
 	    auto t = cast<RankedTensorType>(mul.getType());
+	    FailureOr<SmallVector<Value>> sizes = dynamicSizes(
+	        b, mul.getLoc(), t, mul.getResult(), 0, mul.getResult(), 1);
+	    if (failed(sizes))
+		return mul.emitError("ulm-lam-select-kernels: unknown size of "
+		                     "the product");
 	    dest = tensor::EmptyOp::create(b, mul.getLoc(), t.getShape(),
-	                                   t.getElementType(), t.getEncoding());
+	                                   t.getElementType(), *sizes,
+	                                   t.getEncoding());
 	}
 	return emit(c, 0, k - 1, dest, alpha * c.alpha, beta, mul.getLoc());
     }

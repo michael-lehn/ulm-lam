@@ -52,6 +52,8 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 
+#include "llvm/ADT/ScopeExit.h"
+
 #include <array>
 #include <string>
 #include <vector>
@@ -63,7 +65,8 @@ namespace {
 
 constexpr int64_t kAlignment = 64;
 
-/// Static, identity layout, f32/f64 (rank 1/2) or i32 pivots (rank 1).
+/// Identity layout, f32/f64 (rank 1/2) or i32 pivots (rank 1); sizes may
+/// be dynamic (they are then function parameters, see ulm_lam::dimOf).
 bool
 isCArray(MemRefType t)
 {
@@ -73,8 +76,6 @@ isCArray(MemRefType t)
     // the workspace: a byte buffer of any size
     if (e.isInteger(8))
 	return t.getRank() == 1;
-    if (!t.hasStaticShape())
-	return false;
     if (e.isF64() || e.isF32())
 	return t.getRank() == 1 || t.getRank() == 2;
     // pivots, and *workspace_info
@@ -93,6 +94,39 @@ voidPtr(MLIRContext *ctx)
     return emitc::PointerType::get(emitc::OpaqueType::get(ctx, "void"));
 }
 
+/// The dynamic dimensions of the memref operands of kernels and copies,
+/// found before the conversion (which moves blocks, so that dimOf cannot
+/// trace values any more): (memref, dim) -> index value or constant.
+using DimTable = llvm::DenseMap<std::pair<Value, unsigned>, OpFoldResult>;
+DimTable *dimTable = nullptr; // set while the pass runs
+
+void
+collectDims(ModuleOp module, DimTable &table)
+{
+    module.walk([&](Operation *op) {
+	if (!isa<lk::UlmLamkDialect>(op->getDialect()) &&
+	    !isa<memref::CopyOp>(op))
+	    return;
+	for (Value v : op->getOperands())
+	    if (auto t = dyn_cast<MemRefType>(v.getType()))
+		for (unsigned d = 0, r = t.getRank(); d < r; ++d)
+		    if (t.isDynamicDim(d))
+			table[{v, d}] = ulm_lam::dimOf(v, d);
+    });
+}
+
+OpFoldResult
+lookupDim(Value v, unsigned d)
+{
+    auto t = cast<MemRefType>(v.getType());
+    if (!t.isDynamicDim(d))
+	return IntegerAttr::get(IndexType::get(v.getContext()),
+	                        t.getDimSize(d));
+    if (!dimTable)
+	return {};
+    return dimTable->lookup({v, d});
+}
+
 // ---- memory -------------------------------------------------------------
 
 struct AllocLowering : OpConversionPattern<memref::AllocOp>
@@ -103,8 +137,10 @@ struct AllocLowering : OpConversionPattern<memref::AllocOp>
                     ConversionPatternRewriter &rewriter) const override
     {
 	MemRefType t = op.getType();
-	if (!isCArray(t))
-	    return rewriter.notifyMatchFailure(op, "not a static C array");
+	if (!isCArray(t) ||
+	    (!t.hasStaticShape() && !t.getElementType().isInteger(8)))
+	    return rewriter.notifyMatchFailure(
+	        op, "not a static C array or a byte buffer");
 	MLIRContext *ctx = op.getContext();
 	int64_t align = std::max<int64_t>(
 	    op.getAlignment().value_or(kAlignment), kAlignment);
@@ -146,6 +182,24 @@ struct DeallocLowering : OpConversionPattern<memref::DeallocOp>
     }
 };
 
+/// x & mask on index values (size_t): the alignment of workspace parts.
+/// (arith-to-emitc converts bitwise ops only on integers.)
+struct IndexAndLowering : OpConversionPattern<arith::AndIOp>
+{
+    using OpConversionPattern::OpConversionPattern;
+    LogicalResult
+    matchAndRewrite(arith::AndIOp op, OpAdaptor a,
+                    ConversionPatternRewriter &rw) const override
+    {
+	if (!op.getType().isIndex())
+	    return rw.notifyMatchFailure(op, "not on index");
+	rw.replaceOpWithNewOp<emitc::BitwiseAndOp>(
+	    op, getTypeConverter()->convertType(op.getType()), a.getLhs(),
+	    a.getRhs());
+	return success();
+    }
+};
+
 // ---- the workspace ------------------------------------------------------
 
 /// A temporary in the workspace: (T *)(work + offset).
@@ -156,11 +210,9 @@ struct ViewLowering : OpConversionPattern<memref::ViewOp>
     matchAndRewrite(memref::ViewOp op, OpAdaptor a,
                     ConversionPatternRewriter &rw) const override
     {
-	// (a dynamic size only for byte buffers: the part of a callee)
-	if (!isCArray(op.getType()) ||
-	    (!op.getSizes().empty() &&
-	     !op.getType().getElementType().isInteger(8)))
-	    return rw.notifyMatchFailure(op, "not a static C array view");
+	// (the sizes are not needed: the view is a pointer)
+	if (!isCArray(op.getType()))
+	    return rw.notifyMatchFailure(op, "not a C array view");
 	// pointer arithmetic needs an integer offset (not size_t)
 	Value off = emitc::CastOp::create(rw, op.getLoc(), rw.getI64Type(),
 	                                  a.getByteShift());
@@ -233,90 +285,178 @@ struct CopyLowering : OpConversionPattern<memref::CopyOp>
                     ConversionPatternRewriter &rewriter) const override
     {
 	auto t = dyn_cast<MemRefType>(op.getSource().getType());
-	if (!isCArray(t) || t != op.getTarget().getType())
-	    return rewriter.notifyMatchFailure(op, "not a static C array copy");
+	if (!isCArray(t) ||
+	    !isCArray(dyn_cast<MemRefType>(op.getTarget().getType())))
+	    return rewriter.notifyMatchFailure(op, "not a C array copy");
+	if (t.hasStaticShape()) {
+	    rewriter.replaceOpWithNewOp<emitc::CallOpaqueOp>(
+	        op, TypeRange{}, "memcpy",
+	        ValueRange{adaptor.getTarget(), adaptor.getSource()},
+	        rewriter.getArrayAttr(
+	            {rewriter.getIndexAttr(0), rewriter.getIndexAttr(1),
+		     rewriter.getI64IntegerAttr(byteSize(t))}));
+	    return success();
+	}
+	// bytes = element size * rows * cols, with run-time dimensions
+	Location loc = op.getLoc();
+	Type sizeT = emitc::SizeTType::get(op.getContext());
+	Value bytes = emitc::ConstantOp::create(
+	    rewriter, loc, sizeT,
+	    emitc::OpaqueAttr::get(
+	        op.getContext(),
+	        std::to_string(t.getElementTypeBitWidth() / 8)));
+	for (unsigned d = 0, r = t.getRank(); d < r; ++d) {
+	    Value s;
+	    if (!t.isDynamicDim(d)) {
+		if (t.getDimSize(d) == 1)
+		    continue;
+		s = emitc::ConstantOp::create(
+		    rewriter, loc, sizeT,
+		    emitc::OpaqueAttr::get(op.getContext(),
+		                           std::to_string(t.getDimSize(d))));
+	    } else {
+		OpFoldResult r = lookupDim(op.getSource(), d);
+		if (!r)
+		    r = lookupDim(op.getTarget(), d);
+		if (!r || !isa<Value>(r))
+		    return rewriter.notifyMatchFailure(op, "unknown size");
+		s = rewriter.getRemappedValue(cast<Value>(r));
+	    }
+	    bytes = emitc::MulOp::create(rewriter, loc, sizeT, bytes, s);
+	}
 	rewriter.replaceOpWithNewOp<emitc::CallOpaqueOp>(
 	    op, TypeRange{}, "memcpy",
-	    ValueRange{adaptor.getTarget(), adaptor.getSource()},
-	    rewriter.getArrayAttr({rewriter.getIndexAttr(0),
-	                           rewriter.getIndexAttr(1),
-	                           rewriter.getI64IntegerAttr(byteSize(t))}));
+	    ValueRange{adaptor.getTarget(), adaptor.getSource(), bytes});
 	return success();
     }
 };
 
 // ---- kernels ------------------------------------------------------------
 
+/// The index type of all ulmBLAS calls (sizes, strides): ulmBLAS deduces
+/// it from the arguments, so it is named explicitly, e.g.
+/// ulmBLAS::gemm<std::ptrdiff_t>(...).
+#define kIndexType "<std::ptrdiff_t>"
+
+/// A size or stride argument: a literal, or a value (a dynamic dimension).
+struct Dim
+{
+    int64_t c = 0;
+    Value v; // converted (size_t) value if dynamic
+};
+
 /// op(M) of a row-major matrix (or n x 1 vector) operand in ulmBLAS terms.
 struct View
 {
-    int64_t rows, cols;     // of op(M)
-    int64_t incRow, incCol; // strides of op(M)
+    Dim rows, cols;     // of op(M)
+    Dim incRow, incCol; // strides of op(M)
 };
 
-View
-view(Value v, bool trans = false)
+/// Dimension `d` of the (original, not yet converted) memref `v`.
+Dim
+dimArg(ConversionPatternRewriter &rw, Value v, unsigned d)
 {
     auto t = cast<MemRefType>(v.getType());
-    int64_t r = t.getDimSize(0), c = t.getRank() == 2 ? t.getDimSize(1) : 1;
-    if (trans)
-	return {c, r, 1, c};
-    return {r, c, c, 1};
+    if (d >= static_cast<unsigned>(t.getRank()))
+	return {1, {}};
+    OpFoldResult r = lookupDim(v, d);
+    if (auto a = dyn_cast_if_present<Attribute>(r))
+	return {cast<IntegerAttr>(a).getInt(), {}};
+    if (!r)
+	return {-1, {}};
+    return {0, rw.getRemappedValue(cast<Value>(r))};
 }
 
-/// Argument builders and the call.
-template <typename OpT> struct KernelLowering : OpConversionPattern<OpT>
+View
+view(ConversionPatternRewriter &rw, Value v, bool trans = false)
 {
-    using OpConversionPattern<OpT>::OpConversionPattern;
-    using Rewriter = ConversionPatternRewriter;
+    Dim r = dimArg(rw, v, 0), c = dimArg(rw, v, 1);
+    if (trans)
+	return {c, r, {1, {}}, c};
+    return {r, c, c, {1, {}}};
+}
 
-    static Attribute
-    lit(Rewriter &rw, int64_t v)
-    {
-	return rw.getI32IntegerAttr(v);
-    }
-    static Attribute
-    arg(Rewriter &rw, int64_t i)
-    {
-	return rw.getIndexAttr(i);
-    }
-    static Attribute
-    flag(Rewriter &rw, bool b)
-    {
-	return emitc::OpaqueAttr::get(rw.getContext(), b ? "true" : "false");
-    }
+/// The arguments of a call: operands are referenced by position, the
+/// others are literals.
+struct Args
+{
+    ConversionPatternRewriter &rw;
+    SmallVector<Value> ops;
+    SmallVector<Attribute> attrs;
 
-    /// All shaped operands must be static row-major C arrays.
-    static bool
-    allCArrays(Operation *o)
+    Args &
+    op(Value v)
     {
-	return llvm::all_of(o->getOperands(), [](Value v) {
-	    return !isa<ShapedType>(v.getType()) ||
-	           isCArray(dyn_cast<MemRefType>(v.getType()));
-	});
+	attrs.push_back(rw.getIndexAttr(ops.size()));
+	ops.push_back(v);
+	return *this;
     }
-
-    static LogicalResult
-    call(Rewriter &rw, Operation *o, StringRef callee, ArrayRef<Value> operands,
-         ArrayRef<Attribute> args)
+    /// Sizes and strides.  The calls name IndexType = std::ptrdiff_t
+    /// explicitly (see kIndexType), so literals and size_t parameters
+    /// convert to it.
+    Args &
+    dim(const Dim &d)
     {
-	rw.replaceOpWithNewOp<emitc::CallOpaqueOp>(o, TypeRange{}, callee,
-	                                           ValueRange(operands),
-	                                           rw.getArrayAttr(args));
+	if (d.v)
+	    return op(d.v);
+	attrs.push_back(rw.getI32IntegerAttr(d.c));
+	return *this;
+    }
+    Args &
+    lit(int64_t v)
+    {
+	attrs.push_back(rw.getI32IntegerAttr(v));
+	return *this;
+    }
+    Args &
+    flag(bool b)
+    {
+	attrs.push_back(
+	    emitc::OpaqueAttr::get(rw.getContext(), b ? "true" : "false"));
+	return *this;
+    }
+    Args &
+    strides(const View &m)
+    {
+	return dim(m.incRow).dim(m.incCol);
+    }
+    LogicalResult
+    call(Operation *o, StringRef callee)
+    {
+	rw.replaceOpWithNewOp<emitc::CallOpaqueOp>(
+	    o, TypeRange{}, callee, ValueRange(ops), rw.getArrayAttr(attrs));
 	return success();
     }
 };
 
+/// All shaped operands must be row-major C arrays with known sizes.
+bool
+allCArrays(Operation *o)
+{
+    return llvm::all_of(o->getOperands(), [](Value v) {
+	auto t = dyn_cast<MemRefType>(v.getType());
+	if (!isa<ShapedType>(v.getType()))
+	    return true;
+	if (!isCArray(t))
+	    return false;
+	for (unsigned d = 0, r = t.getRank(); d < r; ++d)
+	    if (!lookupDim(v, d))
+		return false;
+	return true;
+    });
+}
+
 #define ULM_LAMK_LOWERING(NAME, OP)                                            \
-    struct NAME : KernelLowering<OP>                                           \
+    struct NAME : OpConversionPattern<OP>                                      \
     {                                                                          \
-	using KernelLowering::KernelLowering;                                  \
+	using OpConversionPattern::OpConversionPattern;                        \
+	using Rewriter = ConversionPatternRewriter;                            \
 	LogicalResult                                                          \
 	matchAndRewrite(OP o, OpAdaptor a, Rewriter &rw) const override        \
 	{                                                                      \
 	    if (!allCArrays(o))                                                \
 		return rw.notifyMatchFailure(                                  \
-		    o, "not on static row-major arrays");                      \
+		    o, "not on row-major arrays of known size");               \
 	    return lower(o, a, rw);                                            \
 	}                                                                      \
 	static LogicalResult                                                   \
@@ -324,118 +464,158 @@ template <typename OpT> struct KernelLowering : OpConversionPattern<OpT>
     };                                                                         \
     LogicalResult NAME::lower(OP o, OpAdaptor a, Rewriter &rw)
 
-// C := alpha op(A) op(B) + beta C        operands: alpha A B beta C
+// C := alpha op(A) op(B) + beta C
 ULM_LAMK_LOWERING(GemmLowering, lk::GemmOp)
 {
-    View A = view(o.getA(), o.getTransA() == lk::Trans::trans);
-    View B = view(o.getB(), o.getTransB() == lk::Trans::trans);
-    View C = view(o.getC());
-    SmallVector<Value> ops{a.getAlpha(), a.getA(), a.getB(), a.getBeta(),
-                           a.getC()};
-    return call(rw, o, "ulmBLAS::gemm", ops,
-                {lit(rw, C.rows), lit(rw, C.cols), lit(rw, A.cols), arg(rw, 0),
-                 flag(rw, false), arg(rw, 1), lit(rw, A.incRow),
-                 lit(rw, A.incCol), flag(rw, false), arg(rw, 2),
-                 lit(rw, B.incRow), lit(rw, B.incCol), arg(rw, 3), arg(rw, 4),
-                 lit(rw, C.incRow), lit(rw, C.incCol)});
+    View A = view(rw, o.getA(), o.getTransA() == lk::Trans::trans);
+    View B = view(rw, o.getB(), o.getTransB() == lk::Trans::trans);
+    View C = view(rw, o.getC());
+    return Args{rw}
+        .dim(C.rows)
+        .dim(C.cols)
+        .dim(A.cols)
+        .op(a.getAlpha())
+        .flag(false)
+        .op(a.getA())
+        .strides(A)
+        .flag(false)
+        .op(a.getB())
+        .strides(B)
+        .op(a.getBeta())
+        .op(a.getC())
+        .strides(C)
+        .call(o, "ulmBLAS::gemm" kIndexType);
 }
 
-// y := alpha op(A) x + beta y            operands: alpha A x beta y
+// y := alpha op(A) x + beta y
 ULM_LAMK_LOWERING(GemvLowering, lk::GemvOp)
 {
-    View A = view(o.getA(), o.getTrans() == lk::Trans::trans);
-    SmallVector<Value> ops{a.getAlpha(), a.getA(), a.getX(), a.getBeta(),
-                           a.getY()};
-    return call(rw, o, "ulmBLAS::gemv", ops,
-                {lit(rw, A.rows), lit(rw, A.cols), arg(rw, 0), arg(rw, 1),
-                 lit(rw, A.incRow), lit(rw, A.incCol), arg(rw, 2), lit(rw, 1),
-                 arg(rw, 3), arg(rw, 4), lit(rw, 1)});
+    View A = view(rw, o.getA(), o.getTrans() == lk::Trans::trans);
+    return Args{rw}
+        .dim(A.rows)
+        .dim(A.cols)
+        .op(a.getAlpha())
+        .op(a.getA())
+        .strides(A)
+        .op(a.getX())
+        .lit(1)
+        .op(a.getBeta())
+        .op(a.getY())
+        .lit(1)
+        .call(o, "ulmBLAS::gemv" kIndexType);
 }
 
 // B := alpha op(A)^-1 B (left) or alpha B op(A)^-1 (right)
-//                                        operands: alpha A B
 ULM_LAMK_LOWERING(TrsmLowering, lk::TrsmOp)
 {
     bool trans = o.getTrans() == lk::Trans::trans;
     bool left = o.getSide() == lk::Side::left;
     // right: B op(A)^-1 = (op(A)^-T B^T)^T, a left solve on transposed views
     bool t = left ? trans : !trans;
-    View A = view(o.getA(), t), B = view(o.getB(), !left);
+    View A = view(rw, o.getA(), t), B = view(rw, o.getB(), !left);
     bool lower = (o.getUplo() == lk::Uplo::lower) != t;
-    SmallVector<Value> ops{a.getAlpha(), a.getA(), a.getB()};
-    return call(rw, o, lower ? "ulmBLAS::trlsm" : "ulmBLAS::trusm", ops,
-                {lit(rw, B.rows), lit(rw, B.cols), arg(rw, 0), flag(rw, false),
-                 flag(rw, o.getDiag() == lk::Diag::unit), arg(rw, 1),
-                 lit(rw, A.incRow), lit(rw, A.incCol), arg(rw, 2),
-                 lit(rw, B.incRow), lit(rw, B.incCol)});
+    return Args{rw}
+        .dim(B.rows)
+        .dim(B.cols)
+        .op(a.getAlpha())
+        .flag(false)
+        .flag(o.getDiag() == lk::Diag::unit)
+        .op(a.getA())
+        .strides(A)
+        .op(a.getB())
+        .strides(B)
+        .call(o, lower ? "ulmBLAS::trlsm" kIndexType
+                       : "ulmBLAS::trusm" kIndexType);
 }
 
-// x := op(A)^-1 x                        operands: A x
+// x := op(A)^-1 x
 ULM_LAMK_LOWERING(TrsvLowering, lk::TrsvOp)
 {
     bool t = o.getTrans() == lk::Trans::trans;
-    View A = view(o.getA(), t);
+    View A = view(rw, o.getA(), t);
     bool lower = (o.getUplo() == lk::Uplo::lower) != t;
-    SmallVector<Value> ops{a.getA(), a.getX()};
-    return call(rw, o, lower ? "ulmBLAS::trlsv" : "ulmBLAS::trusv", ops,
-                {lit(rw, A.rows), flag(rw, o.getDiag() == lk::Diag::unit),
-                 arg(rw, 0), lit(rw, A.incRow), lit(rw, A.incCol), arg(rw, 1),
-                 lit(rw, 1)});
+    return Args{rw}
+        .dim(A.rows)
+        .flag(o.getDiag() == lk::Diag::unit)
+        .op(a.getA())
+        .strides(A)
+        .op(a.getX())
+        .lit(1)
+        .call(o, lower ? "ulmBLAS::trlsv" kIndexType
+                       : "ulmBLAS::trusv" kIndexType);
 }
 
-// Y := alpha X + Y                       operands: alpha X Y
+// Y := alpha X + Y
 ULM_LAMK_LOWERING(GeaxpyLowering, lk::GeaxpyOp)
 {
-    View X = view(o.getX()), Y = view(o.getY());
-    SmallVector<Value> ops{a.getAlpha(), a.getX(), a.getY()};
-    return call(rw, o, "ulmBLAS::geaxpy", ops,
-                {lit(rw, Y.rows), lit(rw, Y.cols), arg(rw, 0), arg(rw, 1),
-                 lit(rw, X.incRow), lit(rw, X.incCol), arg(rw, 2),
-                 lit(rw, Y.incRow), lit(rw, Y.incCol)});
+    View X = view(rw, o.getX()), Y = view(rw, o.getY());
+    return Args{rw}
+        .dim(Y.rows)
+        .dim(Y.cols)
+        .op(a.getAlpha())
+        .op(a.getX())
+        .strides(X)
+        .op(a.getY())
+        .strides(Y)
+        .call(o, "ulmBLAS::geaxpy" kIndexType);
 }
 
-// X := alpha X                           operands: alpha X
+// X := alpha X
 ULM_LAMK_LOWERING(GescalLowering, lk::GescalOp)
 {
-    View X = view(o.getX());
-    SmallVector<Value> ops{a.getAlpha(), a.getX()};
-    return call(rw, o, "ulmBLAS::gescal", ops,
-                {lit(rw, X.rows), lit(rw, X.cols), arg(rw, 0), arg(rw, 1),
-                 lit(rw, X.incRow), lit(rw, X.incCol)});
+    View X = view(rw, o.getX());
+    return Args{rw}
+        .dim(X.rows)
+        .dim(X.cols)
+        .op(a.getAlpha())
+        .op(a.getX())
+        .strides(X)
+        .call(o, "ulmBLAS::gescal" kIndexType);
 }
 
-// A = L L^T in place                     operands: A
+// A = L L^T in place
 ULM_LAMK_LOWERING(PotrfLowering, lk::PotrfOp)
 {
-    View A = view(o.getA());
-    SmallVector<Value> ops{a.getA()};
-    return call(rw, o, "ulm_lam_potrf", ops,
-                {flag(rw, o.getUplo() == lk::Uplo::lower), lit(rw, A.rows),
-                 arg(rw, 0), lit(rw, A.incRow), lit(rw, A.incCol),
-                 flag(rw, o.getChecked())});
+    View A = view(rw, o.getA());
+    return Args{rw}
+        .flag(o.getUplo() == lk::Uplo::lower)
+        .dim(A.rows)
+        .op(a.getA())
+        .strides(A)
+        .flag(o.getChecked())
+        .call(o, "ulm_lam_potrf");
 }
 
-// P A = L U in place                     operands: A ipiv
+// P A = L U in place
 ULM_LAMK_LOWERING(GetrfLowering, lk::GetrfOp)
 {
-    View A = view(o.getA());
-    SmallVector<Value> ops{a.getA(), a.getIpiv()};
-    return call(rw, o, "ulm_lam_getrf", ops,
-                {lit(rw, A.rows), lit(rw, A.cols), arg(rw, 0),
-                 lit(rw, A.incRow), lit(rw, A.incCol), arg(rw, 1),
-                 flag(rw, o.getChecked())});
+    View A = view(rw, o.getA());
+    return Args{rw}
+        .dim(A.rows)
+        .dim(A.cols)
+        .op(a.getA())
+        .strides(A)
+        .op(a.getIpiv())
+        .flag(o.getChecked())
+        .call(o, "ulm_lam_getrf");
 }
 
-// B := op(A)^-1 B with the LU factors    operands: LU ipiv B
+// B := op(A)^-1 B with the LU factors
 ULM_LAMK_LOWERING(GetrsLowering, lk::GetrsOp)
 {
-    View A = view(o.getLU()), B = view(o.getB());
-    SmallVector<Value> ops{a.getLU(), a.getIpiv(), a.getB()};
-    return call(rw, o, "ulmBLAS::getrs", ops,
-                {flag(rw, o.getTrans() == lk::Trans::trans), flag(rw, false),
-                 lit(rw, A.rows), lit(rw, B.cols), arg(rw, 0),
-                 lit(rw, A.incRow), lit(rw, A.incCol), arg(rw, 1), lit(rw, 1),
-                 arg(rw, 2), lit(rw, B.incRow), lit(rw, B.incCol)});
+    View A = view(rw, o.getLU()), B = view(rw, o.getB());
+    return Args{rw}
+        .flag(o.getTrans() == lk::Trans::trans)
+        .flag(false)
+        .dim(A.rows)
+        .dim(B.cols)
+        .op(a.getLU())
+        .strides(A)
+        .op(a.getIpiv())
+        .lit(1)
+        .op(a.getB())
+        .strides(B)
+        .call(o, "ulmBLAS::getrs" kIndexType);
 }
 
 #undef ULM_LAMK_LOWERING
@@ -463,11 +643,12 @@ struct CallLowering : OpConversionPattern<lk::CallOp>
 
 const char *kPotrf = R"(template <typename T>
 static void
-ulm_lam_potrf(bool lower, int n, T *A, int incRow, int incCol, bool checked)
+ulm_lam_potrf(bool lower, std::ptrdiff_t n, T *A, std::ptrdiff_t incRow,
+              std::ptrdiff_t incCol, bool checked)
 {
-    int info = ulmBLAS::potrf(lower, n, A, incRow, incCol);
+    std::ptrdiff_t info = ulmBLAS::potrf(lower, n, A, incRow, incCol);
     if (checked && info != 0) {
-        std::fprintf(stderr, "ulm_lam: matrix is not positive definite (potrf info %d)\n", info);
+        std::fprintf(stderr, "ulm_lam: matrix is not positive definite (potrf info %td)\n", info);
         std::abort();
     }
 })";
@@ -485,11 +666,13 @@ ulm_lam_workspace_error(int64_t required, int64_t given)
 
 const char *kGetrf = R"(template <typename T>
 static void
-ulm_lam_getrf(int m, int n, T *A, int incRow, int incCol, int32_t *piv, bool checked)
+ulm_lam_getrf(std::ptrdiff_t m, std::ptrdiff_t n, T *A, std::ptrdiff_t incRow,
+              std::ptrdiff_t incCol, int32_t *piv, bool checked)
 {
-    int info = ulmBLAS::getrf(m, n, A, incRow, incCol, piv, 1);
+    std::ptrdiff_t info = ulmBLAS::getrf(m, n, A, incRow, incCol, piv,
+                                         std::ptrdiff_t(1));
     if (checked && info != 0) {
-        std::fprintf(stderr, "ulm_lam: matrix is singular (getrf info %d)\n", info);
+        std::fprintf(stderr, "ulm_lam: matrix is singular (getrf info %td)\n", info);
         std::abort();
     }
 })";
@@ -538,11 +721,19 @@ describe(func::FuncOp f)
 		what = work ? "workspace (bytes)"
 		            : "-1: query, 0: allocate, >0: size of work";
 	    } else {
-		if (m.hasStaticShape())
-		    for (int64_t d : m.getShape())
-			type += "[" + std::to_string(d) + "]";
-		else
-		    type += " *";
+		auto dims = dyn_cast_if_present<ArrayAttr>(
+		    f.getArgAttr(i, ulm_lam::kDimsAttr));
+		unsigned k = 0;
+		for (int64_t d : m.getShape()) {
+		    std::string s = "?";
+		    if (!ShapedType::isDynamic(d))
+			s = std::to_string(d);
+		    else if (dims && k < dims.size())
+			s = "v" +
+			    std::to_string(
+			        cast<IntegerAttr>(dims[k++]).getInt() + 1);
+		    type += "[" + s + "]";
+		}
 		if (has("bufferize.result")) {
 		    intent = "out";
 		    what = "written";
@@ -615,6 +806,12 @@ struct ConvertUlmLamkToUlmBLAS
     {
 	ModuleOp module = getOperation();
 	MLIRContext *ctx = &getContext();
+	// sizes as function parameters, not queries of buffers
+	ulm_lam::resolveDimOps(module);
+	DimTable dims;
+	collectDims(module, dims);
+	dimTable = &dims;
+	llvm::scope_exit reset([] { dimTable = nullptr; });
 
 	// The by-reference convention: no function returns a matrix.
 	bool returnsMatrix = false;
@@ -666,10 +863,11 @@ struct ConvertUlmLamkToUlmBLAS
 
 	RewritePatternSet patterns(ctx);
 	patterns.add<AllocLowering, DeallocLowering, CopyLowering, ViewLowering,
-	             CastLowering, LoadLowering, StoreLowering, GemmLowering,
-	             GemvLowering, TrsmLowering, TrsvLowering, GeaxpyLowering,
-	             GescalLowering, PotrfLowering, GetrfLowering,
-	             GetrsLowering, CallLowering>(tc, ctx);
+	             CastLowering, LoadLowering, StoreLowering,
+	             IndexAndLowering, GemmLowering, GemvLowering, TrsmLowering,
+	             TrsvLowering, GeaxpyLowering, GescalLowering,
+	             PotrfLowering, GetrfLowering, GetrsLowering, CallLowering>(
+	    tc, ctx);
 	populateArithToEmitCPatterns(tc, patterns);
 	populateSCFToEmitCConversionPatterns(patterns, tc);
 	populateFuncToEmitCPatterns(tc, patterns, /*lowerToCpp=*/true);

@@ -10,6 +10,9 @@
 #include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Bufferization/IR/DstBufferizableOpInterfaceImpl.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/Matchers.h"
@@ -966,4 +969,192 @@ mlir::ulm_lam::registerBufferizationModels(DialectRegistry &registry)
 	attachAll<GemmOp, SymmOp, TrmmOp, TrsmOp, SyrkOp, GemvOp, TrsvOp,
 	          PotrfOp, GetrfOp, GetrsOp, GeaxpyOp, GescalOp, CallOp>(ctx);
     });
+}
+
+//===----------------------------------------------------------------------===//
+// Dynamic dimensions
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+/// Position of dimension `i` among the dynamic dimensions of `t`.
+unsigned
+dynamicIndex(ShapedType t, unsigned i)
+{
+    unsigned k = 0;
+    for (unsigned d = 0; d < i; ++d)
+	k += ShapedType::isDynamic(t.getDimSize(d));
+    return k;
+}
+
+/// Dimension `i` of a value declared with `ulm_lam.dims = [...]`: the
+/// corresponding operand of `args`.
+Value
+fromDimsAttr(Attribute attr, ShapedType t, unsigned i, ValueRange args)
+{
+    auto dims = dyn_cast_if_present<ArrayAttr>(attr);
+    unsigned k = dynamicIndex(t, i);
+    if (!dims || k >= dims.size())
+	return {};
+    auto pos = dyn_cast<IntegerAttr>(dims[k]);
+    if (!pos || pos.getInt() < 0 ||
+        static_cast<size_t>(pos.getInt()) >= args.size())
+	return {};
+    return args[pos.getInt()];
+}
+
+} // namespace
+
+OpFoldResult
+mlir::ulm_lam::dimOf(Value v, unsigned i)
+{
+    auto t = dyn_cast<ShapedType>(v.getType());
+    if (!t || i >= static_cast<unsigned>(t.getRank()))
+	return {};
+    if (!t.isDynamicDim(i))
+	return IntegerAttr::get(IndexType::get(v.getContext()),
+	                        t.getDimSize(i));
+    if (auto arg = dyn_cast<BlockArgument>(v)) {
+	Operation *parent = arg.getOwner()->getParentOp();
+	if (!parent)
+	    return {};
+	if (auto f = dyn_cast<FunctionOpInterface>(parent))
+	    return fromDimsAttr(f.getArgAttr(arg.getArgNumber(), kDimsAttr), t,
+	                        i, arg.getOwner()->getArguments());
+	if (auto loop = dyn_cast<scf::ForOp>(parent))
+	    if (OpOperand *init = loop.getTiedLoopInit(arg))
+		return dimOf(init->get(), i);
+	return {};
+    }
+    Operation *def = v.getDefiningOp();
+    unsigned r = cast<OpResult>(v).getResultNumber();
+    // ulm_lam ops: from their operands
+    if (auto m = dyn_cast<MulOp>(def)) {
+	Value f = i == 0 ? m.getFactors().front() : m.getFactors().back();
+	return dimOf(f, i);
+    }
+    if (auto a = dyn_cast<AddOp>(def)) {
+	for (Value term : a.getTerms())
+	    if (OpFoldResult d = dimOf(term, i))
+		return d;
+	return {};
+    }
+    if (auto tr = dyn_cast<TransposeOp>(def))
+	return dimOf(tr.getOperand(), 1 - i);
+    if (auto inv = dyn_cast<InverseOp>(def))
+	return dimOf(inv.getOperand(), i);
+    if (auto sc = dyn_cast<ScaleOp>(def))
+	return dimOf(sc.getOperand(), i);
+    if (auto as = dyn_cast<AssumeOp>(def))
+	return dimOf(as.getOperand(), i);
+    if (auto id = dyn_cast<IdentityOp>(def))
+	return id.getDynamicSizes()[dynamicIndex(t, i)];
+    // allocations
+    if (auto e = dyn_cast<tensor::EmptyOp>(def))
+	return e.getDynamicSize(i);
+    if (auto a = dyn_cast<memref::AllocOp>(def))
+	return a.getDynamicSizes()[dynamicIndex(t, i)];
+    if (auto a = dyn_cast<memref::AllocaOp>(def))
+	return a.getDynamicSizes()[dynamicIndex(t, i)];
+    if (auto vw = dyn_cast<memref::ViewOp>(def))
+	return vw.getSizes()[dynamicIndex(t, i)];
+    // the same matrix under another type
+    if (auto c = dyn_cast<memref::CastOp>(def))
+	return dimOf(c.getSource(), i);
+    if (auto c = dyn_cast<tensor::CastOp>(def))
+	return dimOf(c.getSource(), i);
+    if (auto c = dyn_cast<bufferization::ToTensorOp>(def))
+	return dimOf(c.getBuffer(), i);
+    if (auto c = dyn_cast<bufferization::ToBufferOp>(def))
+	return dimOf(c.getTensor(), i);
+    if (auto m = dyn_cast<bufferization::MaterializeInDestinationOp>(def))
+	return dimOf(m.getDest(), i);
+    // destination-passing style: the destination
+    if (auto dps = dyn_cast<DestinationStyleOpInterface>(def))
+	if (r < dps.getNumDpsInits())
+	    return dimOf(dps.getDpsInits()[r], i);
+    // loops and branches: the value that enters / is yielded
+    if (auto loop = dyn_cast<scf::ForOp>(def))
+	return dimOf(loop.getInits()[r], i);
+    if (auto br = dyn_cast<scf::IfOp>(def)) {
+	if (OpFoldResult d = dimOf(br.thenYield().getOperand(r), i))
+	    return d;
+	if (!br.getElseRegion().empty())
+	    return dimOf(br.elseYield().getOperand(r), i);
+	return {};
+    }
+    // a call: the callee's result attribute names the call operand
+    if (auto call = dyn_cast<func::CallOp>(def)) {
+	auto callee = dyn_cast_if_present<func::FuncOp>(
+	    SymbolTable::lookupNearestSymbolFrom(def, call.getCalleeAttr()));
+	if (!callee)
+	    return {};
+	return fromDimsAttr(callee.getResultAttr(r, kDimsAttr), t, i,
+	                    call.getOperands());
+    }
+    return {};
+}
+
+Value
+mlir::ulm_lam::dimValue(OpBuilder &b, Location loc, Value v, unsigned i)
+{
+    OpFoldResult d = dimOf(v, i);
+    if (!d)
+	return {};
+    if (auto a = dyn_cast<Attribute>(d))
+	return arith::ConstantIndexOp::create(b, loc,
+	                                      cast<IntegerAttr>(a).getInt());
+    return cast<Value>(d);
+}
+
+FailureOr<SmallVector<Value>>
+mlir::ulm_lam::dynamicSizes(OpBuilder &b, Location loc, ShapedType type,
+                            Value rowsOf, unsigned rowsDim, Value colsOf,
+                            unsigned colsDim)
+{
+    SmallVector<Value> sizes;
+    for (unsigned d = 0; d < 2; ++d) {
+	if (!type.isDynamicDim(d))
+	    continue;
+	Value s = d == 0 ? dimValue(b, loc, rowsOf, rowsDim)
+	                 : dimValue(b, loc, colsOf, colsDim);
+	if (!s)
+	    return failure();
+	sizes.push_back(s);
+    }
+    return sizes;
+}
+
+void
+mlir::ulm_lam::resolveDimOps(Operation *root)
+{
+    SmallVector<std::pair<Operation *, std::pair<Value, int64_t>>> dims;
+    root->walk([&](Operation *op) {
+	std::optional<int64_t> i;
+	Value src;
+	if (auto d = dyn_cast<memref::DimOp>(op)) {
+	    i = d.getConstantIndex();
+	    src = d.getSource();
+	} else if (auto d = dyn_cast<tensor::DimOp>(op)) {
+	    i = d.getConstantIndex();
+	    src = d.getSource();
+	}
+	if (i && *i >= 0)
+	    dims.push_back({op, {src, *i}});
+    });
+    for (auto &[op, d] : dims) {
+	OpFoldResult r = dimOf(d.first, d.second);
+	if (!r)
+	    continue;
+	Value v;
+	if (auto a = dyn_cast<Attribute>(r)) {
+	    OpBuilder b(op);
+	    v = arith::ConstantIndexOp::create(b, op->getLoc(),
+	                                       cast<IntegerAttr>(a).getInt());
+	} else {
+	    v = cast<Value>(r);
+	}
+	op->getResult(0).replaceAllUsesWith(v);
+	op->erase();
+    }
 }

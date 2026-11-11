@@ -7,13 +7,15 @@
 #include <ulmblas/ulmblas.h>
 template <typename T>
 static void
-ulm_lam_potrf(bool lower, int n, T *A, int incRow, int incCol, bool checked)
+ulm_lam_potrf(bool lower, std::ptrdiff_t n, T *A, std::ptrdiff_t incRow,
+              std::ptrdiff_t incCol, bool checked)
 {
-    int info = ulmBLAS::potrf(lower, n, A, incRow, incCol);
+    std::ptrdiff_t info = ulmBLAS::potrf(lower, n, A, incRow, incCol);
     if (checked && info != 0) {
 	std::fprintf(
 	    stderr,
-	    "ulm_lam: matrix is not positive definite (potrf info %d)\n", info);
+	    "ulm_lam: matrix is not positive definite (potrf info %td)\n",
+	    info);
 	std::abort();
     }
 }
@@ -42,19 +44,19 @@ record(size_t, double *);
 extern "C" void
 estimate(double *v1, double *v2, size_t v3, int8_t *v4, int64_t *v5)
 {
-    double v6 = 1.00000000000000000e+00;
-    double v7 = 0.0e+00;
-    int64_t v8 = 0;
-    int64_t v9 = 35537600;
+    int64_t v6 = 35537600;
+    double v7 = 1.00000000000000000e+00;
+    double v8 = 0.0e+00;
+    int64_t v9 = 0;
     size_t v10 = 0;
     int64_t v11 = v5[v10];
     if (v11 == -1) {
-	v5[v10] = v9;
+	v5[v10] = v6;
     } else {
-	if (v11 > v8 & v11 < v9) {
-	    ulm_lam_workspace_error(v9, v11);
+	if (v11 > v9 & v11 < v6) {
+	    ulm_lam_workspace_error(v6, v11);
 	} else {
-	    bool v12 = v11 == v8;
+	    bool v12 = v11 == v9;
 	    int8_t *v13;
 	    if (v12) {
 		void *v14 = aligned_alloc(64, 35537600);
@@ -72,10 +74,11 @@ estimate(double *v1, double *v2, size_t v3, int8_t *v4, int64_t *v5)
 	    int64_t v20 = (int64_t)32320000;
 	    double *v21 = (double *)(v15 + v20);
 	    memcpy(v21, v1, 3200000);
-	    ulmBLAS::trlsm(2000, 200, v6, false, false, v17, 2000, 1, v21, 200,
-	                   1);
-	    ulmBLAS::gemm(200, 200, 2000, v6, false, v21, 1, 200, false, v21,
-	                  200, 1, v7, v19, 200, 1);
+	    ulmBLAS::trlsm<std::ptrdiff_t>(2000, 200, v7, false, false, v17,
+	                                   2000, 1, v21, 200, 1);
+	    ulmBLAS::gemm<std::ptrdiff_t>(200, 200, 2000, v7, false, v21, 1,
+	                                  200, false, v21, 200, 1, v8, v19, 200,
+	                                  1);
 	    ulm_lam_potrf(true, 200, v19, 200, 1, true);
 	    int64_t v22 = (int64_t)35520000;
 	    double *v23 = (double *)(v15 + v22);
@@ -83,10 +86,12 @@ estimate(double *v1, double *v2, size_t v3, int8_t *v4, int64_t *v5)
 	    double *v25 = (double *)(v15 + v24);
 	    for (size_t i26 = v10; i26 < v3; i26 += 1) {
 		observe(i26, v23);
-		ulmBLAS::trlsv(2000, false, v17, 2000, 1, v23, 1);
-		ulmBLAS::gemv(200, 2000, v6, v21, 1, 200, v23, 1, v7, v25, 1);
-		ulmBLAS::trlsv(200, false, v19, 200, 1, v25, 1);
-		ulmBLAS::trusv(200, false, v19, 1, 200, v25, 1);
+		ulmBLAS::trlsv<std::ptrdiff_t>(2000, false, v17, 2000, 1, v23,
+		                               1);
+		ulmBLAS::gemv<std::ptrdiff_t>(200, 2000, v7, v21, 1, 200, v23,
+		                              1, v8, v25, 1);
+		ulmBLAS::trlsv<std::ptrdiff_t>(200, false, v19, 200, 1, v25, 1);
+		ulmBLAS::trusv<std::ptrdiff_t>(200, false, v19, 1, 200, v25, 1);
 		record(i26, v25);
 	    }
 	    if (v12) {

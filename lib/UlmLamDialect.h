@@ -65,6 +65,37 @@ withProperties(RankedTensorType type, Properties p);
 Type
 stripProperties(Type type);
 
+/// Name of the argument/result attribute that ties the dynamic dimensions
+/// of a matrix to index parameters of its function: `ulm_lam.dims = [0, 1]`
+/// on `%X: tensor<?x?xf64>` says that X is v0 x v1 (one entry per dynamic
+/// dimension, in order; the numbers are argument positions).
+constexpr llvm::StringLiteral kDimsAttr = "ulm_lam.dims";
+
+/// The size of dimension `i` of the matrix `v` (tensor or memref): a
+/// constant for a static dimension, otherwise the index value it was
+/// created with, traced back through the ops of the ulm.lam pipeline to a
+/// function parameter, an allocation, or a call result.  Null if unknown.
+OpFoldResult
+dimOf(Value v, unsigned i);
+
+/// The size of dimension `i` of `v` as an index value (constants are
+/// created at `b`); null if unknown.
+Value
+dimValue(OpBuilder &b, Location loc, Value v, unsigned i);
+
+/// The dynamic sizes of a matrix of `type` whose dimensions are those of
+/// `like` (rows, cols), for tensor.empty / memref.alloc; failure if one is
+/// unknown.
+FailureOr<SmallVector<Value>>
+dynamicSizes(OpBuilder &b, Location loc, ShapedType type, Value rowsOf,
+             unsigned rowsDim, Value colsOf, unsigned colsDim);
+
+/// Replace tensor.dim / memref.dim ops (constant index) under `root` by
+/// the size that dimOf finds, so that sizes are function parameters (or
+/// constants) instead of queries of a buffer.
+void
+resolveDimOps(Operation *root);
+
 /// Register the bufferization models of the ulm_lamk ops.
 void
 registerBufferizationModels(DialectRegistry &registry);

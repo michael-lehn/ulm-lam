@@ -42,6 +42,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "UlmLamDialect.h"
+
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -58,12 +60,6 @@ namespace {
 constexpr int64_t kAlign = 64;
 constexpr llvm::StringLiteral kErrorFn = "ulm_lam_workspace_error";
 constexpr llvm::StringLiteral kWorkspaceAttr = "ulm_lam.workspace";
-
-int64_t
-roundUp(int64_t x)
-{
-    return (x + kAlign - 1) / kAlign * kAlign;
-}
 
 struct UlmLamWorkspace : PassWrapper<UlmLamWorkspace, OperationPass<ModuleOp>>
 {
@@ -98,6 +94,8 @@ struct UlmLamWorkspace : PassWrapper<UlmLamWorkspace, OperationPass<ModuleOp>>
 	    MemRefType::get({ShapedType::kDynamic}, IntegerType::get(ctx, 8));
 	infoTy = MemRefType::get({1}, IntegerType::get(ctx, 64));
 	SymbolTable symbols(module);
+	// sizes as function parameters, not queries of buffers
+	ulm_lam::resolveDimOps(module);
 
 	// 1. which functions take a workspace (transitively over calls)
 	llvm::SetVector<func::FuncOp> ws;
@@ -192,6 +190,24 @@ struct UlmLamWorkspace : PassWrapper<UlmLamWorkspace, OperationPass<ModuleOp>>
 	}
     }
 
+    /// `v` as a value available at the entry of the function: an argument
+    /// or a (cloned) constant; null otherwise.
+    static Value
+    atEntry(OpBuilder &b, Value v, Block &entry)
+    {
+	if (!v)
+	    return {};
+	if (auto a = dyn_cast<BlockArgument>(v))
+	    return a.getOwner() == &entry ? v : Value();
+	Operation *def = v.getDefiningOp();
+	if (def && isa<arith::ConstantOp>(def))
+	    return def->getBlock() == b.getInsertionBlock() &&
+	                   def->isBeforeInBlock(&*b.getInsertionPoint())
+	               ? v
+		       : b.clone(*def)->getResult(0);
+	return {};
+    }
+
     /// Operands for querying `call` at function entry: matrices are dummy
     /// views of `work` (a query does not touch them), scalars must be
     /// available at entry.
@@ -203,14 +219,23 @@ struct UlmLamWorkspace : PassWrapper<UlmLamWorkspace, OperationPass<ModuleOp>>
 	Value c0;
 	for (Value v : call.getOperands()) {
 	    if (auto t = dyn_cast<MemRefType>(v.getType())) {
-		if (!t.hasStaticShape())
-		    return call.emitError(
-		               "ulm-lam-workspace: dynamic matrix argument"),
-		           failure();
+		SmallVector<Value> sizes;
+		for (unsigned d = 0, r = t.getRank(); d < r; ++d) {
+		    if (!t.isDynamicDim(d))
+			continue;
+		    Value s =
+		        atEntry(b, ulm_lam::dimValue(b, loc, v, d), entry);
+		    if (!s)
+			return call.emitError("ulm-lam-workspace: the size of "
+			                      "a matrix argument is not "
+			                      "available at function entry"),
+			       failure();
+		    sizes.push_back(s);
+		}
 		if (!c0)
 		    c0 = arith::ConstantIndexOp::create(b, loc, 0);
 		ops.push_back(
-		    memref::ViewOp::create(b, loc, t, work, c0, ValueRange{}));
+		    memref::ViewOp::create(b, loc, t, work, c0, sizes));
 		continue;
 	    }
 	    if (auto a = dyn_cast<BlockArgument>(v);
@@ -252,21 +277,13 @@ struct UlmLamWorkspace : PassWrapper<UlmLamWorkspace, OperationPass<ModuleOp>>
 	Block &entry = f.getBody().front();
 	auto ret = cast<func::ReturnOp>(entry.getTerminator());
 
-	// own temporaries: static layout
+	// own temporaries
 	SmallVector<memref::AllocOp> allocs;
 	f.walk([&](memref::AllocOp a) { allocs.push_back(a); });
-	SmallVector<int64_t> offsets;
-	int64_t own = 0;
-	for (memref::AllocOp a : allocs) {
-	    MemRefType t = a.getType();
-	    if (!t.hasStaticShape() || !t.getLayout().isIdentity())
+	for (memref::AllocOp a : allocs)
+	    if (!a.getType().getLayout().isIdentity())
 		return a.emitError(
-		    "ulm-lam-workspace: only static, identity layout "
-		    "temporaries");
-	    offsets.push_back(own);
-	    own +=
-	        roundUp(t.getNumElements() * (t.getElementTypeBitWidth() / 8));
-	}
+		    "ulm-lam-workspace: only identity layout temporaries");
 	// calls of functions with a workspace
 	SmallVector<func::CallOp> calls;
 	f.walk([&](func::CallOp c) {
@@ -290,9 +307,40 @@ struct UlmLamWorkspace : PassWrapper<UlmLamWorkspace, OperationPass<ModuleOp>>
 	Value c0 = arith::ConstantIndexOp::create(b, loc, 0);
 	Value given = memref::LoadOp::create(b, loc, info, ValueRange{c0});
 
+	// layout of the own temporaries: [t1 | t2 | ...], each part rounded up
+	// to the alignment; sizes from the dimensions (parameters at entry)
+	// (in index arithmetic: size_t in C++; static parts fold)
+	auto idx = [&](int64_t v) {
+	    return arith::ConstantIndexOp::create(b, loc, v).getResult();
+	};
+	SmallVector<Value> offsets;
+	Value own = idx(0);
+	for (memref::AllocOp a : allocs) {
+	    MemRefType t = a.getType();
+	    int64_t fixed = t.getElementTypeBitWidth() / 8;
+	    for (int64_t d : t.getShape())
+		if (!ShapedType::isDynamic(d))
+		    fixed *= d;
+	    Value bytes = idx(fixed);
+	    for (Value s : a.getDynamicSizes()) {
+		Value e = atEntry(b, s, entry);
+		if (!e)
+		    return a.emitError("ulm-lam-workspace: the size of a "
+		                       "temporary is not available at function "
+		                       "entry");
+		bytes = arith::MulIOp::create(b, loc, bytes, e);
+	    }
+	    offsets.push_back(own);
+	    Value rounded = arith::AndIOp::create(
+	        b, loc, arith::AddIOp::create(b, loc, bytes, idx(kAlign - 1)),
+	        idx(-kAlign));
+	    own = arith::AddIOp::create(b, loc, own, rounded);
+	}
+
 	// query the callees (the accumulation of LAPACK workspace queries)
 	SmallVector<Value> sizes, parts; // per call: queried size, its offset
-	Value required = i64(own);
+	Value required =
+	    arith::IndexCastOp::create(b, loc, b.getI64Type(), own);
 	for (func::CallOp call : calls) {
 	    FailureOr<SmallVector<Value>> ops =
 	        queryOperands(b, call, entry, work);
@@ -359,9 +407,8 @@ struct UlmLamWorkspace : PassWrapper<UlmLamWorkspace, OperationPass<ModuleOp>>
 	// own temporaries become views of the block
 	for (auto [a, off] : llvm::zip(allocs, offsets)) {
 	    OpBuilder vb(a);
-	    Value o = arith::ConstantIndexOp::create(vb, a.getLoc(), off);
 	    Value v = memref::ViewOp::create(vb, a.getLoc(), a.getType(), base,
-	                                     o, ValueRange{});
+	                                     off, a.getDynamicSizes());
 	    for (Operation *u : llvm::to_vector(a->getUsers()))
 		if (isa<memref::DeallocOp>(u))
 		    u->erase();
