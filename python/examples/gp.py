@@ -14,6 +14,9 @@ e.g. scikit-learn's GaussianProcessRegressor (fit and predict):
 
 ulm.lam derives this from the formula (potrf, trsm, trsv, gemv and syrk;
 K^-1 is never formed), for all n and m: the sizes are run-time names.
+The timings run the generated code twice: on ulmBLAS, and with
+backend="cblas" on the CBLAS/LAPACK of OpenBLAS, the BLAS of NumPy and
+SciPy here, which separates the mapping from the BLAS implementation.
 
 Data (downloaded on first use into build/data/):
   * CO2: weekly CO2 concentration at Mauna Loa, NOAA (National Oceanic and
@@ -297,7 +300,7 @@ def bike_hyperparameters(X, y):
     return (*best_p, "NumPy grid")
 
 
-def bike(lib, sizes):
+def bike(lib, lib_cblas, sizes):
     X, y = bike_data()
     rng = np.random.default_rng(1)
     p = rng.permutation(len(y))
@@ -322,6 +325,7 @@ def bike(lib, sizes):
         yt = y[tr].copy()
         reps = 3 if n <= 4000 else 1
         t_lam, got = best(lambda: lib.gp(K, Ks, Kss, yt), reps)
+        t_lcb, got_cb = best(lambda: lib_cblas.gp(K, Ks, Kss, yt), reps)
         t_ref, ref = best(lambda: reference(K, Ks, Kss, yt), reps)
         t_lit = (best(lambda: numpy_literal(K, Ks, Kss, yt), 1)[0]
                  if n <= 8000 else float("nan"))
@@ -332,14 +336,15 @@ def bike(lib, sizes):
             t_sk, _ = best(lambda: g.fit(X[tr], yt).predict(
                 X[test], return_cov=True), reps)
         rmse = np.sqrt(np.mean((got[0][:, 0] - y[test]) ** 2))
-        rows.append((n, rmse, t_kernel, t_lam, t_ref, t_lit, t_sk,
-                     difference(got, ref)))
+        rows.append((n, rmse, t_kernel, t_lam, t_lcb, t_ref, t_lit, t_sk,
+                     max(difference(got, ref), difference(got_cb, ref))))
 
     print("RMSE in standard deviations of log(1 + rentals); times in s,"
-          " (x): relative to ulm.lam;")
-    print("kernel: the kernel matrices in NumPy, the others without them "
-          "(scikit-learn: with them)")
-    print(f"      n   RMSE  kernel  ulm.lam  "
+          " (x): relative to ulm.lam on")
+    print("OpenBLAS (the BLAS of NumPy and SciPy here); kernel: the kernel "
+          "matrices in NumPy, the")
+    print("others without them (scikit-learn: with them)")
+    print(f"      n   RMSE  kernel  ulm.lam/OpenBLAS  ulm.lam/ulmBLAS  "
           f"{'SciPy' if cholesky else 'NumPy'} by hand    NumPy literal"
           "      scikit-learn  difference")
 
@@ -347,9 +352,9 @@ def bike(lib, sizes):
         return ("        -       " if x != x
                 else f"{x:7.3f} ({x / ref:4.1f}x)")
 
-    for n, rmse, tk, tl, tr_, tt, ts, err in rows:
-        print(f"  {n:5d}  {rmse:5.3f}  {tk:6.3f}  {tl:7.3f}  {f(tr_, tl)}"
-              f"  {f(tt, tl)}  {f(ts, tl + tk)}  {err:.1e}")
+    for n, rmse, tk, tl, tc, tr_, tt, ts, err in rows:
+        print(f"  {n:5d}  {rmse:5.3f}  {tk:6.3f}  {tc:16.3f}  {f(tl, tc)}"
+              f"  {f(tr_, tc)}  {f(tt, tc)}  {f(ts, tc + tk)}  {err:.1e}")
     return max(r[-1] for r in rows)
 
 
@@ -357,12 +362,14 @@ def main():
     full = "--full" in sys.argv
     t0 = time.perf_counter()
     lib = lam.compile(gp, name="gp_py")
+    # the same kernel calls on CBLAS/LAPACK (OpenBLAS, as NumPy here)
+    lib_cblas = lam.compile(gp, name="gp_py_cblas", backend="cblas")
     print(f"compiled in {time.perf_counter() - t0:.1f} s: {lib.path}")
     print("generated C++ (lib.gp.cpp):\n")
     print(lib.gp.cpp)
     err = co2(lib)
     sizes = [1000, 2000, 4000, 8000] + ([16000] if full else [])
-    err = max(err, bike(lib, sizes))
+    err = max(err, bike(lib, lib_cblas, sizes))
     ok = err < 1e-8
     print("PASS" if ok else "FAIL")
     return 0 if ok else 1

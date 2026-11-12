@@ -2,7 +2,7 @@
 //
 // convert-ulm-lamk-to-ulmblas: lower the bufferized program to EmitC so that
 // `mlir-translate --mlir-to-cpp` prints C++17 calling the header-only
-// ulmBLAS templates (ulmBLAS::gemm, gemv, trlsm, trusm, trlsv, trusv,
+// ulmBLAS templates (ulmBLAS::gemm, gemv, trtrs, trlsm, trusm, trlsv, trusv,
 // geaxpy, gescal, potrf, getrf, getrs).
 //
 // The ulm_lam ABI:
@@ -99,6 +99,10 @@ voidPtr(MLIRContext *ctx)
 /// trace values any more): (memref, dim) -> index value or constant.
 using DimTable = llvm::DenseMap<std::pair<Value, unsigned>, OpFoldResult>;
 DimTable *dimTable = nullptr; // set while the pass runs
+/// backend=cblas: the calls go to ulm_lam_cblas:: (include/ulm_lam/
+/// cblas_backend.h: the same interface on CBLAS and LAPACK) instead of
+/// ulmBLAS::.
+bool cblasBackend = false;
 
 void
 collectDims(ModuleOp module, DimTable &table)
@@ -423,8 +427,12 @@ struct Args
     LogicalResult
     call(Operation *o, StringRef callee, TypeRange results = {})
     {
+	std::string name = callee.str();
+	if (cblasBackend)
+	    if (size_t p = name.find("ulmBLAS::"); p != std::string::npos)
+		name.replace(p, 9, "ulm_lam_cblas::");
 	rw.replaceOpWithNewOp<emitc::CallOpaqueOp>(
-	    o, results, callee, ValueRange(ops), rw.getArrayAttr(attrs));
+	    o, results, name, ValueRange(ops), rw.getArrayAttr(attrs));
 	return success();
     }
 };
@@ -579,7 +587,23 @@ ULM_LAMK_LOWERING(GemvLowering, lk::GemvOp)
         .call(o, "ulmBLAS::gemv" kIndexType);
 }
 
-// B := alpha op(A)^-1 B (left) or alpha B op(A)^-1 (right)
+/// The constant 1.0 (arith or emitc constant).
+bool
+isOne(Value v)
+{
+    Attribute a;
+    if (auto c = v.getDefiningOp<arith::ConstantOp>())
+	a = c.getValue();
+    else if (auto c = v.getDefiningOp<emitc::ConstantOp>())
+	a = c.getValue();
+    auto f = dyn_cast_if_present<FloatAttr>(a);
+    return f && f.getValueAsDouble() == 1.0;
+}
+
+// B := alpha op(A)^-1 B (left) or alpha B op(A)^-1 (right).  With alpha =
+// 1 ulmBLAS::trtrs, which solves for blocks of columns in parallel (OpenMP
+// tasks, as potrf); its info (a zero on the diagonal) cannot occur after a
+// successful factorisation and is ignored.
 ULM_LAMK_LOWERING(TrsmLowering, lk::TrsmOp)
 {
     bool trans = o.getTrans() == lk::Trans::trans;
@@ -588,6 +612,19 @@ ULM_LAMK_LOWERING(TrsmLowering, lk::TrsmOp)
     bool t = left ? trans : !trans;
     View A = view(rw, o.getA(), t), B = view(rw, o.getB(), !left);
     bool lower = (o.getUplo() == lk::Uplo::lower) != t;
+    if (isOne(o.getAlpha()))
+	return Args{rw}
+	    .flag(lower)
+	    .flag(false)
+	    .flag(false)
+	    .flag(o.getDiag() == lk::Diag::unit)
+	    .dim(B.rows)
+	    .dim(B.cols)
+	    .op(a.getA())
+	    .strides(A)
+	    .op(a.getB())
+	    .strides(B)
+	    .call(o, "(void)ulmBLAS::trtrs" kIndexType);
     return Args{rw}
         .dim(B.rows)
         .dim(B.cols)
@@ -860,6 +897,16 @@ struct ConvertUlmLamkToUlmBLAS
     : PassWrapper<ConvertUlmLamkToUlmBLAS, OperationPass<ModuleOp>>
 {
     MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ConvertUlmLamkToUlmBLAS)
+    ConvertUlmLamkToUlmBLAS() = default;
+    ConvertUlmLamkToUlmBLAS(const ConvertUlmLamkToUlmBLAS &other)
+        : PassWrapper(other)
+    {
+    }
+    Option<std::string> backend{
+        *this, "backend",
+        llvm::cl::desc("ulmblas (default) | cblas: the same calls on CBLAS "
+                       "and LAPACK via include/ulm_lam/cblas_backend.h"),
+        llvm::cl::init("ulmblas")};
 
     StringRef
     getArgument() const final
@@ -884,6 +931,13 @@ struct ConvertUlmLamkToUlmBLAS
     {
 	ModuleOp module = getOperation();
 	MLIRContext *ctx = &getContext();
+	if (backend != "ulmblas" && backend != "cblas") {
+	    module.emitError("convert-ulm-lamk-to-ulmblas: backend must be "
+	                     "ulmblas or cblas");
+	    return signalPassFailure();
+	}
+	cblasBackend = backend == "cblas";
+	llvm::scope_exit resetBackend([] { cblasBackend = false; });
 	// sizes as function parameters, not queries of buffers
 	ulm_lam::resolveDimOps(module);
 	DimTable dims;
@@ -930,9 +984,12 @@ struct ConvertUlmLamkToUlmBLAS
 	populateEmitCSizeTTypeConversions(tc);
 
 	// Which ulmBLAS LAPACK headers and info checks the output needs.
-	bool potrf = false, getrf = false, getrs = false, sycomplete = false;
+	bool potrf = false, getrf = false, getrs = false, sycomplete = false,
+	     trtrs = false;
 	module.walk([&](Operation *op) {
 	    potrf |= isa<lk::PotrfOp>(op);
+	    if (auto t = dyn_cast<lk::TrsmOp>(op))
+		trtrs |= isOne(t.getAlpha());
 	    getrf |= isa<lk::GetrfOp>(op);
 	    getrs |= isa<lk::GetrsOp>(op);
 	    sycomplete |= isa<lk::SycompleteOp>(op);
@@ -991,14 +1048,22 @@ struct ConvertUlmLamkToUlmBLAS
 	    emitc::IncludeOp::create(b, loc, h, /*is_standard=*/true);
 	};
 	for (StringRef h : {"cstddef", "cstdint", "cstdio", "cstdlib",
-	                    "cstring", "ulmblas/ulmblas.h"})
+	                    "cstring"})
 	    include(h);
+	if (cblasBackend) {
+	    include("ulm_lam/cblas_backend.h");
+	    potrf = getrf = getrs = trtrs = false;
+	} else {
+	    include("ulmblas/ulmblas.h");
+	}
 	if (potrf)
 	    include("ulmblas/lapack/potrf.h");
 	if (getrf)
 	    include("ulmblas/lapack/getrf.h");
 	if (getrs)
 	    include("ulmblas/lapack/getrs.h");
+	if (trtrs)
+	    include("ulmblas/lapack/trtrs.h");
 	if (sycomplete)
 	    emitc::VerbatimOp::create(b, loc, kSycomplete);
     }

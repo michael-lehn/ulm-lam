@@ -115,9 +115,16 @@ def ConvertUlmLamkToUlmBLAS : Pass<"convert-ulm-lamk-to-ulmblas", "ModuleOp"> {
     pointer with swapped strides, so trans and side attributes disappear.
     Functions get extern "C".  Run with the upstream
     convert-{func,arith,scf}-to-emitc patterns (included); then
-    `mlir-translate --mlir-to-cpp` prints C++17.
+    `mlir-translate --mlir-to-cpp` prints C++17.  Option backend=cblas:
+    the same calls go to ulm_lam_cblas:: (include/ulm_lam/cblas_backend.h),
+    which implements them with CBLAS and LAPACK (MKL, OpenBLAS,
+    Accelerate), so that the kernel selection can be measured on any BLAS.
   }];
   let dependentDialects = ["emitc::EmitCDialect"];
+  let options = [
+    Option<"backend", "backend", "std::string", /*default=*/"\"ulmblas\"",
+           "ulmblas | cblas">
+  ];
 }
 
 def ConvertUlmLamkToLinalg : Pass<"convert-ulm-lamk-to-linalg", "func::FuncOp"> {

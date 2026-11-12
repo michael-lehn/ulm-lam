@@ -29,7 +29,9 @@ external function) may be any buffer, NumPy array or nested list.  An
 exception in a callback is re-raised when the ulm.lam function returns.
 
 Environment: LLVM_PREFIX (Homebrew llvm), ULMBLAS_DIR (default
-~/git/ulmBLAS), ARCHFLAGS (default -mcpu=native), CXX (default c++).
+~/git/ulmBLAS), ARCHFLAGS (default -mcpu=native), CXX (default c++),
+ULM_LAM_BACKEND (ulmblas, or cblas: the same kernel calls on CBLAS and
+LAPACK) and ULM_LAM_BLAS_LIBS (its link flags, default OpenBLAS).
 """
 
 from __future__ import annotations
@@ -59,10 +61,40 @@ ROOT = Path(__file__).resolve().parents[3]
 # ---------------------------------------------------------------------------
 
 
-def _run(cmd: list[str], what: str) -> None:
-    p = subprocess.run(cmd, capture_output=True, text=True)
+def _run(cmd: list[str], what: str, env=None) -> None:
+    p = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if p.returncode != 0:
         raise fe.LamError(f"{what} failed:\n{p.stdout}{p.stderr}")
+
+
+def _backend(b: str | None = None) -> str:
+    """The backend argument of compile, else ULM_LAM_BACKEND: ulmblas
+    (default) or cblas (the same kernel calls on CBLAS and LAPACK,
+    include/ulm_lam/cblas_backend.h)."""
+    b = b or os.environ.get("ULM_LAM_BACKEND", "ulmblas")
+    if b not in ("ulmblas", "cblas"):
+        raise fe.LamError(f"ULM_LAM_BACKEND must be ulmblas or cblas, not {b}")
+    return b
+
+
+def _blas_libs() -> list[str]:
+    """Link flags of the cblas backend: ULM_LAM_BLAS_LIBS, by default
+    Homebrew's OpenBLAS (the one NumPy uses) or -lopenblas."""
+    if "ULM_LAM_BLAS_LIBS" in os.environ:
+        return os.environ["ULM_LAM_BLAS_LIBS"].split()
+    ob = Path("/opt/homebrew/opt/openblas/lib")
+    if ob.exists():
+        return [f"-L{ob}", f"-Wl,-rpath,{ob}", "-lopenblas"]
+    return ["-lopenblas"]
+
+
+def _cxx_flags(backend: str) -> list[str]:
+    """Compiler and linker flags of the generated C++ for the backend."""
+    if backend == "cblas":
+        arch = os.environ.get("ARCHFLAGS", "-mcpu=native").split()
+        return ["-std=c++17", "-O3", *arch, "-I", str(ROOT / "include"),
+                *_blas_libs()]
+    return _ulmblas_flags()
 
 
 def _ulmblas_flags() -> list[str]:
@@ -156,20 +188,28 @@ def _newest_tool() -> float:
     return max(p.stat().st_mtime for p in parts)
 
 
-def _toolchain() -> str:
+def _toolchain(backend: str) -> str:
     """What the C++ compilation depends on besides the generated code: the
     compiler, the ulmBLAS flags (directory, micro kernels) and the newest
     ulmBLAS header (a branch switch or an edit changes it)."""
-    flags = _ulmblas_flags()
-    ulm = Path(flags[flags.index("-isystem") + 1]) / "ulmblas"
-    newest = max((f.stat().st_mtime_ns for f in ulm.rglob("*")
-                  if f.is_file()), default=0)
-    return " ".join([os.environ.get("CXX", "c++"), *flags, str(newest)])
+    flags = _cxx_flags(backend)
+    if backend == "cblas":
+        hdr = ROOT / "include" / "ulm_lam" / "cblas_backend.h"
+        newest = hdr.stat().st_mtime_ns
+    else:
+        ulm = Path(flags[flags.index("-isystem") + 1]) / "ulmblas"
+        newest = max((f.stat().st_mtime_ns for f in ulm.rglob("*")
+                      if f.is_file()), default=0)
+    return " ".join([os.environ.get("CXX", "c++"), backend, *flags,
+                     str(newest)])
 
 
 def compile(functions, name: str | None = None, workdir=None,
-            externs: dict | None = None) -> "Library":
-    """Compile ulm.lam functions (and what they call) into a library."""
+            externs: dict | None = None,
+            backend: str | None = None) -> "Library":
+    """Compile ulm.lam functions (and what they call) into a library.
+    backend: "ulmblas" (default, or ULM_LAM_BACKEND) or "cblas"."""
+    backend = _backend(backend)
     if isinstance(functions, fe.Function):
         functions = [functions]
     functions = list(functions)
@@ -191,13 +231,15 @@ def compile(functions, name: str | None = None, workdir=None,
     #  * a different ulmBLAS (ULMBLAS_DIR, a changed header, other
     #    flags) or C++ compiler builds a new library.
     key = hashlib.sha256(
-        f"{text}\n{_newest_tool()}\n{_toolchain()}".encode()).hexdigest()
+        f"{text}\n{_newest_tool()}\n{_toolchain(backend)}".encode()
+    ).hexdigest()
     lib = work / f"lib{name}.{key[:12]}{ext}"
     cached = not os.environ.get("ULM_LAM_REBUILD") and lib.exists()
     mlir.write_text(text)
     if not cached:
         _run([str(ROOT / "scripts" / "ulm-lam-compile.sh"), str(mlir),
-              str(work / name)], "ulm-lam-compile")
+              str(work / name)], "ulm-lam-compile",
+             env={**os.environ, "BACKEND": backend})
     cpp = (work / f"{name}.cpp").read_text()
     ifaces = _interfaces(cpp)
     decls = {n: p for n, p in _declarations(cpp).items()
@@ -210,7 +252,7 @@ def compile(functions, name: str | None = None, workdir=None,
     if not cached:
         cxx = os.environ.get("CXX", "c++")
         partial = lib.with_name(lib.name + ".partial")
-        _run([cxx, *_ulmblas_flags(), "-shared", "-fPIC", *sources, "-o",
+        _run([cxx, "-shared", "-fPIC", *sources, *_cxx_flags(backend), "-o",
               str(partial)], "C++ compilation")
         partial.replace(lib)
         for old in work.glob(f"lib{name}.*{ext}"):

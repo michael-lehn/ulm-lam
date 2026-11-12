@@ -1031,6 +1031,31 @@ Strides are what an MLIR \code{memref} carries, so the lowering is direct:
         turns into its own \code{info} (\cref{sec:info}).
 \end{itemize}
 
+\paragraph{A second lowering: CBLAS and LAPACK.}\label{sec:cblas}
+ulm.lam does two things at once: it maps formulas onto BLAS and LAPACK
+routines (the LAMP), and it runs them on ulmBLAS.
+To measure the first independently of the second, the option
+\code{backend=cblas} of \code{convert-ulm-lamk-to-ulmblas} (\code{BACKEND=cblas}
+for \file{scripts/ulm-lam-compile.sh}, \code{lam.compile(...,
+backend="cblas")} in Python) emits the same calls with the namespace
+\code{ulm\_lam\_cblas} instead of \code{ulmBLAS}.
+The header \file{include/ulm\_lam/cblas\_backend.h} implements that
+interface with CBLAS and the Fortran LAPACK symbols, which MKL (Intel Math
+Kernel Library), OpenBLAS and Accelerate all provide.
+It works in column-major order and uses the tricks above instead of
+copies: a row-major operand is the transposed column-major one (a trans
+flag, a flipped triangle, or the transposed problem $C\T = B\T A\T$),
+\code{potrf} factorises the flipped triangle, and \code{getrf} factorises
+$A\T$, which \code{getrs}, called with the same strides, takes into
+account.
+Only a right-hand side of \code{getrs} and the $B$ of \code{symm} whose
+orientation differs from that of $C$ are copied ($O(nm)$).
+The kernel sequence is identical, so the time of the generated code on
+MKL compared with the hand-written MKL version measures the mapping, and
+the same code on ulmBLAS compared with it on MKL measures ulmBLAS
+(\cref{sec:gpcluster}).
+All 35 Python tests pass with both backends.
+
 \paragraph{The ulm.lam ABI.}
 \begin{itemize}
   \item A static row-major \code{memref} is a pointer (\code{double *},
@@ -2124,28 +2149,33 @@ The results agree with SciPy and scikit-learn to $2.5\cdot 10^{-11}$.
 \end{figure}}{}
 
 \paragraph{Timings.}
-Bike sharing, $m = 1000$ test hours, Apple M5; NumPy and SciPy with
-OpenBLAS, ulm.lam with ulmBLAS; without computing the kernel matrices
-(scikit-learn: with them, since it computes them inside):
+Bike sharing, $m = 1000$ test hours, Apple M5, without computing the kernel
+matrices (scikit-learn: with them, since it computes them inside).
+ulm.lam runs twice: on ulmBLAS, and with \code{backend="cblas"}
+(\cref{sec:cblas}) on OpenBLAS, the BLAS of NumPy and SciPy here, so
+that the comparison with the hand-written versions measures the mapping
+alone:
 
 \begin{center}
 \begin{tabular}{rrrrrr}
 \toprule
-$n$ & ulm.lam & SciPy by hand & NumPy literal & scikit-learn \\
+$n$ & ulm.lam/OpenBLAS & ulm.lam/ulmBLAS & SciPy by hand & NumPy literal & scikit-learn \\
 \midrule
-1000 & 0.022\,s & 0.036\,s & 0.046\,s & 0.039\,s \\
-2000 & 0.062\,s & 0.052\,s & 0.181\,s & 0.117\,s \\
-4000 & 0.243\,s & 0.218\,s & 1.008\,s & 0.522\,s \\
-8000 & 1.478\,s & 1.297\,s & 7.066\,s & 3.149\,s \\
+1000 & 0.041\,s & 0.022\,s & 0.028\,s & 0.046\,s & 0.041\,s \\
+2000 & 0.049\,s & 0.065\,s & 0.057\,s & 0.232\,s & 0.163\,s \\
+4000 & 0.203\,s & 0.248\,s & 0.246\,s & 1.095\,s & 0.598\,s \\
+8000 & 1.094\,s & 1.400\,s & 1.365\,s & 7.755\,s & 3.406\,s \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-ulm.lam is $4.8\times$ faster than the literal formula at $n = 8000$ and
-gets the hand version without anyone writing it.
-Against SciPy's hand version it is about 10\,\% slower; the difference is
-\code{potrf} (at $n = 8000$: 0.875\,s in ulmBLAS, 0.804\,s in OpenBLAS),
-while \code{trsm} and \code{syrk} are on par.
+On the same BLAS, ulm.lam is $1.2\times$ faster than SciPy by hand,
+$1.7$--$1.8\times$ faster than scikit-learn and $5$--$7\times$ faster than
+the literal formula ($n \ge 2000$), and it gets the hand version without
+anyone writing it.
+On ulmBLAS it is about as fast as SciPy by hand; the difference to
+OpenBLAS is \code{potrf} (at $n = 8000$: 0.875\,s in ulmBLAS, 0.804\,s in
+OpenBLAS), while \code{trsm} and \code{syrk} are on par.
 
 \paragraph{What the example shows is missing.}
 The kernel matrices are elementwise functions (NumPy here).
@@ -2157,6 +2187,43 @@ operations that reuse the factorisation (scikit-learn fits them here, on
 1500 points).
 Often only the variances $\operatorname{diag}(\Sigma)$ are needed, which
 cost $O(nm)$ instead of $O(nm^2)$ after $V = L\inv K_*$.
+
+\subsection{Large problems: $n = 100\,000$ on bwUniCluster 3.0}\label{sec:gpcluster}
+\file{examples/gp\_cluster} runs the same function with $K$ as
+\code{inout} (factorised in place: at $n = 100\,000$, $K$ has 80\,GB) on the
+3D Road Network data (UCI; 434\,874 points, the altitude predicted from the
+position, $m = 2000$, Mat\'ern 3/2 kernel), compiled on the cluster for its
+Zen~4 nodes (2$\times$ AMD EPYC 9454, 96 cores; GCC 14.2,
+\code{-march=native}, OpenMP).
+It compares ulm.lam on ulmBLAS, ulm.lam on MKL (\code{backend=cblas}) and
+the same steps written by hand with MKL, as SciPy on MKL would do them
+(times in seconds, 96 threads):
+
+\begin{center}
+\begin{tabular}{rrrrr}
+\toprule
+$n$ & RMSE & ulm.lam/ulmBLAS & ulm.lam/MKL & by hand/MKL \\
+\midrule
+4\,000 & 11.03\,m & 0.48 & 0.32 & 0.26 \\
+12\,500 & 6.85\,m & 3.50 & 2.22 & 2.18 \\
+25\,000 & 4.83\,m & 19.8 & 7.49 & 7.57 \\
+50\,000 & 3.17\,m & 137.0 & 26.59 & 26.60 \\
+100\,000 & 1.95\,m & 579.0 & 168.0 & 154.8 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\emph{The mapping} is as fast as the hand-written version on the same BLAS:
+whichever of the two runs first in a process pays about 25\,\%, and with
+that accounted for (both orders at $n = 50\,000$) the times are equal; at
+$n = 100\,000$ ulm.lam ran first.
+\emph{ulmBLAS} is $3.4\times$ slower than MKL at $n = 100\,000$, although
+it is faster single threaded ($n = 12\,500$: 18.3\,s against 22.6\,s):
+its task-parallel \code{potrf} and \code{trtrs} scale to about 12 threads
+(one NUMA domain) and hardly beyond, and \code{sylrk} runs on one thread.
+The error of the prediction falls from 15.5\,m ($n = 1000$) to 1.95\,m:
+exact GP regression profits from all the data, which makes the
+$O(n^3)$ factorisation, and a fast \code{potrf}, the point.
 
 % =====================================================================
 \section{Testing strategy}

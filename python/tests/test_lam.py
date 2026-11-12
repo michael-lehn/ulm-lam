@@ -254,7 +254,7 @@ class Lam(unittest.TestCase):
         src = self.lib.gls.cpp
         self.assertTrue(src.startswith("/* gls: matrices by reference"))
         self.assertIn('extern "C" int64_t\ngls(', src)
-        self.assertIn("ulmBLAS::", src)
+        self.assertRegex(src, r"(ulmBLAS|ulm_lam_cblas)::")
         self.assertTrue(src.rstrip().endswith("}"))
         self.assertNotIn("gls_inout(", src)  # only this function
         self.assertIn(src, self.lib.source)
@@ -405,7 +405,7 @@ class Dynamic(unittest.TestCase):
             tmp = n * m if left else k * p
             self.assertEqual(self.lib.chain_d.workspace_size(A, B, C),
                              (8 * tmp + 63) // 64 * 64)
-        self.assertIn("ulmBLAS::gemm", self.lib.chain_d.cpp)
+        self.assertIn("::gemm<", self.lib.chain_d.cpp)
         self.assertIn("<=", self.lib.chain_d.cpp)  # the cost comparison
 
     def test_workspaces(self):

@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ulmblas/lapack/potrf.h>
+#include <ulmblas/lapack/trtrs.h>
 #include <ulmblas/ulmblas.h>
 extern "C" void
 observe(size_t, double *);
@@ -64,8 +65,9 @@ estimate(double *v1, double *v2, size_t v3, int8_t *v4, int64_t *v5)
 		int64_t v27 = (int64_t)32320000;
 		double *v28 = (double *)(v17 + v27);
 		memcpy(v28, v1, 3200000);
-		ulmBLAS::trlsm<std::ptrdiff_t>(2000, 200, v7, false, false, v19,
-		                               2000, 1, v28, 200, 1);
+		(void)ulmBLAS::trtrs<std::ptrdiff_t>(true, false, false, false,
+		                                     2000, 200, v19, 2000, 1,
+		                                     v28, 200, 1);
 		ulmBLAS::sylrk<std::ptrdiff_t>(200, 2000, v7, v28, 1, 200, v8,
 		                               v26, 200, 1);
 		int64_t v29 =

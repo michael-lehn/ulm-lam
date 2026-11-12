@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ulmblas/lapack/potrf.h>
+#include <ulmblas/lapack/trtrs.h>
 #include <ulmblas/ulmblas.h>
 /* gls: matrices by reference (row-major), owned by the caller
  *   v1  size_t          in
@@ -74,8 +75,8 @@ gls(size_t v1, size_t v2, double *v3, double *v4, double *v5, double *v6,
 		double *v41 = (double *)(v29 + v40);
 		size_t v42 = (8 * v1) * v2;
 		memcpy(v41, v3, v42);
-		ulmBLAS::trlsm<std::ptrdiff_t>(v1, v2, v9, false, false, v31,
-		                               v1, 1, v41, v2, 1);
+		(void)ulmBLAS::trtrs<std::ptrdiff_t>(
+		    true, false, false, false, v1, v2, v31, v1, 1, v41, v2, 1);
 		ulmBLAS::sylrk<std::ptrdiff_t>(v2, v1, v9, v41, 1, v2, v10, v39,
 		                               v2, 1);
 		int64_t v43 =

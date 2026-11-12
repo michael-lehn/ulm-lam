@@ -59,8 +59,11 @@ syrk, no inverse.  On public data, downloaded into `build/data/`: the
 Mauna Loa CO2 forecast of Rasmussen and Williams (NOAA, National Oceanic
 and Atmospheric Administration; plot in `build/gp/co2.png`) and hourly bike
 rentals (UCI, University of California, Irvine), timed for n up to 8000
-(`--full`: 16000) against NumPy, SciPy and scikit-learn.  Optional:
-SciPy, scikit-learn, Matplotlib.
+(`--full`: 16000) against NumPy, SciPy and scikit-learn; ulm.lam runs on
+ulmBLAS and, with `backend="cblas"`, on the OpenBLAS of NumPy.  Optional:
+SciPy, scikit-learn, Matplotlib.  `examples/gp_cluster/` runs it with n up
+to 100 000 on bwUniCluster 3.0: ulm.lam on MKL is as fast as the same steps
+written by hand with MKL; ulmBLAS is 3.4x slower there (thread scaling).
 
 ## Conventions of the generated code
 
@@ -75,6 +78,11 @@ SciPy, scikit-learn, Matplotlib.
   `*workspace_info`: -1 query, 0 allocate, > 0 its size in bytes); a query
   accumulates those of the callees.
 - ulmBLAS is called with `IndexType = std::ptrdiff_t`.
+- A second lowering, `BACKEND=cblas` (`lam.compile(..., backend="cblas")`,
+  or `ULM_LAM_BACKEND=cblas`): the same kernel calls on CBLAS and LAPACK
+  (MKL, OpenBLAS, Accelerate) via `include/ulm_lam/cblas_backend.h`, so
+  that the mapping can be measured independently of ulmBLAS.  Link flags:
+  `ULM_LAM_BLAS_LIBS` (default: Homebrew's OpenBLAS).
 
 ## Document
 

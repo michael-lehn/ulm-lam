@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # ulm-lam-compile.sh IN.mlir OUTPREFIX [SHOWDIR]
 #
-# The ulm.lam pipeline from ulm_lam ops to C++ calling ulmBLAS.  Writes
+# The ulm.lam pipeline from ulm_lam ops to C++ calling ulmBLAS (or, with
+# BACKEND=cblas, CBLAS and LAPACK).  Writes
 #   OUTPREFIX.selected.mlir    after kernel selection (ulm_lamk on tensors)
 #   OUTPREFIX.bufferized.mlir  after bufferization (ulm_lamk on memrefs)
 #   OUTPREFIX.emitc.mlir       after convert-ulm-lamk-to-ulmblas
@@ -24,7 +25,8 @@ BUFFERIZE='ulm-lam-results-to-out-params, eliminate-empty-tensors,
 	buffer-results-to-out-params{hoist-static-allocs modify-public-functions add-result-attr},
 	func.func(buffer-loop-hoisting), buffer-deallocation-pipeline, canonicalize,
 	ulm-lam-workspace, canonicalize, cse, ulm-lam-info, canonicalize'
-LOWER='convert-ulm-lamk-to-ulmblas, reconcile-unrealized-casts, form-expressions'
+# BACKEND=cblas: the same calls on CBLAS/LAPACK (include/ulm_lam/cblas_backend.h)
+LOWER="convert-ulm-lamk-to-ulmblas{backend=${BACKEND:-ulmblas}}, reconcile-unrealized-casts, form-expressions"
 
 opt "$IN" --pass-pipeline="builtin.module($SELECT)" -o "$OUT.selected.mlir"
 opt "$OUT.selected.mlir" --pass-pipeline="builtin.module($BUFFERIZE)" \

@@ -6,6 +6,7 @@
 #include <ulmblas/lapack/getrf.h>
 #include <ulmblas/lapack/getrs.h>
 #include <ulmblas/lapack/potrf.h>
+#include <ulmblas/lapack/trtrs.h>
 #include <ulmblas/ulmblas.h>
 /* lu: matrices by reference (row-major), owned by the caller
  *   v1  double[64][64]  in    read only
@@ -142,8 +143,8 @@ upper(double *v1, double *v2, double *v3)
 {
     double v4 = 1.00000000000000000e+00;
     memcpy(v3, v2, 16384);
-    ulmBLAS::trusm<std::ptrdiff_t>(64, 32, v4, false, false, v1, 64, 1, v3, 32,
-                                   1);
+    (void)ulmBLAS::trtrs<std::ptrdiff_t>(false, false, false, false, 64, 32, v1,
+                                         64, 1, v3, 32, 1);
     return 0;
 }
 /* right: matrices by reference (row-major), owned by the caller
@@ -159,8 +160,8 @@ right(double *v1, double *v2, double *v3)
 {
     double v4 = 1.00000000000000000e+00;
     memcpy(v3, v1, 16384);
-    ulmBLAS::trusm<std::ptrdiff_t>(64, 32, v4, false, false, v2, 1, 64, v3, 1,
-                                   64);
+    (void)ulmBLAS::trtrs<std::ptrdiff_t>(false, false, false, false, 64, 32, v2,
+                                         1, 64, v3, 1, 64);
     return 0;
 }
 /* right_t: matrices by reference (row-major), owned by the caller
@@ -176,8 +177,8 @@ right_t(double *v1, double *v2, double *v3)
 {
     double v4 = 1.00000000000000000e+00;
     memcpy(v3, v1, 16384);
-    ulmBLAS::trlsm<std::ptrdiff_t>(64, 32, v4, false, false, v2, 64, 1, v3, 1,
-                                   64);
+    (void)ulmBLAS::trtrs<std::ptrdiff_t>(true, false, false, false, 64, 32, v2,
+                                         64, 1, v3, 1, 64);
     return 0;
 }
 /* chol_vec: matrices by reference (row-major), owned by the caller

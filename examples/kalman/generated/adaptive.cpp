@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ulmblas/lapack/potrf.h>
+#include <ulmblas/lapack/trtrs.h>
 #include <ulmblas/ulmblas.h>
 extern "C" void
 update_covariance(size_t, double *);
@@ -81,9 +82,9 @@ estimate_adaptive(double *v1, double *v2, size_t v3, int8_t *v4, int64_t *v5)
 		    if (v37 == v9) {
 			observe(i31, v23);
 			memcpy(v27, v1, 3200000);
-			ulmBLAS::trlsm<std::ptrdiff_t>(2000, 200, v7, false,
-			                               false, v21, 2000, 1, v27,
-			                               200, 1);
+			(void)ulmBLAS::trtrs<std::ptrdiff_t>(
+			    true, false, false, false, 2000, 200, v21, 2000, 1,
+			    v27, 200, 1);
 			ulmBLAS::sylrk<std::ptrdiff_t>(200, 2000, v7, v27, 1,
 			                               200, v8, v25, 200, 1);
 			int64_t v39 = ulmBLAS::potrf<std::ptrdiff_t>(
