@@ -34,7 +34,8 @@ external functions with Python callbacks, parameter intents, symmetric
 matrices stored as one triangle: `Matrix(n, n, "spd", stored="lower")`) and
 the runtime (compilation, workspaces, calling).  A factorisation that fails
 numerically (a matrix assumed spd that is not, a singular one) raises
-`lam.InfoError`.  See `python/examples/kalman.py`,
+`lam.InfoError`.  Temporaries live in a 64-byte aligned workspace that the library
+reuses (`lib.workspace`), or in one passed as `work=lam.Workspace(size)`.  See `python/examples/kalman.py`,
 `python/examples/adaptive_kalman.py` (the covariance updated in place by a
 Python callback in every step) and `python/tests/`.  NumPy is optional.
 
@@ -96,7 +97,7 @@ What is checked (`make`):
 - `make cases`: eight kernel selection cases against naive evaluations;
   info for an indefinite and a singular matrix and a too small workspace.
 - `make dynamic`: one compiled GLS with run-time sizes for six sizes.
-- `make python`: the Python frontend: 33 unit tests (among them symmetric
+- `make python`: the Python frontend: 34 unit tests (among them symmetric
   matrices stored as one triangle, with NaN in the other one) and the two
   Kalman examples against NumPy.
 

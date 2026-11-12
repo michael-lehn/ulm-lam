@@ -15,10 +15,10 @@
  *   v7  int8_t *        work  workspace (bytes)
  *   v8  int64_t *       info  -1: query, 0: allocate, >0: size of work
  * returns info:
- *    0  success
- *    1  Cholesky factorisation of v4: not positive definite
- *    2  Cholesky factorisation of a computed matrix: not positive definite
- *   -8  v8: workspace too small
+ *     0  success
+ *     1  Cholesky factorisation of v4: not positive definite
+ *     2  Cholesky factorisation of a computed matrix: not positive definite
+ *    -8  v8: workspace too small
  * (info != 0: the outputs are unspecified)
  */
 extern "C" int64_t

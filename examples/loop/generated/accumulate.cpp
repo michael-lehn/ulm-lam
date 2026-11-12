@@ -14,8 +14,8 @@ foo(size_t, double *);
  *   v5  int8_t *          work   workspace (bytes)
  *   v6  int64_t *         info   -1: query, 0: allocate, >0: size of work
  * returns info:
- *    0  success
- *   -6  v6: workspace too small
+ *     0  success
+ *    -6  v6: workspace too small
  * (info != 0: the outputs are unspecified)
  */
 extern "C" int64_t

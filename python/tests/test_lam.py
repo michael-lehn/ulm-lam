@@ -408,6 +408,27 @@ class Dynamic(unittest.TestCase):
         self.assertIn("ulmBLAS::gemm", self.lib.chain_d.cpp)
         self.assertIn("<=", self.lib.chain_d.cpp)  # the cost comparison
 
+    def test_workspaces(self):
+        """The library's workspace is reused (and grows); an explicit one
+        can be given; one that is too small raises InfoError (-i)."""
+        lib = self.lib
+        X, M, y = self.problem(80, 6)
+        ref = lib.gls_d(X, M, y)
+        need = lib.gls_d.workspace_size(X, M, y)
+        self.assertGreaterEqual(lib.workspace.size, need)
+        self.assertEqual(lib.workspace.address % 64, 0)
+        address = lib.workspace.address
+        lib.gls_d(*self.problem(20, 3))  # smaller: the same memory
+        self.assertEqual(lib.workspace.address, address)
+        ws = lam.Workspace(need)
+        self.assertTrue(np.array_equal(lib.gls_d(X, M, y, work=ws), ref))
+        arr = np.zeros(need, dtype=np.int8)
+        self.assertTrue(np.array_equal(lib.gls_d(X, M, y, work=arr), ref))
+        with self.assertRaises(lam.InfoError) as e:
+            lib.gls_d(X, M, y, work=lam.Workspace(need - 64))
+        self.assertLess(e.exception.info, 0)
+        self.assertIn("workspace too small", str(e.exception))
+
     def test_inconsistent_sizes(self):
         X, M, y = self.problem(6, 2)
         with self.assertRaises(LamError):

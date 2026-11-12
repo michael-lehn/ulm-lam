@@ -14,9 +14,9 @@
  *   v4  int8_t *        work  workspace (bytes)
  *   v5  int64_t *       info  -1: query, 0: allocate, >0: size of work
  * returns info:
- *    0  success
- *    1  LU factorisation of v1: singular
- *   -5  v5: workspace too small
+ *     0  success
+ *     1  LU factorisation of v1: singular
+ *    -5  v5: workspace too small
  * (info != 0: the outputs are unspecified)
  */
 extern "C" int64_t
@@ -75,9 +75,9 @@ lu(double *v1, double *v2, double *v3, int8_t *v4, int64_t *v5)
  *   v4  int8_t *        work  workspace (bytes)
  *   v5  int64_t *       info  -1: query, 0: allocate, >0: size of work
  * returns info:
- *    0  success
- *    1  LU factorisation of v1: singular
- *   -5  v5: workspace too small
+ *     0  success
+ *     1  LU factorisation of v1: singular
+ *    -5  v5: workspace too small
  * (info != 0: the outputs are unspecified)
  */
 extern "C" int64_t
@@ -187,9 +187,9 @@ right_t(double *v1, double *v2, double *v3)
  *   v4  int8_t *        work  workspace (bytes)
  *   v5  int64_t *       info  -1: query, 0: allocate, >0: size of work
  * returns info:
- *    0  success
- *    1  Cholesky factorisation of v1: not positive definite
- *   -5  v5: workspace too small
+ *     0  success
+ *     1  Cholesky factorisation of v1: not positive definite
+ *    -5  v5: workspace too small
  * (info != 0: the outputs are unspecified)
  */
 extern "C" int64_t
@@ -266,9 +266,9 @@ sum(double *v1, double *v2, double *v3, double *v4)
  *   v6  int8_t *        work  workspace (bytes)
  *   v7  int64_t *       info  -1: query, 0: allocate, >0: size of work
  * returns info:
- *    0  success
- *    1  LU factorisation of v1: singular
- *   -7  v7: workspace too small
+ *     0  success
+ *     1  LU factorisation of v1: singular
+ *    -7  v7: workspace too small
  * (info != 0: the outputs are unspecified)
  */
 extern "C" int64_t

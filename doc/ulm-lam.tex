@@ -1931,6 +1931,11 @@ a number times a matrix is \code{ulm_lam.scale}, \code{.T} is
         earlier argument}); external functions get the sizes they use as
         parameters too, and Python callbacks receive arrays of the actual
         shapes.  One compiled library serves all sizes.
+  \item The workspace: every library has one (\code{lib.workspace},
+        64-byte aligned), which its functions reuse and which grows as
+        needed; \code{lib.f(..., work=lam.Workspace(size))} passes another
+        one (\code{lib.f.workspace_size(...)} is the query).  A call from
+        a Python callback gets its own.
         Intermediate results get their properties from
         \code{ulm-lam-infer-properties}.
   \item Parameters have intents: a matrix is \code{in} by default;

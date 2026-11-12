@@ -16,8 +16,8 @@
  *   v9   int8_t *        work  workspace (bytes)
  *   v10  int64_t *       info  -1: query, 0: allocate, >0: size of work
  * returns info:
- *    0  success
- *   -10  v10: workspace too small
+ *      0  success
+ *    -10  v10: workspace too small
  * (info != 0: the outputs are unspecified)
  */
 extern "C" int64_t

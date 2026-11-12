@@ -407,6 +407,9 @@ class Library:
         self._decls = decls
         self._externs = externs
         self._callbacks = {}
+        # the default workspace of the library's functions (reused)
+        self.workspace = Workspace()
+        self._workspace_busy = 0
         self._pending: list[BaseException] = []
         self.functions = {}
         for name, rows in ifaces.items():
@@ -482,6 +485,52 @@ def _copy_into(dst, r, t: fe.MatrixType, name: str) -> None:
                            f"{t}")
     for k, v in enumerate(vals):
         flat[k] = v
+
+
+class Workspace:
+    """Memory for the temporaries of compiled functions, 64-byte aligned
+    (the workspace convention of the generated code, as LAPACK's work
+    arrays).
+
+        ws = lam.Workspace(lib.f.workspace_size(*args))
+        lib.f(*args, work=ws)
+
+    Every Library has one (lib.workspace) that its functions use by
+    default; it grows as needed.  A workspace that is too small makes the
+    call raise InfoError (info = -i)."""
+
+    def __init__(self, size: int = 0):
+        self._buf = None
+        self.size = 0
+        self.address = 0
+        self.reserve(size)
+
+    def reserve(self, size: int) -> None:
+        """At least `size` bytes (contents are not kept)."""
+        if size <= self.size:
+            return
+        buf = (ctypes.c_char * (size + 63))()
+        self._buf = buf
+        self.address = (ctypes.addressof(buf) + 63) & ~63
+        self.size = size
+
+    @classmethod
+    def of(cls, array) -> "Workspace":
+        """A workspace in a writable buffer (e.g. an int8 NumPy array)."""
+        w = cls()
+        mv = memoryview(array)
+        if mv.readonly:
+            raise fe.LamError("a workspace must be writable")
+        if _np is not None and isinstance(array, _np.ndarray):
+            if not array.flags["C_CONTIGUOUS"]:
+                raise fe.LamError("a workspace must be contiguous")
+            w.address = array.ctypes.data
+        else:
+            w.address = ctypes.addressof(
+                (ctypes.c_char * mv.nbytes).from_buffer(array))
+        w._buf = array
+        w.size = mv.nbytes
+        return w
 
 
 class InfoError(fe.LamError):
@@ -596,15 +645,34 @@ class CompiledFunction:
         # the caller keeps `keep` alive while C uses the pointers
         return cargs, outs, keep
 
-    def __call__(self, *args):
+    def __call__(self, *args, work=None):
+        """Call the function.  work: a Workspace (or a writable int8 NumPy
+        array) for its temporaries; by default the library's workspace,
+        which grows as needed and is reused by later calls."""
         cargs, outs, keep = self._arguments(args)
+        lib = self.lib
+        borrowed = False
         if self.has_workspace:
             size = self.workspace_size(*args)
-            work = ctypes.create_string_buffer(max(size, 1))
-            info = ctypes.c_int64(size)
-            cargs += [ctypes.addressof(work), ctypes.addressof(info)]
-        self.lib._pending.clear()
-        info = self._c(*cargs)
+            if work is None:
+                if lib._workspace_busy:  # a call from a callback
+                    work = Workspace(size)
+                else:
+                    work = lib.workspace
+                    work.reserve(size)
+                    borrowed = True
+            elif not isinstance(work, Workspace):
+                work = Workspace.of(work)
+            # too small: the function returns info = -i (InfoError)
+            info = ctypes.c_int64(max(work.size, 1))
+            cargs += [work.address, ctypes.addressof(info)]
+            keep.append(work)
+        lib._pending.clear()
+        lib._workspace_busy += borrowed
+        try:
+            info = self._c(*cargs)
+        finally:
+            lib._workspace_busy -= borrowed
         del keep  # the argument buffers lived until here
         if self.lib._pending:
             raise self.lib._pending[0]

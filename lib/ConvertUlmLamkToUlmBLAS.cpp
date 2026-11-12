@@ -830,19 +830,25 @@ describe(func::FuncOp f)
 	    line.pop_back();
 	s += "\n" + line;
     }
-    // the info result (ulm-lam-info)
+    // the info result (ulm-lam-info), codes right-aligned
     if (f.getNumResults() == 1) {
-	s += "\n * returns info:\n *    0  success";
+	std::vector<std::pair<std::string, std::string>> codes{
+	    {"0", "success"}};
 	if (auto checks = f->getAttrOfType<ArrayAttr>("ulm_lam.info"))
-	    for (auto [k, a] : llvm::enumerate(checks)) {
-		std::string num = std::to_string(k + 1);
-		s += "\n *   " + std::string(num.size() < 2 ? " " : "") + num +
-		     "  " + cast<StringAttr>(a).str();
-	    }
-	bool work = n >= 2 && f.getArgAttr(n - 1, "ulm_lam.workspace");
-	if (work)
-	    s += "\n *   -" + std::to_string(n) + "  v" + std::to_string(n) +
-	         ": workspace too small";
+	    for (auto [k, a] : llvm::enumerate(checks))
+		codes.push_back(
+		    {std::to_string(k + 1), cast<StringAttr>(a).str()});
+	if (n >= 2 && f.getArgAttr(n - 1, "ulm_lam.workspace"))
+	    codes.push_back(
+	        {"-" + std::to_string(n),
+		 "v" + std::to_string(n) + ": workspace too small"});
+	size_t w = 0;
+	for (auto &c : codes)
+	    w = std::max(w, c.first.size());
+	s += "\n * returns info:";
+	for (auto &[code, text] : codes)
+	    s += "\n *   " + std::string(w - code.size() + 1, ' ') + code +
+	         "  " + text;
 	s += "\n * (info != 0: the outputs are unspecified)";
     }
     return s + "\n */";
