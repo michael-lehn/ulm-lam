@@ -200,6 +200,8 @@ struct CompiledFunction
     call::Function
     codes::Dict{Int,String}
     has_workspace::Bool
+    wsizes::Dict{Vector{Int},Int}  # the workspace size by the run-time sizes
+    eltype::DataType               # of the library (Float64 or Float32)
 end
 
 mutable struct Library
@@ -309,7 +311,8 @@ function compile(functions::Vector{LamFunction}; name::AbstractString=string(fun
         caller = eval(:(($(argnames...),) -> ccall($fptr, Int64, ($(types...),), $(argnames...))))
         L.functions[Symbol(fname)] = CompiledFunction(L, fname, rows, byname[fname], caller,
                                                        get(codes, fname, Dict{Int,String}()),
-                                                       !isempty(rows) && rows[end][2] == "info")
+                                                       !isempty(rows) && rows[end][2] == "info",
+                                                       Dict{Vector{Int},Int}(), eltype)
     end
     L
 end
@@ -320,15 +323,17 @@ compile(f::LamFunction; kw...) = compile([f]; kw...)
 jsize(x::AbstractVector) = (length(x), 1)
 jsize(x::AbstractMatrix) = size(x)
 
-function bind_sizes!(env::Dict{Symbol,Int}, t::MatType, x, what)
-    (x isa AbstractVecOrMat) || throw(LamError("$what: expected an array, got $(typeof(x))"))
+function bind_sizes!(env::Dict{Symbol,Int}, t::MatType, x, whatf)
+    # (the description of the argument, built only for an error)
+    what() = whatf isa AbstractString ? whatf : "$(whatf[1]): $(whatf[2])"
+    (x isa AbstractVecOrMat) || throw(LamError("$(what()): expected an array, got $(typeof(x))"))
     r, c = jsize(x)
     for (d, v) in ((t.rows, r), (t.cols, c))
         if d isa Symbol
             get!(env, d, v) == v ||
-                throw(LamError("$what: size :$d = $v, but $(env[d]) from an earlier argument"))
+                throw(LamError("$(what()): size :$d = $v, but $(env[d]) from an earlier argument"))
         elseif d != v
-            throw(LamError("$what: expected $t, got $r x $c"))
+            throw(LamError("$(what()): expected $t, got $r x $c"))
         end
     end
 end
@@ -343,7 +348,7 @@ function sizes_of(f::CompiledFunction, args)
                        "($(join(first.(params), ", ")))"))
     env = Dict{Symbol,Int}()
     for (a, (n, t)) in zip(args, params)
-        t isa MatType && bind_sizes!(env, t, a, "$(f.name): $n")
+        t isa MatType && bind_sizes!(env, t, a, (f.name, n))
     end
     env
 end
@@ -353,18 +358,20 @@ function arguments(f::CompiledFunction, args, query::Bool)
     env = sizes_of(f, args)
     cargs = Any[Csize_t(env[x]) for x in f.fn.sizes]
     keep, outs = Any[], Any[]
-    results = copy(f.fn.results)
+    T = f.eltype
     k = 1
-    for (t, intent) in f.rows[length(f.fn.sizes)+1:end]
-        intent in ("work", "info") && continue
+    nres = 0
+    for j in length(f.fn.sizes)+1:length(f.rows)
+        intent = f.rows[j][2]
+        (intent == "work" || intent == "info") && continue
         if intent == "out"
-            rt = popfirst!(results)
+            nres += 1
+            rt = f.fn.results[nres]
             if query  # the workspace query writes no results
                 push!(cargs, C_NULL)
                 continue
             end
             r, c = resolve_dim(rt.rows, env), resolve_dim(rt.cols, env)
-            T = f.lib.eltype
             m = rt.isvec ? Vector{T}(undef, r) : Matrix{T}(undef, r, c)
             push!(outs, m)
             push!(cargs, Ptr{Cvoid}(pointer(m)))
@@ -379,16 +386,16 @@ function arguments(f::CompiledFunction, args, query::Bool)
                 continue
             end
             if intent == "inout"
-                a isa Array{f.lib.eltype} ||
-                    throw(LamError("$(f.name): $pname is InOut: it must be an Array{$(f.lib.eltype)} (it is written)"))
-            elseif !(a isa Array{f.lib.eltype})
-                a = Array{f.lib.eltype}(a)  # converted (a copy) for reading
+                a isa Array{T} ||
+                    throw(LamError("$(f.name): $pname is InOut: it must be an Array{$T} (it is written)"))
+            elseif !(a isa Array{T})
+                a = Array{T}(a)  # converted (a copy) for reading
             end
             push!(keep, a)
             push!(cargs, Ptr{Cvoid}(pointer(a)))
         elseif pt isa FloatType
             a isa Real || throw(LamError("$(f.name): $pname must be a number"))
-            push!(cargs, f.lib.eltype(a))
+            push!(cargs, T(a))
         else
             (a isa Integer && a >= 0) ||
                 throw(LamError("$(f.name): $pname must be a non-negative integer"))
@@ -410,6 +417,8 @@ function workspace_size(f::CompiledFunction, args...)
     Int(info[])
 end
 
+const WSIZES_LOCK = ReentrantLock()
+
 """The workspace of the library for the current task (reused by its calls)."""
 task_workspace(lib::Library) =
     get!(Workspace, task_local_storage(), (:ulm_lam_workspace, objectid(lib)))::Workspace
@@ -424,7 +433,13 @@ function (f::CompiledFunction)(args...; work::Union{Workspace,Nothing}=nothing)
     cargs, outs, keep = arguments(f, args, false)
     info = Ref{Int64}(0)
     if f.has_workspace
-        size = workspace_size(f, args...)
+        # (the size depends on the run-time sizes only: queried once each)
+        key = Int[cargs[k] for k in 1:length(f.fn.sizes)]
+        size = @lock WSIZES_LOCK get(f.wsizes, key, -1)
+        if size < 0
+            size = workspace_size(f, args...)
+            @lock WSIZES_LOCK f.wsizes[key] = size
+        end
         # one workspace per task: calls from several threads do not share it;
         # a call from a callback (the task's workspace is busy) gets its own
         busy = task_busy(lib)
@@ -526,7 +541,7 @@ The library of the ulm.lam function f for element type T (Float64 or
 Float32), compiled at its first call (with the backend from
 ULM_LAM_BACKEND, default :julia) and kept.
 """
-function library(f::LamFunction, T::Type=Float64)
+function library(f::LamFunction, T::Type=Float64)::Library
     libs = get!(() -> Dict{DataType,Library}(), JIT, f)
     get!(libs, T) do
         lib = compile(f; name=T == Float64 ? string(f.name) : "$(f.name)_f32", eltype=T)
@@ -538,8 +553,15 @@ end
 
 # Float32 if every array argument is Float32 (as Julia's BLAS would compute),
 # otherwise Float64 (arguments converted)
-eltype_of(args) = (arrs = filter(a -> a isa AbstractArray, collect(args));
-                   !isempty(arrs) && all(a -> eltype(a) == Float32, arrs) ? Float32 : Float64)
+function eltype_of(args)
+    any32 = false
+    for a in args
+        a isa AbstractArray || continue
+        eltype(a) == Float32 || return Float64
+        any32 = true
+    end
+    any32 ? Float32 : Float64
+end
 
 """
     f(args...; work=nothing)
@@ -548,7 +570,7 @@ Call the ulm.lam function f with Julia arrays: compiled at the first call,
 for Float64, or for Float32 if all arrays are Float32.
 """
 (f::LamFunction)(args...; work::Union{Workspace,Nothing}=nothing) =
-    getproperty(library(f, eltype_of(args)), f.name)(args...; work=work)
+    library(f, eltype_of(args)).functions[f.name](args...; work=work)
 
 """
     bind!(f; name = g, ...)
