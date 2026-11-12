@@ -1054,7 +1054,7 @@ The kernel sequence is identical, so the time of the generated code on
 MKL compared with the hand-written MKL version measures the mapping, and
 the same code on ulmBLAS compared with it on MKL measures ulmBLAS
 (\cref{sec:gpcluster}).
-All 35 Python tests pass with both backends.
+All 36 Python tests pass with both backends.
 
 \paragraph{The ulm.lam ABI.}
 \begin{itemize}
@@ -1809,36 +1809,57 @@ independent LU solve, and all versions agree.
 \toprule
 & before the loop & per step & 20 steps & \\
 \midrule
-ulm.lam & 32.8\,ms & 0.55\,ms & 43.8\,ms & $1\times$ \\
-ulm.lam without \code{loop-invariant-code-motion} & 25.2\,ms & 7.78\,ms & 180.9\,ms & $4.1\times$ \\
-explicit inverses in every step & 0.2\,ms & 118.9\,ms & 2378.5\,ms & $54\times$ \\
-explicit inverses, hoisted by hand & 122.7\,ms & 0.13\,ms & 125.3\,ms & $2.9\times$ \\
-operator $G$, hoisted by hand & 111.1\,ms & 0.22\,ms & 115.6\,ms & $2.6\times$ \\
+ulm.lam & 15.3\,ms & 0.17\,ms & 18.6\,ms & $1\times$ \\
+ulm.lam without \code{loop-invariant-code-motion} & 16.8\,ms & 6.13\,ms & 139.3\,ms & $7.5\times$ \\
+explicit inverses in every step & 0.2\,ms & 81.6\,ms & 1631.2\,ms & $88\times$ \\
+explicit inverses, hoisted by hand & 69.4\,ms & 0.21\,ms & 73.7\,ms & $4.0\times$ \\
+operator $G$, hoisted by hand & 66.5\,ms & 0.24\,ms & 71.2\,ms & $3.8\times$ \\
 \midrule
 worst normal-equation residual over all steps & \multicolumn{4}{r}{$1.0\cdot10^{-15}$} \\
 largest relative difference between the versions & \multicolumn{4}{r}{$2.1\cdot10^{-15}$} \\
 \bottomrule
 \end{tabular}
 \caption{Formula (1) in a loop, $n=2000$, $m=200$, on an Apple M5,
-ulmBLAS with \code{-mcpu=native}.  The time per step includes
-\code{observe}, which computes $Hx_i$ plus noise.}
+ulmBLAS with \code{-mcpu=native} and OpenMP.  The time per step is
+measured over 200 steps (for ulm.lam it includes forming the operator
+$P$ before the loop, which pays off from 24 steps on) and includes
+\code{observe}, which computes $Hx_i$ plus noise; ``20 steps'' is the
+part before the loop plus 20 times the time per step.}
 \label{tab:kalman}
 \end{table}
 
-The hand-hoisted versions pay more before the loop (the explicit inverse
-of the $2000\times2000$ matrix $R$) and less per step: one or two
-\code{gemv} instead of a triangular solve with the $2000\times2000$ factor
-$L$.
-They are faster than ulm.lam from about 210 to 240 steps on; the FLOP count
-predicts the same: forming $G$ once (with solves) costs about
-$10^9$\,FLOPs and saves about $4\cdot10^6$ per step.
-So ulm.lam's choice is right for short runs and wrong for long ones.
-The fix belongs into kernel selection: in a loop, a product can be split
-into a loop-invariant subchain ($G$, computed before the loop, with
-solves rather than explicit inverses) and the rest, and the decision
-depends on the trip count.
-The trip count is known only at run time here, so this needs a hint or a
-run-time choice between two versions; it is not implemented yet.
+\paragraph{The operator before the loop, chosen by the trip count.}
+In every step ulm.lam solves with the $2000\times2000$ factor $L$
+($O(n^2)$ per step); the hand-written version ``operator $G$'' forms
+$G=(H\T R\inv H)\inv H\T R\inv$ once ($O(n^2m)$) and needs one \code{gemv}
+($O(nm)$) per step.
+Which is better depends on the number of steps.
+Kernel selection now decides it: for a product in a loop whose factors
+are loop invariant except the last one, it considers the invariant
+prefix as an operator $P$ of its own and compares
+\[
+  \mathrm{cost}(P) + t\cdot 2\,\mathrm{rows}(P)\,\mathrm{cols}(P)\,\mathrm{cols}(y)
+  \quad\text{with}\quad t\cdot\mathrm{cost(step)}
+\]
+for $t$ steps.
+$P = S\inv H\T R\inv$ itself is not computable in place (it would solve
+on the transposed view $H\T L\invT$ of the reused $W = L\inv H$), but its
+transpose is: $P\T = R\inv H S\inv = L\invT W S\inv$, a \code{trsm} on a copy
+of $W$ and two \code{trsm} with the factor of $S$; the step is then
+$P\T{}\T y$, a \code{gemv} with \code{trans}.
+The flops of a step are matrix--vector flops (\code{trsv}, \code{gemv}),
+which are memory bound and reach about a tenth of the rate of the
+matrix--matrix flops that form $P$ (on the M5 as on Zen~4); they are
+weighted with 10.
+The trip count is a run-time value here, so the generated code computes
+the condition before the loop, forms $P$ if it holds, and runs one of two
+loop bodies under the same condition; a constant trip count folds the
+branch.
+Both variants compute into the same destination, so the loop still
+allocates nothing.
+For $n=2000$, $m=200$ the operator pays off from 24 steps on, and at 200
+steps ulm.lam is faster than both hand-hoisted versions
+(\cref{tab:kalman}).
 
 \subsection{The covariance changes in every step}\label{sec:adaptive}
 
@@ -2025,7 +2046,7 @@ callback is raised again when the compiled function returns.
 
 \paragraph{Results.}
 \file{python/examples/kalman.py} runs the loop of \cref{lst:pykalman}
-with $n=4000$ sensors, $m=200$ states and 20 steps, measurements and
+with $n=4000$ sensors, $m=200$ states and 200 steps, measurements and
 estimates passing through Python callbacks, and compares it with NumPy
 (linked to OpenBLAS):
 
@@ -2033,24 +2054,28 @@ estimates passing through Python callbacks, and compares it with NumPy
 \small
 \begin{tabular}{@{}lr@{}}
 \toprule
-ulm.lam (generated C++, ulmBLAS) & 194.5\,ms \\
-NumPy, the formula as written in the loop & 16515.6\,ms \\
-NumPy, the operator $G$ computed by hand before the loop & 266.1\,ms \\
+ulm.lam (generated C++, ulmBLAS) & 122.0\,ms \\
+NumPy, the formula as written in the loop & 270271.2\,ms \\
+NumPy, the operator $G$ computed by hand before the loop & 368.4\,ms \\
 \midrule
-relative difference to NumPy & $4.4\cdot10^{-15}$ \\
+relative difference to NumPy & $4.1\cdot10^{-15}$ \\
 \bottomrule
 \end{tabular}
 \end{center}
 
 \noindent
-Written as on paper, the Python program is faster than the version a
-NumPy programmer optimises by hand ($1.4\times$), and 85 times faster than
-the formula written literally.
-\file{python/tests/test_lam.py} (19 tests, \code{make python}) checks
+Written as on paper, the Python program is $3\times$ faster than the
+version a NumPy programmer optimises by hand, and more than 2000 times
+faster than the formula written literally.
+Before the operator was formed by kernel selection (with the per-step
+solves), ulm.lam took 482\,ms here and lost against the hand-written
+version.
+\file{python/tests/test_lam.py} (36 tests, \code{make python}) checks
 GLS with lists, buffers and NumPy arrays, \code{inout} parameters, loops
-with carried matrices and callbacks, functions calling functions, two
-results, NumPy layouts, exceptions in callbacks, and the errors of the
-frontend.
+with carried matrices and callbacks, the operator chosen by the trip
+count, functions calling functions, two results, NumPy layouts, one
+triangle of symmetric matrices, run-time sizes, \code{info},
+exceptions in callbacks, and the errors of the frontend.
 
 \paragraph{The adaptive filter in Python.}
 \file{python/examples/adaptive_kalman.py} is the adaptive filter of
@@ -2369,8 +2394,11 @@ $O(n^3)$ factorisation, and a fast \code{potrf}, the point.
   \item \code{strategy=search}: sharing across products beyond reuse of
         computed intervals, factorisation choices, anytime search; the LAMP
         benchmark; a full Kalman filter (\cref{sec:kalman}).
-  \item Loop-aware selection: split loop-invariant subchains off products
-        (the operator $G$ of \cref{sec:kalman}) depending on the trip count.
+  \item \emph{Done:} loop-aware selection: a loop-invariant prefix of a
+        product is formed before the loop if the trip count, known at run
+        time, makes it pay off (the operator of \cref{sec:kalman}).
+        Open: invariant subchains other than a prefix, and a measured
+        instead of a fixed weight for matrix--vector flops.
   \item \emph{Done for Python} (\cref{sec:python}): a frontend that
         traces Python to \code{ulm_lam} IR, with a runtime and callbacks.
         Open: \code{strategy=egraph} experiments; QR and $LDL\T$ once

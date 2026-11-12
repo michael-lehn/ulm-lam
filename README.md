@@ -116,7 +116,10 @@ What is checked (`make`):
   solves),
   the C++ runs and is verified against an independent LU solve.
 - `make kalman`: formula (1) in a loop with changing y; everything that does
-  not depend on y runs once before the loop; compared with the same code
+  not depend on y runs once before the loop, and if the loop runs often
+  enough (decided at run time from the trip count) the whole operator
+  (H^T R^-1 H)^-1 H^T R^-1 is formed there too, leaving one gemv per step;
+  compared with the same code
   without loop-invariant code motion and with explicit inverses.  Second
   example: the covariance is updated in place in every step
   (`update_covariance(i, R)`, R by reference).
@@ -129,7 +132,7 @@ What is checked (`make`):
   info for an indefinite and a singular matrix and a too small workspace.
 - `make dynamic`: one compiled GLS with run-time sizes for six sizes.
 - `make gp`: the GP showcase above (needs the network once).
-- `make python`: the Python frontend: 35 unit tests (among them symmetric
+- `make python`: the Python frontend: 36 unit tests (among them symmetric
   matrices stored as one triangle, with NaN in the other one) and the two
   Kalman examples against NumPy.
 

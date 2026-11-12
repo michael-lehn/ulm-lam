@@ -394,6 +394,30 @@ class Dynamic(unittest.TestCase):
                               X.T @ np.linalg.solve(M, ys.T)).T
         self.assertLess(np.abs(out - ref).max(), 1e-12)
 
+    def test_operator_hoisted_by_trip_count(self):
+        """b_i = (H^T R^-1 H)^-1 H^T R^-1 y_i: with many steps the operator
+        is formed before the loop (one gemv per step), with few steps the
+        solves run in every step; the generated code decides from the
+        trip count (n = 80, m = 60: from 8 steps on)."""
+        n, m = 80, 60
+        X, M, _ = self.problem(n, m)
+        cpp = self.lib.estimate_d.cpp
+        self.assertEqual(cpp.count("ulmBLAS::gemv")
+                         + cpp.count("ulm_lam_cblas::gemv"), 2)
+        for steps in (3, 20):
+            ys = self.rng.uniform(-1, 1, (steps, n))
+            out = np.empty((steps, m))
+
+            def record(i, b):
+                out[i] = b[:, 0]
+
+            self.lib.bind(observe_n=lambda i: ys[i], record_m=record)
+            self.lib.estimate_d(X, M, steps)
+            ref = np.linalg.solve(X.T @ np.linalg.solve(M, X),
+                                  X.T @ np.linalg.solve(M, ys.T)).T
+            self.assertLess(np.abs(out - ref).max() / np.abs(ref).max(),
+                            1e-11)
+
     def test_plan_chosen_at_run_time(self):
         for n, k, m, p in [(60, 3, 60, 3), (3, 60, 3, 60)]:
             A, B, C = (self.rng.uniform(-1, 1, s)

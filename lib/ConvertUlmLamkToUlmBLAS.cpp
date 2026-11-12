@@ -205,6 +205,31 @@ struct IndexAndLowering : OpConversionPattern<arith::AndIOp>
     }
 };
 
+/// max(x, y) on index values (size_t), compared as signed (ptrdiff_t):
+/// the trip count of a loop, max(ub - lb, 0) after canonicalisation.
+/// (arith-to-emitc has no pattern for arith.maxsi.)
+struct IndexMaxSILowering : OpConversionPattern<arith::MaxSIOp>
+{
+    using OpConversionPattern::OpConversionPattern;
+    LogicalResult
+    matchAndRewrite(arith::MaxSIOp op, OpAdaptor a,
+                    ConversionPatternRewriter &rw) const override
+    {
+	if (!op.getType().isIndex())
+	    return rw.notifyMatchFailure(op, "not on index");
+	Location loc = op.getLoc();
+	Type t = getTypeConverter()->convertType(op.getType());
+	Type s = emitc::PtrDiffTType::get(op.getContext());
+	Value x = emitc::CastOp::create(rw, loc, s, a.getLhs());
+	Value y = emitc::CastOp::create(rw, loc, s, a.getRhs());
+	Value gt = emitc::CmpOp::create(rw, loc, rw.getI1Type(),
+	                                emitc::CmpPredicate::gt, x, y);
+	rw.replaceOpWithNewOp<emitc::ConditionalOp>(op, t, gt, a.getLhs(),
+	                                            a.getRhs());
+	return success();
+    }
+};
+
 // ---- the workspace ------------------------------------------------------
 
 /// A temporary in the workspace: (T *)(work + offset).
@@ -1026,7 +1051,7 @@ struct ConvertUlmLamkToUlmBLAS
 	RewritePatternSet patterns(ctx);
 	patterns.add<AllocLowering, DeallocLowering, CopyLowering, ViewLowering,
 	             CastLowering, LoadLowering, StoreLowering,
-	             IndexAndLowering, GemmLowering, SymmLowering, SymvLowering,
+	             IndexAndLowering, IndexMaxSILowering, GemmLowering, SymmLowering, SymvLowering,
 	             SycompleteLowering, SyrkLowering, GemvLowering,
 	             TrsmLowering, TrsvLowering, GeaxpyLowering, GescalLowering,
 	             PotrfLowering, GetrfLowering, GetrsLowering, CallLowering>(

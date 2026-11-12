@@ -46,7 +46,7 @@ record(size_t, double *);
 extern "C" int64_t
 estimate(double *v1, double *v2, size_t v3, int8_t *v4, int64_t *v5)
 {
-    int64_t v6 = 35537600;
+    int64_t v6 = 38737600;
     double v7 = 1.00000000000000000e+00;
     double v8 = 0.0e+00;
     int64_t v9 = 0;
@@ -64,7 +64,7 @@ estimate(double *v1, double *v2, size_t v3, int8_t *v4, int64_t *v5)
 	    bool v14 = v11 == v9;
 	    int8_t *v15;
 	    if (v14) {
-		void *v16 = aligned_alloc(64, 35537600);
+		void *v16 = aligned_alloc(64, 38737600);
 		v15 = (int8_t *)v16;
 	    } else {
 		v15 = v4;
@@ -94,32 +94,55 @@ estimate(double *v1, double *v2, size_t v3, int8_t *v4, int64_t *v5)
 		    ulmBLAS::potrf<std::ptrdiff_t>(true, 200, v26, 200, 1);
 		int64_t v30 = v29 != v9 ? 2 : v9;
 		if (v30 == v9) {
-		    int64_t v31 = (int64_t)35520000;
-		    double *v32 = (double *)(v17 + v31);
-		    int64_t v33 = (int64_t)35536000;
-		    double *v34 = (double *)(v17 + v33);
-		    for (size_t i35 = v10; i35 < v3; i35 += 1) {
-			observe(i35, v32);
-			ulmBLAS::trlsv<std::ptrdiff_t>(2000, false, v19, 2000,
-			                               1, v32, 1);
-			ulmBLAS::gemv<std::ptrdiff_t>(200, 2000, v7, v28, 1,
-			                              200, v32, 1, v8, v34, 1);
-			ulmBLAS::trlsv<std::ptrdiff_t>(200, false, v26, 200, 1,
-			                               v34, 1);
-			ulmBLAS::trusv<std::ptrdiff_t>(200, false, v26, 1, 200,
-			                               v34, 1);
-			record(i35, v34);
+		    ptrdiff_t v31 = (ptrdiff_t)v3;
+		    ptrdiff_t v32 = (ptrdiff_t)v10;
+		    bool v33 = (v31 > v32 ? v3 : v10) * 8000000 + 960000000 <
+		               (v31 > v32 ? v3 : v10) * 48800000;
+		    int64_t v34 = (int64_t)35520000;
+		    double *v35 = (double *)(v17 + v34);
+		    if (v33) {
+			ulm_lam_copy(v35, v28, 3200000);
+			(void)ulmBLAS::trtrs<std::ptrdiff_t>(
+			    false, false, false, false, 2000, 200, v19, 1, 2000,
+			    v35, 200, 1);
+			(void)ulmBLAS::trtrs<std::ptrdiff_t>(
+			    true, false, false, false, 200, 2000, v26, 200, 1,
+			    v35, 1, 200);
+			(void)ulmBLAS::trtrs<std::ptrdiff_t>(
+			    false, false, false, false, 200, 2000, v26, 1, 200,
+			    v35, 1, 200);
+		    }
+		    int64_t v36 = (int64_t)38720000;
+		    double *v37 = (double *)(v17 + v36);
+		    int64_t v38 = (int64_t)38736000;
+		    double *v39 = (double *)(v17 + v38);
+		    for (size_t i40 = v10; i40 < v3; i40 += 1) {
+			observe(i40, v37);
+			if (v33) {
+			    ulmBLAS::gemv<std::ptrdiff_t>(
+			        200, 2000, v7, v35, 1, 200, v37, 1, v8, v39, 1);
+			} else {
+			    ulmBLAS::trlsv<std::ptrdiff_t>(2000, false, v19,
+			                                   2000, 1, v37, 1);
+			    ulmBLAS::gemv<std::ptrdiff_t>(
+			        200, 2000, v7, v28, 1, 200, v37, 1, v8, v39, 1);
+			    ulmBLAS::trlsv<std::ptrdiff_t>(200, false, v26, 200,
+			                                   1, v39, 1);
+			    ulmBLAS::trusv<std::ptrdiff_t>(200, false, v26, 1,
+			                                   200, v39, 1);
+			}
+			record(i40, v39);
 		    }
 		}
 		v24 = v30;
 	    } else {
 		v24 = v23;
 	    }
-	    int64_t v36 = v24;
+	    int64_t v41 = v24;
 	    if (v14) {
 		free(v17);
 	    }
-	    v13 = v36;
+	    v13 = v41;
 	}
 	v12 = v13;
     }

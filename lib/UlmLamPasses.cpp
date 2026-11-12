@@ -44,6 +44,7 @@
 
 #include "UlmLamDialect.h"
 
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
@@ -55,6 +56,7 @@
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 #include <limits>
+#include <optional>
 #include <map>
 
 using namespace mlir;
@@ -828,6 +830,69 @@ class Selector
 	    ->getResult(0);
     }
 
+    /// x copied into dest (bufferization.materialize_in_destination, a
+    /// memref.copy after bufferization); the result is dest's buffer.
+    Value
+    into(Value x, Value dest, Location loc)
+    {
+	if (x.getType() != dest.getType())
+	    x = AssumeOp::create(b, loc, dest.getType(), x, false);
+	return bufferization::MaterializeInDestinationOp::create(b, loc, x,
+	                                                         dest)
+	    .getResult();
+    }
+
+    /// x := x op(T)^-1 in place, T triangular (a solve from the right).
+    Value
+    solveRightInPlace(const Leaf &t, Value x, Location loc)
+    {
+	return lk::TrsmOp::create(b, loc, TypeRange{x.getType()},
+	                          lk::Side::right,
+	                          t.lower ? lk::Uplo::lower : lk::Uplo::upper,
+	                          t.trans ? lk::Trans::trans : lk::Trans::none,
+	                          lk::Diag::non_unit,
+	                          constant(elementType(x), 1, loc), t.v, x)
+	    ->getResult(0);
+    }
+
+    /// alpha * product of leaves [i, j] computed in the new destination
+    /// dest itself (a tensor.empty): a gemm writes into it, a chain that
+    /// ends with solves copies its first operand into it and solves there
+    /// in place.  So results of different branches (scf.if) that are
+    /// computed into the same destination share its buffer.
+    Value
+    emitInto(Chain &c, int i, int j, Value dest, double alpha, Location loc)
+    {
+	Choice ch = c.choice[i][j];
+	int s = ch.split;
+	auto scale = [&](Value x) -> Value {
+	    if (alpha == 1)
+		return x;
+	    return lk::GescalOp::create(b, loc, TypeRange{x.getType()},
+	                                constant(elementType(x), alpha, loc),
+	                                x)
+	        ->getResult(0);
+	};
+	// interval [a, z] in dest: computed into it, or copied
+	auto part = [&](int a, int z) -> Value {
+	    if (a < z && c.choice[a][z].kind != Choice::Reuse)
+		return emitInto(c, a, z, dest, 1.0, loc);
+	    return into(fullLeaf(operand(c, a, z, loc)).v, dest, loc);
+	};
+	switch (ch.kind) {
+	case Choice::Gemm:
+	case Choice::Gram:
+	    return emit(c, i, j, dest, alpha, 0.0, loc);
+	case Choice::SolveLeft:
+	    return scale(solveInPlace(c.leaves[i], part(s + 1, j), loc));
+	case Choice::SolveRight:
+	    return scale(solveRightInPlace(c.leaves[j], part(i, s), loc));
+	default:
+	    return accumulate(emit(c, i, j, {}, 1, 0, loc), dest, alpha, 0.0,
+	                      loc);
+	}
+    }
+
     /// dest = beta dest + alpha x for kernels that cannot accumulate.
     Value
     accumulate(Value x, Value dest, double alpha, double beta, Location loc)
@@ -838,6 +903,16 @@ class Selector
 		return x;
 	    return lk::GescalOp::create(b, loc, TypeRange{x.getType()},
 	                                constant(elt, alpha, loc), x)
+	        ->getResult(0);
+	}
+	// a new destination: copy (scaling it by beta = 0 would read
+	// uninitialised memory, 0 * NaN = NaN)
+	if (beta == 0 && dest.getDefiningOp<tensor::EmptyOp>()) {
+	    Value r = into(x, dest, loc);
+	    if (alpha == 1)
+		return r;
+	    return lk::GescalOp::create(b, loc, TypeRange{r.getType()},
+	                                constant(elt, alpha, loc), r)
 	        ->getResult(0);
 	}
 	if (beta != 1)
@@ -1105,6 +1180,10 @@ class Selector
 	b.setInsertionPoint(mul);
 	if (plans.size() > 1)
 	    return choosePlan(c, plans, mul, dest, alpha, beta);
+	if (!dest && !inBranch)
+	    if (std::optional<Value> r = hoistOperator(c, plans.front(), mul,
+	                                               alpha, beta))
+		return *r;
 	c.choice = plans.front();
 	Choice top = c.choice[0][k - 1];
 	if (!dest && (top.kind == Choice::Gemm || top.kind == Choice::Gram)) {
@@ -1197,6 +1276,164 @@ class Selector
 	Value r = build(0);
 	inBranch = saved;
 	return r;
+    }
+
+    /// A product in a loop whose factors are loop invariant except the
+    /// last one, e.g. b_i = S^-1 H^T R^-1 y_i: instead of the whole chain
+    /// in every step (O(n^2) per step: solves with the factors of R), the
+    /// operator P = S^-1 H^T R^-1 can be formed once before the loop
+    /// (O(n^2 m)) and applied in every step (gemv, O(n m)).  That pays off
+    /// if the loop runs often enough:
+    ///
+    ///   cost(P) + trips * 2 rows(P) cols(P) cols(y) < trips * cost(step)
+    ///
+    /// The trip count is usually known only at run time, so the generated
+    /// code decides: the condition and P (if chosen) before the loop, and
+    /// in the loop both variants under the same condition (a constant trip
+    /// count folds it).  Returns nothing if the product has no such form.
+    /// Flops of a matrix-vector kernel in units of matrix-matrix flops
+    /// (see hoistOperator).
+    static constexpr int64_t kLevel2 = 10;
+
+    std::optional<Value>
+    hoistOperator(Chain &c, const Plan &plan, MulOp mul, double alpha,
+                  double beta)
+    {
+	auto loop = mul->getParentOfType<scf::ForOp>();
+	int k = c.leaves.size();
+	if (!loop || k < 3 || beta != 0)
+	    return std::nullopt;
+	auto outside = [&](Value v) {
+	    return !v || loop.isDefinedOutsideOfLoop(v);
+	};
+	const Leaf &last = c.leaves[k - 1];
+	if (last.kind != Leaf::Mat || outside(last.v))
+	    return std::nullopt;
+	for (int i = 0; i + 1 < k; ++i)
+	    if (!outside(c.leaves[i].v) || !outside(c.leaves[i].piv))
+		return std::nullopt;
+	for (const Leaf &l : c.leaves)
+	    for (OpFoldResult d : {l.rowsDim(), l.colsDim()})
+		if (!outside(dyn_cast_if_present<Value>(d)))
+		    return std::nullopt;
+	// the operator: the invariant prefix as a chain of its own, its
+	// reused parts must be available before the loop
+	Chain pre;
+	pre.leaves.assign(c.leaves.begin(), c.leaves.end() - 1);
+	SmallVector<Plan> prePlans = plansOf(pre, loop);
+	// or its transpose: P^T = F_k^T ... F_1^T, e.g. (S^-1 H^T R^-1)^T =
+	// R^-1 H S^-1 = L^-T (L^-1 H) S^-1, where the reused L^-1 H can be
+	// solved with in place (H^T L^-T cannot: a transposed view)
+	bool transposed = false;
+	if (prePlans.empty()) {
+	    Chain t;
+	    for (auto it = pre.leaves.rbegin(); it != pre.leaves.rend(); ++it) {
+		Leaf l = *it;
+		if (l.stored == Leaf::Full)
+		    l.trans = !l.trans;
+		t.leaves.push_back(l);
+	    }
+	    prePlans = plansOf(t, loop);
+	    pre = std::move(t);
+	    transposed = true;
+	}
+	if (prePlans.size() != 1)
+	    return std::nullopt;
+	pre.choice = prePlans.front();
+	int kp = pre.leaves.size();
+	// a single solve leaf, or a solve from the right with an LU
+	// factorisation, gives no operator
+	if (pre.choice[0][kp - 1].kind == Choice::None)
+	    return std::nullopt;
+
+	Location loc = mul.getLoc();
+	OpBuilder::InsertionGuard guard(b);
+	b.setInsertionPoint(loop);
+	auto cst = [&](int64_t v) {
+	    return arith::ConstantIndexOp::create(b, loc, v).getResult();
+	};
+	auto mulI = [&](Value x, Value y) {
+	    return arith::MulIOp::create(b, loc, x, y).getResult();
+	};
+	auto addI = [&](Value x, Value y) {
+	    return arith::AddIOp::create(b, loc, x, y).getResult();
+	};
+	Value span = arith::SubIOp::create(b, loc, loop.getUpperBound(),
+	                                   loop.getLowerBound());
+	Value q =
+	    arith::CeilDivSIOp::create(b, loc, span, loop.getStep()).getResult();
+	// lb < ub ? q : 0 (a max with 0 would become arith.maxsi, which has no
+	// EmitC lowering)
+	Value trips = arith::SelectOp::create(
+	    b, loc,
+	    arith::CmpIOp::create(b, loc, arith::CmpIPredicate::slt,
+	                          loop.getLowerBound(), loop.getUpperBound()),
+	    q, cst(0));
+	Value costP = costValue(pre, 0, kp - 1, loc);
+	// Per step only matrix-vector kernels run if op(y) is a vector
+	// (trsv, gemv): memory bound, they reach about a tenth of the flop
+	// rate of the matrix-matrix kernels that form P (trsm, gemm), on the
+	// Apple M5 as on Zen 4.  So a flop of the step counts kLevel2 times.
+	int64_t w = isVector(last.cols()) ? kLevel2 : 1;
+	Value apply = mulI(
+	    cst(2 * w),
+	    mulI(mulI(dimIndex(pre.leaves[0].rowsDim(), loc),
+	              dimIndex(pre.leaves[kp - 1].colsDim(), loc)),
+	         dimIndex(last.colsDim(), loc)));
+	c.choice = plan;
+	Value costStep = mulI(cst(w), costValue(c, 0, k - 1, loc));
+	Value cond = arith::CmpIOp::create(
+	    b, loc, arith::CmpIPredicate::ult,
+	    addI(costP, mulI(trips, apply)), mulI(trips, costStep));
+
+	// before the loop: P, if the condition holds
+	Type elt = elementType(last.v);
+	bool saved = inBranch;
+	inBranch = true;
+	Value e = empty(pre.leaves[0], pre.leaves[kp - 1], elt, loc);
+	auto pIf = scf::IfOp::create(b, loc, TypeRange{e.getType()}, cond,
+	                             /*withElse=*/true);
+	{
+	    OpBuilder::InsertionGuard g(b);
+	    b.setInsertionPointToStart(pIf.thenBlock());
+	    // computed in e itself, so that both branches yield e's buffer
+	    Value pv = emitInto(pre, 0, kp - 1, e, 1.0, loc);
+	    if (pv.getType() != e.getType())
+		pv = AssumeOp::create(b, loc, e.getType(), pv, false);
+	    scf::YieldOp::create(b, loc, pv);
+	    b.setInsertionPointToStart(pIf.elseBlock());
+	    scf::YieldOp::create(b, loc, e);
+	}
+	Leaf op;
+	op.v = pIf.getResult(0);
+	op.trans = transposed;
+
+	// in the loop: P op(y), or the chain as before
+	b.setInsertionPoint(mul);
+	Type resultTy = mul.getType();
+	auto fit = [&](Value r) {
+	    return r.getType() == resultTy
+	               ? r
+	               : AssumeOp::create(b, loc, resultTy, r, false)
+	                     .getResult();
+	};
+	// both variants computed into the same destination d (one buffer,
+	// hoisted out of the loop by bufferization)
+	Value d = *newDest(mul);
+	auto ifOp = scf::IfOp::create(b, loc, TypeRange{resultTy}, cond,
+	                              /*withElse=*/true);
+	{
+	    OpBuilder::InsertionGuard g(b);
+	    b.setInsertionPointToStart(ifOp.thenBlock());
+	    scf::YieldOp::create(
+	        b, loc, fit(gemm(op, last, d, alpha * c.alpha, 0.0, loc)));
+	    b.setInsertionPointToStart(ifOp.elseBlock());
+	    c.choice = plan;
+	    scf::YieldOp::create(
+	        b, loc, fit(emitInto(c, 0, k - 1, d, alpha * c.alpha, loc)));
+	}
+	inBranch = saved;
+	return ifOp.getResult(0);
     }
 
     FailureOr<Value>
@@ -1337,6 +1574,7 @@ struct UlmLamSelectKernels
     getDependentDialects(DialectRegistry &registry) const override
     {
 	registry.insert<lk::UlmLamkDialect, tensor::TensorDialect,
+	                bufferization::BufferizationDialect,
 	                arith::ArithDialect, scf::SCFDialect>();
     }
     Option<std::string> strategy{*this, "strategy",

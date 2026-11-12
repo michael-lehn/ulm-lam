@@ -23,7 +23,11 @@ fail=0
 check() { if eval "$2"; then echo "ok    $1"; else echo "FAIL  $1"; fail=1; fi; }
 check "no factorisation in the loop" '[ "$(count "$SEL" "ulm_lamk.potrf\|ulm_lamk.getrf")" = 0 ]'
 check "no gemm or trsm in the loop" '[ "$(count "$SEL" "ulm_lamk.gemm\|ulm_lamk.trsm")" = 0 ]'
-check "loop body: 3 trsv and 1 gemv" '[ "$(count "$SEL" ulm_lamk.trsv)" = 3 ] && [ "$(count "$SEL" ulm_lamk.gemv)" = 1 ]'
+# the loop body has two variants, chosen before the loop from the trip
+# count: one gemv with the operator P = S^-1 H^T R^-1 formed before the
+# loop, or 3 trsv and 1 gemv (few steps)
+check "loop body: 1 gemv, or 3 trsv and 1 gemv" '[ "$(count "$SEL" ulm_lamk.trsv)" = 3 ] && [ "$(count "$SEL" ulm_lamk.gemv)" = 2 ]'
+check "operator P^T = L^-T W S^-1 before the loop, if the loop runs often enough" '[ "$(sed -n "/scf.if/,/scf.for/p" "$SEL" | grep -c ulm_lamk.trsm)" = 3 ]'
 check "two Cholesky factorisations before the loop" '[ "$(grep -c ulm_lamk.potrf "$SEL")" = 2 ]'
 check "no allocation or copy in the loop" '[ "$(count "$BUF" "memref.alloc\|memref.copy")" = 0 ]'
 check "observe(i, y) by reference" 'grep -q "func.func private @observe(index, memref<2000x1xf64>)$" "$BUF"'
