@@ -1,0 +1,17 @@
+B = 1024
+p = 4096
+k = 1024
+
+Matrix X(B, p) <>
+Matrix Y(B, k) <>
+Matrix W(p, k) <>
+ColumnVector b(k) <>
+ColumnVector ones(B) <>
+Scalar step <Positive>
+Matrix R(B, k) <>
+Matrix Wn(p, k) <>
+ColumnVector bn(k) <>
+
+R = X*W + ones*trans(b) - Y
+Wn = W - step*trans(X)*R
+bn = b - step*trans(R)*ones

@@ -165,7 +165,13 @@ What is checked (`make`):
   than as written) and Bayesian linear regression (run-time scalars alpha,
   beta on products; as fast as SciPy by hand, 3.4-4.6x faster than with
   `inv`).  The same in Julia: `make julia`.
-- `make python`: the Python frontend: 43 unit tests (among them symmetric
+- `make torch`: a linear layer trained by mini-batch gradient descent,
+  forward pass, gradients and SGD step written as formulas, against
+  PyTorch on the same BLAS (Accelerate): as fast where the gemms dominate,
+  5x faster than autograd for a small layer.  Runs in `build/venv-torch`
+  (NumPy and PyTorch from pip: PyTorch's OpenMP runtime clashes with
+  Homebrew's).
+- `make python`: the Python frontend: 44 unit tests (among them symmetric
   matrices stored as one triangle, with NaN in the other one) and the two
   Kalman examples against NumPy.
 

@@ -455,6 +455,41 @@ class Selector
 	return k;
     }
 
+    /// A term s (A B) of a sum with s known at run time (possibly with
+    /// constant scales): the product with alpha and its run-time scalars.
+    std::optional<std::tuple<MulOp, double, SmallVector<std::pair<Value, bool>>>>
+    scaledProductParts(Value t)
+    {
+	double alpha = 1;
+	SmallVector<std::pair<Value, bool>> scales;
+	Value v = t;
+	while (auto sc = v.getDefiningOp<ScaleOp>()) {
+	    if (!sc->hasOneUse())
+		return std::nullopt;
+	    FloatAttr c;
+	    if (matchPattern(sc.getAlpha(), m_Constant(&c)))
+		alpha *= c.getValueAsDouble();
+	    else
+		scales.push_back({sc.getAlpha(), false});
+	    v = sc.getOperand();
+	}
+	auto mul = v.getDefiningOp<MulOp>();
+	if (scales.empty() || !mul || !v.hasOneUse())
+	    return std::nullopt;
+	return std::make_tuple(mul, alpha, scales);
+    }
+
+    template <typename P>
+    std::optional<P>
+    scaledProductAs(Value t)
+    {
+	auto parts = scaledProductParts(t);
+	if (!parts)
+	    return std::nullopt;
+	auto &[m, a, sc] = *parts;
+	return P{m, a, sc};
+    }
+
     /// s * X with s known only at run time, used as a value (in a sum, a
     /// result, a loop): selected as gescal(s, X).  Inside products the
     /// scale is collected by leavesOf; s * I in a sum is adddiag.
@@ -475,9 +510,32 @@ class Selector
 	}
 	if (v.getDefiningOp<IdentityOp>())
 	    return false;
+	// s (A B) in a sum: emitted by the sum (a gemm with alpha s)
+	if (productInSum(op))
+	    return false;
 	return llvm::any_of(op->getUsers(), [](Operation *u) {
 	    return !isa<MulOp, ScaleOp, TransposeOp, InverseOp>(u);
 	});
+    }
+
+    /// A chain of scales (each used once) of a product (used once) that
+    /// ends in a sum: s (A B) + ...
+    static bool
+    productInSum(Operation *scale)
+    {
+	Value v = scale->getResult(0);
+	Operation *top = scale;
+	while (top->hasOneUse() && isa<ScaleOp>(*top->getUsers().begin()))
+	    top = *top->getUsers().begin();
+	if (!top->hasOneUse() || !isa<AddOp>(*top->getUsers().begin()))
+	    return false;
+	v = cast<ScaleOp>(scale).getOperand();
+	while (auto sc = v.getDefiningOp<ScaleOp>()) {
+	    if (!sc->hasOneUse())
+		return false;
+	    v = sc.getOperand();
+	}
+	return v.getDefiningOp<MulOp>() && v.hasOneUse();
     }
 
     static bool
@@ -485,13 +543,11 @@ class Selector
     {
 	if (!isa<MulOp>(op) || !op->hasOneUse())
 	    return false;
+	// (through scales, constant or known at run time: s (A B) in a sum is
+	// a gemm with alpha s)
 	Operation *user = *op->getUsers().begin();
-	if (auto sc = dyn_cast<ScaleOp>(user); sc && user->hasOneUse()) {
-	    // (a run-time scale: the product by itself, then gescal)
-	    if (!matchPattern(sc.getAlpha(), m_Constant()))
-		return false;
+	while (isa<ScaleOp>(user) && user->hasOneUse())
 	    user = *user->getUsers().begin();
-	}
 	return isa<AddOp>(user);
     }
 
@@ -1115,9 +1171,14 @@ class Selector
     }
 
     Value
-    gemm(Leaf l, Leaf r, Value dest, double alpha, double beta, Location loc)
+    gemm(Leaf l, Leaf r, Value dest, double alpha, double beta, Location loc,
+         Value alphaV = {})
     {
 	Type elt = elementType(l.v);
+	// alpha, or a run-time value (a scaled product, see chain)
+	auto alphaOf = [&] {
+	    return alphaV ? alphaV : constant(elt, alpha, loc);
+	};
 	if (!dest)
 	    dest = empty(l, r, elt, loc);
 	auto t = [](bool x) { return x ? lk::Trans::trans : lk::Trans::none; };
@@ -1136,23 +1197,23 @@ class Selector
 	        a.stored == Leaf::Lower ? lk::Uplo::lower : lk::Uplo::upper;
 	    if (left && isVector(g.cols()) && !g.trans)
 		return lk::SymvOp::create(b, loc, TypeRange{dest.getType()},
-		                          uplo, constant(elt, alpha, loc), a.v,
+		                          uplo, alphaOf(), a.v,
 		                          g.v, constant(elt, beta, loc), dest)
 		    ->getResult(0);
 	    return lk::SymmOp::create(b, loc, TypeRange{dest.getType()},
 	                              left ? lk::Side::left : lk::Side::right,
 	                              uplo, t(g.trans),
-	                              constant(elt, alpha, loc), a.v, g.v,
+	                              alphaOf(), a.v, g.v,
 	                              constant(elt, beta, loc), dest)
 	        ->getResult(0);
 	}
 	if (isVector(r.cols()) && !r.trans)
 	    return lk::GemvOp::create(b, loc, TypeRange{dest.getType()},
-	                              t(l.trans), constant(elt, alpha, loc),
+	                              t(l.trans), alphaOf(),
 	                              l.v, r.v, constant(elt, beta, loc), dest)
 	        ->getResult(0);
 	return lk::GemmOp::create(b, loc, TypeRange{dest.getType()}, t(l.trans),
-	                          t(r.trans), constant(elt, alpha, loc), l.v,
+	                          t(r.trans), alphaOf(), l.v,
 	                          r.v, constant(elt, beta, loc), dest)
 	    ->getResult(0);
     }
@@ -1352,16 +1413,38 @@ class Selector
 
     /// beta * dest + alpha * (product), dest null: a new value.
     FailureOr<Value>
-    chain(MulOp mul, Value dest, double alpha, double beta)
+    chain(MulOp mul, Value dest, double alpha, double beta,
+          ArrayRef<std::pair<Value, bool>> extraScales = {})
     {
 	Chain c;
 	dynScales.clear();
 	for (Value f : mul.getFactors())
 	    if (failed(leavesOf(f, mul, c.leaves, c.alpha)))
 		return failure();
+	dynScales.append(extraScales.begin(), extraScales.end());
 	if (!dynScales.empty() && !scalingProduct) {
-	    // s * product: the product without s, then scaled, then added
 	    SmallVector<std::pair<Value, bool>> scales = std::move(dynScales);
+	    // a single plan whose last kernel is a gemm (gemv): the scalar is
+	    // its alpha, beta * dest + (s alpha) A B in one kernel, as an
+	    // expert writes W - step X^T R
+	    SmallVector<Plan> plans = plansOf(c, mul);
+	    int k = c.leaves.size();
+	    if (plans.size() == 1 && plans[0][0][k - 1].kind == Choice::Gemm &&
+	        !inBranch) {
+		c.choice = plans[0];
+		int s = c.choice[0][k - 1].split;
+		Location loc = mul.getLoc();
+		if (!dest)
+		    b.setInsertionPoint(mul);
+		Leaf l = operand(c, 0, s, loc), r = operand(c, s + 1, k - 1, loc);
+		Value sv = scalarOf(scales, loc);
+		Type elt = elementType(l.v);
+		Value av = arith::MulFOp::create(
+		    b, loc, constant(elt, alpha * c.alpha, loc), sv);
+		Value d = dest ? dest : *newDest(mul);
+		return gemm(l, r, d, alpha * c.alpha, dest ? beta : 0.0, loc, av);
+	    }
+	    // otherwise: the product without s, then scaled, then added
 	    // (the product is emitted at its own position; scale and sum at
 	    // the caller's, where the accumulator is defined)
 	    OpBuilder::InsertPoint ip = b.saveInsertionPoint();
@@ -1657,7 +1740,15 @@ class Selector
     FailureOr<Value>
     selectAdd(AddOp add)
     {
-	SmallVector<std::pair<MulOp, double>> products;
+	// products with their constant scale and the scalars known at run
+	// time that scale them (s (A B) in a sum: alpha of the gemm)
+	struct Product
+	{
+	    MulOp mul;
+	    double alpha;
+	    SmallVector<std::pair<Value, bool>> scales;
+	};
+	SmallVector<Product> products;
 	SmallVector<std::pair<Value, double>> plain;
 	// alpha * I: added to the diagonal at the end (adddiag), alpha the
 	// product of the scales, constants or values known at run time
@@ -1675,10 +1766,14 @@ class Selector
 		identities.push_back(alphas);
 		continue;
 	    }
+	    if (auto pr = scaledProductAs<Product>(t)) {
+		products.push_back(*pr);
+		continue;
+	    }
 	    auto [inner, alpha] = peelScale(t);
 	    auto mul = inner.getDefiningOp<MulOp>();
 	    if (mul && inner.hasOneUse() && (inner == t || t.hasOneUse()))
-		products.push_back({mul, alpha});
+		products.push_back({mul, alpha, {}});
 	    else
 		plain.push_back({inner, alpha});
 	}
@@ -1712,8 +1807,9 @@ class Selector
 		beta = 1;
 	    }
 	}
-	for (auto [mul, alpha] : products) {
-	    FailureOr<Value> r = chain(mul, acc, alpha, beta);
+	for (Product &pr : products) {
+	    MulOp mul = pr.mul;
+	    FailureOr<Value> r = chain(mul, acc, pr.alpha, beta, pr.scales);
 	    if (failed(r))
 		return failure();
 	    acc = *r;

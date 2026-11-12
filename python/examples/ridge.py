@@ -71,6 +71,9 @@ def best(f, reps):
 
 def main():
     lib = lam.compile(ridge, name="ridge_py")
+    # the generated code, kept in the repository (doc/ulm-lam.tex, appendix)
+    (Path(__file__).resolve().parent / "generated" / "ridge.cpp").write_text(
+        lib.source)
     X0, y0 = bike_data()
     rng = np.random.default_rng(2)
     perm = rng.permutation(len(y0))

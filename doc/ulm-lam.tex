@@ -1244,7 +1244,7 @@ The kernel sequence is identical, so the time of the generated code on
 MKL compared with the hand-written MKL version measures the mapping, and
 the same code on ulmBLAS compared with it on MKL measures ulmBLAS
 (\cref{sec:gpcluster}).
-All 43 Python tests pass with both backends.
+All 44 Python tests pass with both backends.
 
 \paragraph{The ulm.lam ABI.}
 \begin{itemize}
@@ -2269,7 +2269,7 @@ faster than the formula written literally.
 Before the operator was formed by kernel selection (with the per-step
 solves), ulm.lam took 482\,ms here and lost against the hand-written
 version.
-\file{python/tests/test_lam.py} (43 tests, \code{make python}) checks
+\file{python/tests/test_lam.py} (44 tests, \code{make python}) checks
 GLS with lists, buffers and NumPy arrays, \code{inout} parameters, loops
 with carried matrices and callbacks, the operator chosen by the trip
 count, functions calling functions, two results, NumPy layouts, one
@@ -2564,7 +2564,8 @@ $O(n^3)$ factorisation, and a fast \code{potrf}, the point.
 % =====================================================================
 \section{More showcases}\label{sec:showcases}
 % =====================================================================
-Four more programs, each written as the formula and compared with NumPy
+Five more programs, each written as the formula and compared with NumPy
+(and one with PyTorch)
 (OpenBLAS) on the Apple M5 (\code{make showcases}).
 
 \paragraph{Ridge regression} (\file{python/examples/ridge.py}):
@@ -2718,6 +2719,67 @@ As fast as the version written by hand, $3.4$--$4.6\times$ faster than
 the formula with \code{inv}; ``in 2 sd'' is the share of test hours whose
 value lies within two predictive standard deviations.
 
+\paragraph{What PyTorch implements, as formulas}
+(\file{python/examples/torch_linear.py}, \code{make torch}).
+A linear layer (\code{torch.nn.Linear}: $Y = XW + \mathbf{1}b\T$) trained
+by mini-batch gradient descent on the mean squared error: the forward
+pass, the gradients and the optimiser step written as formulas, the whole
+loop one ulm.lam function:
+\begin{lstlisting}[style=py]
+with lam.loop(steps, carry=[W0, b0]) as L:
+    W, b = L.carried
+    X, Y = batch_x(L.index), batch_y(L.index)
+    R = X @ W + ones @ b.T - Y                         # forward, residual
+    L.next(W - step * (X.T @ R), b - step * (R.T @ ones))   # SGD step
+\end{lstlisting}
+Per step ulm.lam generates four kernels: \code{gemm} $XW$ into the buffer
+of $-Y$ ($\beta = -1$), the bias as a rank-1 \code{gemm}, \code{gemm}
+$X\T R$ with $\alpha = -\mathrm{step}$ and $\beta = 1$ directly into $W$,
+and \code{gemv} $R\T\mathbf{1}$ into $b$; $W$ and $b$ stay in place, and
+nothing is allocated in the loop.
+That needed one more rule: a term $s(AB)$ of a sum with $s$ known at run
+time is a product whose \code{gemm} gets $s$ as its $\alpha$ (scales of
+scales fold into one, also for run-time scalars, as an \code{arith.mulf}).
+Compared with PyTorch~2.15 in float64 on the same BLAS (Accelerate, which
+PyTorch uses on macOS; ulm.lam with \code{backend="cblas"}), 100 steps
+(seconds):
+
+\begin{center}
+\begin{tabular}{rrrrrrr}
+\toprule
+$B$ & $p$ & $k$ & ulm.lam/Accelerate & ulm.lam/ulmBLAS & PyTorch autograd & PyTorch by hand \\
+\midrule
+32 & 64 & 16 & 0.001 & 0.001 & 0.004 & 0.001 \\
+256 & 1024 & 256 & 0.080 & 0.157 & 0.088 & 0.081 \\
+1024 & 4096 & 1024 & 3.739 & 9.730 & 3.779 & 3.797 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+``PyTorch autograd'' is \code{nn.Linear} with \code{backward()} and
+\code{optim.SGD}, ``by hand'' the same steps as torch operations without
+autograd.
+ulm.lam is as fast as PyTorch where the \code{gemm}s dominate, and
+$5\times$ faster than autograd for a small layer, where PyTorch's work per
+operation dominates; the results agree to $10^{-14}$.
+So the operations that PyTorch implements in C++ (the forward and backward
+of its modules, the optimiser steps) can be written as formulas and
+compiled by ulm.lam without losing speed: ulm.lam could implement such a
+framework.
+Caveats: the gradient formulas are written by hand (ulm.lam does not
+differentiate; differentiating its IR symbolically is a natural
+extension); the comparison is in float64, while ML mostly uses float32,
+which ulm.lam does not support end to end yet; on ulmBLAS, whose
+\code{gemm} runs on one thread so far (and without OpenMP here), ulm.lam
+is $2$--$2.6\times$ slower; and \code{torch.compile} failed on this
+machine (PyTorch's headers do not compile with this Apple clang:
+\code{unknown type name 'uint'}).
+PyTorch brings its own OpenMP runtime, which aborts the process if
+Homebrew's (NumPy's OpenBLAS, ulm.lam's OpenMP) is loaded too; the
+showcase therefore runs in a virtual environment with NumPy and PyTorch
+from pip (both on Accelerate) and builds ulm.lam without OpenMP.
+
 \paragraph{The same in Julia} (\file{julia/examples/ridge.jl},
 \file{attention.jl}, \file{kalman_filter.jl}, \file{bayes.jl}, \code{make julia}), against
 what a Julia programmer writes (Julia 1.13 with its OpenBLAS on 4
@@ -2798,7 +2860,7 @@ halve the second product.
 \end{itemize}
 
 % =====================================================================
-\section{Status and plan}
+\section{Status and plan}\label{sec:status}
 % =====================================================================
 
 \paragraph{Done.}
@@ -2837,42 +2899,69 @@ halve the second product.
 \end{itemize}
 
 \paragraph{Compared with Linnea.}
-Linnea itself has not been run for this comparison, and the comparison on
-Linnea's 25 application problems is still to be done (see below), so it
-compares features, and the one case where both have been compared.
-\begin{itemize}
-  \item \emph{Linnea is ahead in the mapping itself.}
-        It searches a graph of alternative derivations (best-first,
-        anytime), with choices of factorisations and common
-        subexpressions across statements; ulm.lam has
-        \code{strategy=gmc} only: per product the generalised matrix
-        chain (Linnea's inner algorithm), plus reuse of computed
-        intervals, \code{syrk} for $Z\T Z$, inverses of products factor
-        by factor, and the operator before a loop.
-        Linnea knows more factorisations and kernels (QR, eigenvalue
-        decomposition, diagonal matrices, \code{trmm}) and more rewrite
-        rules; ulm.lam has Cholesky and LU, \code{symm}, \code{symv},
-        \code{syrk}, triangular solves and \code{adddiag}.
-        Linnea was evaluated on 25 applications and 100 random
-        expressions against Julia, Armadillo, Eigen and Matlab; ulm.lam
-        on GLS, the Kalman update, GP regression and the cases of
-        \file{examples/cases}.
-  \item \emph{Equal where compared:} for GLS ulm.lam derives exactly
-        Linnea's kernel sequence (\cref{tab:derivation}).
-  \item \emph{ulm.lam goes beyond what Linnea generates} (straight-line
-        Julia code for fixed sizes): sizes known only at run time, with
-        the plan chosen at run time; loops, with invariant work moved out
-        and the operator formed before the loop by the trip count;
-        memory planned by bufferization (in-place kernels, \code{inout},
-        a LAPACK-style workspace with query, no allocation in loops);
-        \code{info} instead of aborting; symmetric matrices stored as one
-        triangle; scalars known at run time; a Python frontend with
-        callbacks; two backends (ulmBLAS, CBLAS/LAPACK); problems up to
-        $n = 100\,000$ (\cref{sec:gpcluster}).
-\end{itemize}
-In short: in the breadth of the mapping (search, factorisations, kernel
-catalogue) Linnea is clearly ahead; in what a compiler needs to be used
-(sizes, loops, memory, errors, integration into a language) ulm.lam is.
+Linnea (\url{https://github.com/HPAC/linnea}, last changed in 2021) was run
+on the problems of ulm.lam's examples (\file{examples/linnea}: the inputs in
+Linnea's language, \file{run.sh}, and the best algorithm Linnea generates
+for each in \file{generated/}; running it needs Python~3.12, TatSu~5.6.1
+and setuptools~${<}\,70$, and its \code{--time-limit} option fails).
+Linnea finds each solution in under 10\,s.
+The kernel sequences (FLOPs for the sizes of the inputs):
+
+\begin{center}
+\small
+\begin{tabular}{@{}lp{0.4\linewidth}p{0.36\linewidth}@{}}
+\toprule
+problem & Linnea & ulm.lam \\
+\midrule
+GLS & potrf, trsv, trsm, syrk, potrf, gemv, 2 trsv ($3.55\cdot10^{9}$) & the same \\
+GP ($n = 4000$, $m = 1000$) & $\sigma^2$ added to the diagonal, potrf, two trsm ($K\inv K_*$), gemv, gemm for $K_{**} - K_*\T(K\inv K_*)$ ($6.13\cdot10^{10}$) & one trsm ($V = L\inv K_*$), syrk for $K_{**} - V\T V$ ($4.1\cdot10^{10}$) \\
+Kalman filter, one step ($n = 1000$, $m = 100$) & $FPF\T$ as potrf($P$), trmm ($FL$), syrk ($2.78\cdot10^{9}$) & two gemm for $FPF\T$ ($4.4\cdot10^{9}$) \\
+ridge, Bayesian regression & syrk onto $\lambda I$ (the identity as an array, $\beta = \lambda$), potrf, trsv & the same; the identity is never formed (adddiag) \\
+linear attention & $Q(K\T V)$, fixed when the code is generated & the same, chosen at run time \\
+SGD step & gemm, \code{ger} for the bias, gemm and gemv with $\alpha = -\mathrm{step}$ & the same, the bias as a gemm with $k = 1$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+So in the mapping each has an advantage the other lacks: ulm.lam sees the
+Gram structure of the GP covariance (a third fewer FLOPs), Linnea makes
+$FPF\T$ symmetric through a Cholesky factorisation of $P$ (without a
+factorisation, \code{gemmtr} would bring ulm.lam to $3n^3$), and uses
+\code{ger} for a rank-1 product.
+
+\emph{Memory for temporaries} is where the two differ most.
+Linnea's code generator (\file{code\_generation/memory/memory.py}) maps
+every operand to a ``memory location''; the inputs are the caller's
+arrays.
+A kernel that overwrites an operand writes into its location if the
+operand is not used afterwards (liveness), otherwise the operand is first
+copied into a new location (\code{blascopy!}).
+Every other result gets a new \code{Array\{Float64\}(undef, ...)},
+allocated in every call and freed by Julia's garbage collector.
+In the generated code that means:
+\begin{center}
+\small
+\begin{tabular}{@{}lp{0.39\linewidth}p{0.39\linewidth}@{}}
+\toprule
+& Linnea & ulm.lam \\
+\midrule
+inputs & overwritten as needed: after GLS the caller's $M$, $X$ and $y$ hold factors and solutions, after a Kalman step $F$, $P$, $Q$, $R$, $z$ are destroyed & \code{in}: never written (copied if a kernel must overwrite); \code{inout}: may be overwritten \\
+temporaries & \code{Array\{Float64\}(undef, ...)} in every call (GC) & one workspace, with a LAPACK-style size query; given by the caller or allocated once \\
+reuse & memory locations with liveness: a result overwrites a dead operand & bufferization's in-place analysis; workspace layout by liveness, branches overlap \\
+identity, zero & formed as arrays when a kernel needs them as input (the $C$ of syrk) & never formed (adddiag) \\
+results & returned arrays, which may be inputs (the residual $R$ of the SGD step is returned in the buffer of $Y$) & output parameters owned by the caller \\
+loops & none (straight-line programs; a filter step called in a loop allocates in every step, and the caller must copy $F$, $Q$, $R$ before each call) & no allocation in a loop; invariant work before it \\
+sizes, errors & fixed when the code is generated; Julia exceptions (\code{PosDefException}) & run-time sizes; \code{info} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+Linnea's choice is reasonable for code that is called once with
+throw-away inputs; for a library routine, and for code in loops, it is
+what FLENS-LAPACK had to avoid by hand: temporaries inside nested calls,
+and arguments that are silently destroyed.
 
 \paragraph{Plan.}
 \begin{enumerate}[label=M\arabic*]
@@ -2941,6 +3030,10 @@ catalogue) Linnea is clearly ahead; in what a compiler needs to be used
         Mojo programs can be traced like Python and Julia ones is open) or
         use Mojo's kernels as a backend, like the CBLAS one (which LAPACK
         functionality Mojo's libraries provide is open).
+  \item \emph{Linnea}: the problems of the examples are compared
+        (\cref{sec:status}, ``Compared with Linnea'').
+        Next from it: \code{gemmtr} and the factorisation trick for
+        $FPF\T$, \code{ger} for rank-1 products.
   \item \emph{Linnea's 25 application problems and the LAMP benchmark}
         (\url{https://github.com/HPAC/LAMP_benchmark}): run them through
         ulm.lam and compare FLOPs and coverage per problem with Linnea.
@@ -2980,6 +3073,13 @@ as generated (EmitC's variable names, formatted with \code{clang-format}).
   \IfFileExists{\src #2}{%
     \lstinputlisting[style=#3,basicstyle=\ttfamily\scriptsize]{\src #2}}{%
     \fbox{run \code{make} to generate this file}}}
+% a program in Python or Julia: the lines from the one containing #3 to the
+% one before the one containing #4 (#5: a name for the extracted file)
+\newcommand{\appsrc}[6]{%
+  \par\smallskip\noindent\textbf{#1} (\file{#2}):
+  \IfFileExists{\src #2}{%
+    \srcbetween[style=#6,basicstyle=\ttfamily\scriptsize]{\src #2}{#3}{#4}{#5}}{%
+    \fbox{missing file}}}
 \newcommand{\generated}[5]{%
   \subsection{\texorpdfstring{\code{#1}}{#1}}
   #5
@@ -2996,10 +3096,16 @@ as generated (EmitC's variable names, formatted with \code{clang-format}).
 \generated{examples/loop/generated/accumulate.cpp}{examples/loop/accumulate.mlir}%
   {build/loop/accumulate.selected.mlir}{}{$X \mathrel{+}= ABC$ in a loop
   (\cref{sec:loops}).}
-\generated{examples/kalman/generated/estimate.cpp}{examples/kalman/estimate.mlir}%
-  {build/kalman/estimate.selected.mlir}{}{Formula (1) in a loop with a
-  constant covariance; with enough steps the operator is formed before the
-  loop (\cref{sec:kalman}).}
+\subsection{\texorpdfstring{\code{examples/kalman/generated/estimate.cpp}}{examples/kalman/generated/estimate.cpp}}
+Formula (1) in a loop with a constant covariance; with enough steps the
+operator is formed before the loop (\cref{sec:kalman}).
+The same program in Python and in Julia (there with $n = 4000$; the IR
+below is written by hand, with $n = 2000$):
+\appsrc{Python}{python/examples/kalman.py}{observe = lam.extern}{def best(}{appkalmanpy}{py}
+\appsrc{Julia}{julia/examples/kalman.jl}{const observe}{function literal}{appkalmanjl}{py}
+\stage{Source}{examples/kalman/estimate.mlir}{mlir}
+\stage{Kernels after selection}{build/kalman/estimate.selected.mlir}{mlir}
+\stage{Generated C++}{examples/kalman/generated/estimate.cpp}{c}
 \generated{examples/kalman/generated/adaptive.cpp}{examples/kalman/adaptive.mlir}%
   {build/kalman/adaptive.selected.mlir}{}{Formula (1) in a loop with the
   covariance updated in every step (\cref{sec:adaptive}).}
@@ -3009,11 +3115,58 @@ as generated (EmitC's variable names, formatted with \code{clang-format}).
 \generated{examples/cases/generated/cases.cpp}{examples/cases/cases.mlir}%
   {build/cases/cases.selected.mlir}{}{The kernel selection cases of
   \file{examples/cases/cases.mlir}.}
-\generated{python/examples/generated/gp.cpp}{build/python/gp_py/gp_py.mlir}%
-  {build/python/gp_py/gp_py.selected.mlir}{}{GP regression, traced from
-  the Python function \code{gp} of \file{python/examples/gp.py}
-  (\cref{sec:glance,sec:gp}); the source is the IR the Python frontend
-  writes.}
+The showcases are programs in Python and Julia.
+For them the appendix shows the Python and the Julia program, the IR the
+Python frontend traces from it, the kernels after selection, and the C++
+generated from the Python program (the Julia frontend generates the same
+kernels on transposed operands, \cref{sec:julia}).
+
+\subsection{\texorpdfstring{\code{python/examples/generated/gp.cpp}}{python/examples/generated/gp.cpp}}
+GP regression (\cref{sec:glance,sec:gp}).
+\appsrc{Python}{python/examples/gp.py}{@lam.function}{def numpy_literal}{appgppy}{py}
+\appsrc{Julia}{julia/examples/gp.jl}{@lam function gp}{function by_hand}{appgpjl}{py}
+\stage{IR traced from Python}{build/python/gp_py/gp_py.mlir}{mlir}
+\stage{Kernels after selection}{build/python/gp_py/gp_py.selected.mlir}{mlir}
+\stage{Generated C++}{python/examples/generated/gp.cpp}{c}
+
+\subsection{\texorpdfstring{\code{python/examples/generated/ridge.cpp}}{python/examples/generated/ridge.cpp}}
+Ridge regression (\cref{sec:showcases}).
+\appsrc{Python}{python/examples/ridge.py}{@lam.function}{def numpy_literal}{appridgepy}{py}
+\appsrc{Julia}{julia/examples/ridge.jl}{@lam function ridge}{literal(X}{appridgejl}{py}
+\stage{IR traced from Python}{build/python/ridge_py/ridge_py.mlir}{mlir}
+\stage{Kernels after selection}{build/python/ridge_py/ridge_py.selected.mlir}{mlir}
+\stage{Generated C++}{python/examples/generated/ridge.cpp}{c}
+
+\subsection{\texorpdfstring{\code{python/examples/generated/attention.cpp}}{python/examples/generated/attention.cpp}}
+Linear attention, the order chosen at run time (\cref{sec:showcases}).
+\appsrc{Python}{python/examples/attention.py}{@lam.function}{def phi}{appattentionpy}{py}
+\appsrc{Julia}{julia/examples/attention.jl}{@lam function attention}{phi(x)}{appattentionjl}{py}
+\stage{IR traced from Python}{build/python/attention_py/attention_py.mlir}{mlir}
+\stage{Kernels after selection}{build/python/attention_py/attention_py.selected.mlir}{mlir}
+\stage{Generated C++}{python/examples/generated/attention.cpp}{c}
+
+\subsection{\texorpdfstring{\code{python/examples/generated/kalman_filter.cpp}}{python/examples/generated/kalman_filter.cpp}}
+The Kalman filter, predict and update in a loop (\cref{sec:showcases}).
+\appsrc{Python}{python/examples/kalman_filter.py}{measure = lam.extern}{def numpy_literal}{appkalmanfilterpy}{py}
+\appsrc{Julia}{julia/examples/kalman_filter.jl}{const measure}{function literal}{appkalmanfilterjl}{py}
+\stage{IR traced from Python}{build/python/kalman_filter_py/kalman_filter_py.mlir}{mlir}
+\stage{Kernels after selection}{build/python/kalman_filter_py/kalman_filter_py.selected.mlir}{mlir}
+\stage{Generated C++}{python/examples/generated/kalman_filter.cpp}{c}
+
+\subsection{\texorpdfstring{\code{python/examples/generated/bayes.cpp}}{python/examples/generated/bayes.cpp}}
+Bayesian linear regression, run-time scalars on products (\cref{sec:showcases}).
+\appsrc{Python}{python/examples/bayes.py}{@lam.function}{def numpy_literal}{appbayespy}{py}
+\appsrc{Julia}{julia/examples/bayes.jl}{@lam function blr}{function literal}{appbayesjl}{py}
+\stage{IR traced from Python}{build/python/bayes_py/bayes_py.mlir}{mlir}
+\stage{Kernels after selection}{build/python/bayes_py/bayes_py.selected.mlir}{mlir}
+\stage{Generated C++}{python/examples/generated/bayes.cpp}{c}
+
+\subsection{\texorpdfstring{\code{python/examples/generated/torch_linear.cpp}}{python/examples/generated/torch_linear.cpp}}
+A linear layer trained by gradient descent, compared with PyTorch (\cref{sec:showcases}; no Julia version).
+\appsrc{Python}{python/examples/torch_linear.py}{batch_x = lam.extern}{def torch_autograd}{apptorchpy}{py}
+\stage{IR traced from Python}{build/python/torch_linear_ulm/torch_linear_ulm.mlir}{mlir}
+\stage{Kernels after selection}{build/python/torch_linear_ulm/torch_linear_ulm.selected.mlir}{mlir}
+\stage{Generated C++}{python/examples/generated/torch_linear.cpp}{c}
 
 % =====================================================================
 \begin{thebibliography}{99}\small

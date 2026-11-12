@@ -1,0 +1,14 @@
+n = 4000
+m = 1000
+
+Matrix K(n, n) <SPSD>
+Matrix Ks(n, m) <>
+Matrix Kss(m, m) <Symmetric>
+ColumnVector y(n) <>
+IdentityMatrix I_n(n, n)
+Scalar sigma_sq <Positive>
+ColumnVector mu(m) <>
+Matrix Sigma(m, m) <>
+
+mu = trans(Ks)*inv(K + sigma_sq*I_n)*y
+Sigma = Kss - trans(Ks)*inv(K + sigma_sq*I_n)*Ks

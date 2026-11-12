@@ -707,7 +707,8 @@ struct FoldScaleOne : OpRewritePattern<ScaleOp>
     }
 };
 
-/// a (b X) -> (a b) X for constants a and b (e.g. -(3 X), from A - 3 X).
+/// a (b X) -> (a b) X (e.g. -(3 X), from A - 3 X; with scalars known at run
+/// time, a b is an arith.mulf: W - s X^T R).
 struct FoldScaleScale : OpRewritePattern<ScaleOp>
 {
     using OpRewritePattern::OpRewritePattern;
@@ -715,14 +716,19 @@ struct FoldScaleScale : OpRewritePattern<ScaleOp>
     matchAndRewrite(ScaleOp op, PatternRewriter &rewriter) const override
     {
 	auto inner = op.getOperand().getDefiningOp<ScaleOp>();
-	FloatAttr a, b;
-	if (!inner || !matchPattern(op.getAlpha(), m_Constant(&a)) ||
-	    !matchPattern(inner.getAlpha(), m_Constant(&b)))
+	if (!inner)
 	    return failure();
-	Value ab = arith::ConstantOp::create(
-	    rewriter, op.getLoc(), a.getType(),
-	    rewriter.getFloatAttr(a.getType(),
-	                          a.getValueAsDouble() * b.getValueAsDouble()));
+	FloatAttr a, b;
+	Value ab;
+	if (matchPattern(op.getAlpha(), m_Constant(&a)) &&
+	    matchPattern(inner.getAlpha(), m_Constant(&b)))
+	    ab = arith::ConstantOp::create(
+	        rewriter, op.getLoc(), a.getType(),
+	        rewriter.getFloatAttr(a.getType(), a.getValueAsDouble() *
+	                                               b.getValueAsDouble()));
+	else // scalars known at run time: a b as an arith.mulf
+	    ab = arith::MulFOp::create(rewriter, op.getLoc(), op.getAlpha(),
+	                               inner.getAlpha());
 	rewriter.replaceOpWithNewOp<ScaleOp>(op, op.getType(), ab,
 	                                     inner.getOperand());
 	return success();

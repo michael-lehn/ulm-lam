@@ -1,0 +1,11 @@
+n = 16000
+p = 2000
+k = 1
+
+Matrix X(n, p) <FullRank>
+ColumnVector y(n) <>
+IdentityMatrix I_p(p, p)
+Scalar lambda <Positive>
+ColumnVector beta(p) <>
+
+beta = inv(trans(X)*X + lambda*I_p)*trans(X)*y

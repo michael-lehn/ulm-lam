@@ -827,6 +827,25 @@ class Identity(unittest.TestCase):
         ref = 2.5 * X @ Y + 3.5 * X + Y / 3.5
         self.assertLess(np.abs(lib.scaled(X, Y, 3.5) - ref).max(), 1e-12)
 
+    def test_scaled_product_in_sum_is_one_gemm(self):
+        """W - s * (X^T R): one gemm with alpha = -s, beta = 1 into W (the
+        SGD update of torch_linear.py), no gescal or geaxpy."""
+        @lam.function
+        def sgd(W: Matrix("p", "k"), X: Matrix("B", "p"), R: Matrix("B", "k"),
+                s: Float):
+            return W - s * (X.T @ R)
+
+        lib = lam.compile(sgd, name="sgd_step")
+        rng = self.rng
+        W, X, R = (rng.normal(size=(7, 3)), rng.normal(size=(11, 7)),
+                   rng.normal(size=(11, 3)))
+        self.assertLess(np.abs(lib.sgd(W, X, R, 0.3)
+                               - (W - 0.3 * X.T @ R)).max(), 1e-13)
+        cpp = lib.sgd.cpp
+        self.assertEqual(cpp.count("::gemm<"), 1)
+        self.assertNotIn("gescal", cpp)
+        self.assertNotIn("geaxpy", cpp)
+
     def test_float_argument(self):
         with self.assertRaises(LamError):
             self.lib.terms(np.eye(self.n), np.eye(self.n), "x")

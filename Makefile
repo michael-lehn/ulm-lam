@@ -1,6 +1,6 @@
 # ULMBLAS_DIR (default ~/git/ulmBLAS) and ARCHFLAGS (default -mcpu=native)
 # select ulmBLAS and its micro kernels, see scripts/ulmblas-env.sh.
-.PHONY: all ods plugin stages loop gls kalman compose cases dynamic gp showcases python julia doc clean
+.PHONY: all ods plugin stages loop gls kalman compose cases dynamic gp showcases torch python julia doc clean
 
 all: ods plugin stages loop gls kalman compose cases dynamic python julia doc
 
@@ -42,6 +42,12 @@ showcases:      ## ridge, linear attention, Kalman filter, Bayesian regression (
 	python3 python/examples/attention.py
 	python3 python/examples/kalman_filter.py
 	python3 python/examples/bayes.py
+
+torch:          ## a linear layer trained as formulas against PyTorch (venv build/venv-torch)
+	test -x build/venv-torch/bin/python || (python3 -m venv build/venv-torch && \
+		build/venv-torch/bin/pip install --quiet numpy torch)
+	ULM_LAM_BLAS_LIBS="-framework Accelerate" OPENMP=0 \
+		build/venv-torch/bin/python python/examples/torch_linear.py
 
 python:         ## the Python frontend: unit tests and the Kalman examples
 	python3 -m unittest discover -s python/tests

@@ -1,0 +1,10 @@
+N = 16384
+d = 64
+e = 65
+
+Matrix Q(N, d) <>
+Matrix K(N, d) <>
+Matrix V(N, e) <>
+Matrix O(N, e) <>
+
+O = Q*trans(K)*V

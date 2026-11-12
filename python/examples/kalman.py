@@ -52,6 +52,9 @@ def best(f, reps=3):
 def main():
     t0 = time.perf_counter()
     lib = lam.compile(estimate, name="kalman_py")
+    # the generated code, kept in the repository (doc/ulm-lam.tex, appendix)
+    (Path(__file__).resolve().parent / "generated" / "kalman.cpp").write_text(
+        lib.source)
     print(
         f"compiled in {time.perf_counter() - t0:.1f} s (cached when "
         f"unchanged): {lib.path}"

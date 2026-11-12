@@ -49,6 +49,9 @@ def best(f, reps):
 
 def main():
     lib = lam.compile(attention, name="attention_py")
+    # the generated code, kept in the repository (doc/ulm-lam.tex, appendix)
+    (Path(__file__).resolve().parent / "generated" / "attention.cpp").write_text(
+        lib.source)
     rng = np.random.default_rng(4)
     d = 64
     print(f"linear attention, head dimension d = {d}; times in s, (x): "

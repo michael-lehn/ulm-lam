@@ -1,0 +1,21 @@
+n = 1000
+m = 100
+
+Matrix F(n, n) <FullRank>
+Matrix Q(n, n) <SPSD>
+Matrix H(m, n) <FullRank>
+Matrix R(m, m) <SPD>
+Matrix P(n, n) <SPD>
+ColumnVector x(n) <>
+ColumnVector z(m) <>
+Matrix Pp(n, n) <SPD>
+ColumnVector xp(n) <>
+Matrix Kg(n, m) <>
+ColumnVector xn(n) <>
+Matrix Pn(n, n) <>
+
+xp = F*x
+Pp = F*P*trans(F) + Q
+Kg = Pp*trans(H)*inv(H*Pp*trans(H) + R)
+xn = xp + Kg*(z - H*xp)
+Pn = Pp - Kg*H*Pp

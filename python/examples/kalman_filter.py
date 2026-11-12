@@ -124,6 +124,9 @@ def best(f, reps):
 
 def main():
     lib = lam.compile(kalman, name="kalman_filter_py")
+    # the generated code, kept in the repository (doc/ulm-lam.tex, appendix)
+    (Path(__file__).resolve().parent / "generated" / "kalman_filter.cpp").write_text(
+        lib.source)
     rng = np.random.default_rng(5)
     print("Kalman filter, advection-diffusion on a periodic grid; times in s,"
           " (x): relative to ulm.lam")

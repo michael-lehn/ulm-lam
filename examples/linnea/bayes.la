@@ -1,0 +1,19 @@
+n = 16000
+p = 2000
+m = 1379
+
+Matrix Phi(n, p) <FullRank>
+Matrix Phis(m, p) <FullRank>
+ColumnVector t(n) <>
+IdentityMatrix I_p(p, p)
+IdentityMatrix I_m(m, m)
+Scalar alpha <Positive>
+Scalar beta <Positive>
+Scalar betainv <Positive>
+ColumnVector w(p) <>
+ColumnVector mean(m) <>
+Matrix cov(m, m) <>
+
+w = beta*inv(alpha*I_p + beta*trans(Phi)*Phi)*trans(Phi)*t
+mean = Phis*w
+cov = Phis*inv(alpha*I_p + beta*trans(Phi)*Phi)*trans(Phis) + betainv*I_m
