@@ -1,6 +1,6 @@
 # ULMBLAS_DIR (default ~/git/ulmBLAS) and ARCHFLAGS (default -mcpu=native)
 # select ulmBLAS and its micro kernels, see scripts/ulmblas-env.sh.
-.PHONY: all ods plugin stages loop gls kalman compose cases dynamic gp python julia doc clean
+.PHONY: all ods plugin stages loop gls kalman compose cases dynamic gp showcases python julia doc clean
 
 all: ods plugin stages loop gls kalman compose cases dynamic python julia doc
 
@@ -36,6 +36,11 @@ dynamic:        ## GLS with sizes as run-time parameters: one library, several s
 
 gp:             ## Gaussian process regression on public data (downloaded once)
 	python3 python/examples/gp.py
+
+showcases:      ## ridge regression, linear attention, Kalman filter (Python, against NumPy)
+	python3 python/examples/ridge.py
+	python3 python/examples/attention.py
+	python3 python/examples/kalman_filter.py
 
 python:         ## the Python frontend: unit tests and the Kalman examples
 	python3 -m unittest discover -s python/tests

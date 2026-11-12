@@ -157,6 +157,12 @@ What is checked (`make`):
   info for an indefinite and a singular matrix and a too small workspace.
 - `make dynamic`: one compiled GLS with run-time sizes for six sizes.
 - `make gp`: the GP showcase above (needs the network once).
+- `make showcases`: ridge regression on random Fourier features of the bike
+  data (as fast as NumPy/SciPy/scikit-learn by hand, 3-4x faster than with
+  `inv`), linear attention (the order of Q K^T V chosen at run time: up to
+  160x faster than NumPy as written) and the Kalman filter with predict and
+  update (1.1-1.2x faster than NumPy written by an expert, 1.7-2.5x faster
+  than as written).
 - `make python`: the Python frontend: 42 unit tests (among them symmetric
   matrices stored as one triangle, with NaN in the other one) and the two
   Kalman examples against NumPy.

@@ -347,6 +347,24 @@ class Selector
 		return failure();
 	    replace(op, *r);
 	}
+	// A loop-carried value that is not computed in the buffer of its
+	// iteration argument (x = F x cannot be in place) is copied into it at
+	// the end of the body: One-Shot Bufferize needs the yielded value
+	// equivalent to the iteration argument, otherwise it would allocate in
+	// every iteration.
+	func.walk([&](scf::ForOp loop) {
+	    auto yield = cast<scf::YieldOp>(loop.getBody()->getTerminator());
+	    for (auto [k, o] : llvm::enumerate(yield->getOpOperands())) {
+		Value v = o.get(), arg = loop.getRegionIterArg(k);
+		if (!isa<RankedTensorType>(v.getType()) || v == arg)
+		    continue;
+		b.setInsertionPoint(yield);
+		Value r = into(v, arg, yield.getLoc());
+		if (r.getType() != v.getType())
+		    r = AssumeOp::create(b, yield.getLoc(), v.getType(), r, false);
+		o.set(r);
+	    }
+	});
 	// A transpose used outside the ulm_lam ops (a loop's initial value, a
 	// result, an argument of a call) is materialised: a transposed copy
 	// (gecopy).  Inside products and sums transposes are strides.
@@ -420,7 +438,13 @@ class Selector
 	    k.push_back(l.kind);
 	    k.push_back(reinterpret_cast<intptr_t>(l.v.getAsOpaquePointer()));
 	    k.push_back(reinterpret_cast<intptr_t>(l.piv.getAsOpaquePointer()));
-	    k.push_back(l.trans != transposed);
+	    // a symmetric matrix is its own transpose: P H^T is the transpose
+	    // of a computed H P
+	    auto ty = cast<RankedTensorType>(l.v.getType());
+	    bool sym = l.kind == Leaf::Mat &&
+	               bitEnumContainsAll(closure(propertiesOf(ty), ty.getShape()),
+	                                  Properties::symmetric);
+	    k.push_back(sym ? false : l.trans != transposed);
 	    k.push_back(l.lower);
 	}
 	return k;
@@ -1645,6 +1669,38 @@ class Selector
 	    v = AssumeOp::create(b, op->getLoc(), t, v, false);
 	}
 	op->getResult(0).replaceAllUsesWith(v);
+	keepStorage(v);
+    }
+
+    /// An ulm_lam.assume of a value stored as one triangle (lam.assume(X^T
+    /// X + s I, "spd") in a program) only adds facts about the value; it
+    /// keeps the storage, so that its users (potrf, symm) read the stored
+    /// triangle instead of a completed copy.
+    void
+    keepStorage(Value v)
+    {
+	int st = storageOf(v);
+	if (!st)
+	    return;
+	for (Operation *u : v.getUsers()) {
+	    auto as = dyn_cast<AssumeOp>(u);
+	    // only an assume that asserts properties (lam.assume): one to the
+	    // plain type is how the frontends hand a value to return, yield or
+	    // a call, whose types must not change
+	    if (!as || storageOf(as.getResult()) ||
+	        propertiesOf(as.getType()) == Properties::general ||
+	        llvm::any_of(as->getUsers(), [](Operation *w) {
+		    return w->hasTrait<OpTrait::IsTerminator>() ||
+		           isa<func::CallOp>(w);
+	        }))
+		continue;
+	    auto t = cast<RankedTensorType>(as.getType());
+	    as.getResult().setType(withProperties(
+	        t, propertiesOf(t) | Properties::symmetric |
+	               (st == 1 ? Properties::lower_stored
+	                        : Properties::upper_stored)));
+	    keepStorage(as.getResult());
+	}
     }
 
     LogicalResult

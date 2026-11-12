@@ -2562,6 +2562,131 @@ exact GP regression profits from all the data, which makes the
 $O(n^3)$ factorisation, and a fast \code{potrf}, the point.
 
 % =====================================================================
+\section{More showcases}\label{sec:showcases}
+% =====================================================================
+Three more programs, each written as the formula and compared with NumPy
+(OpenBLAS) on the Apple M5 (\code{make showcases}).
+
+\paragraph{Ridge regression} (\file{python/examples/ridge.py}):
+\begin{lstlisting}[style=py]
+@lam.function
+def ridge(X: Matrix("n", "p"), Y: Matrix("n", "k"), lam_: Float):
+    A = lam.assume(X.T @ X + lam_ * lam.eye("p"), "spd")
+    return A.inv @ X.T @ Y
+\end{lstlisting}
+on the bike-sharing data, $n = 16\,000$ training hours, with $p$ random
+Fourier features (Rahimi and Recht: ridge regression on them approximates
+kernel ridge regression with an RBF kernel).
+ulm.lam computes $X\T X$ by \code{syrk} (one triangle), adds $\lambda$ to
+its diagonal, factorises the triangle by Cholesky, and chooses the order
+of $A\inv X\T Y$ at run time from $n$, $p$ and $k$.
+Times in seconds:
+
+\begin{center}
+\begin{tabular}{rrrrrrr}
+\toprule
+$p$ & RMSE & ulm.lam & NumPy with \code{inv} & NumPy \code{solve} & SciPy Cholesky & scikit-learn \\
+\midrule
+500 & 0.413 & 0.023 & 0.066 & 0.022 & 0.023 & 0.026 \\
+1000 & 0.327 & 0.075 & 0.318 & 0.075 & 0.074 & 0.084 \\
+2000 & 0.317 & 0.280 & 0.862 & 0.300 & 0.282 & 0.336 \\
+4000 & 0.292 & 1.290 & 3.679 & 1.422 & 1.341 & 1.314 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+The time is that of $X\T X$ ($np^2$), which NumPy also computes by
+\code{syrk}: written as the formula, ulm.lam is as fast as the best
+version written by hand, and $3$--$4\times$ faster than the formula with
+\code{inv}.
+
+\paragraph{Linear attention} (\file{python/examples/attention.py}):
+\begin{lstlisting}[style=py]
+@lam.function
+def attention(Q: Matrix("N", "d"), K: Matrix("N", "d"), V: Matrix("N", "e")):
+    return Q @ K.T @ V
+\end{lstlisting}
+Linear attention (Katharopoulos et al., 2020) replaces
+$\mathrm{softmax}(QK\T)V$ by $\phi(Q)\phi(K)\T V$, normalised by
+$\phi(Q)\phi(K)\T\mathbf{1}$ (a column of ones appended to $V$; $\phi$ and
+the division are elementwise and done in NumPy).
+Its point is the order: $\phi(Q)(\phi(K)\T V)$ costs $O(Nd^2)$, the order
+in which NumPy evaluates the formula $O(N^2 d)$.
+ulm.lam chooses it at run time from $N$ and $d$ (head dimension
+$d = 64$, seconds):
+
+\begin{center}
+\begin{tabular}{rrrr}
+\toprule
+$N$ & ulm.lam & NumPy as written & NumPy, parentheses by hand \\
+\midrule
+256 & 0.0001 & 0.0002 & 0.0001 \\
+1024 & 0.0001 & 0.0017 & 0.0003 \\
+4096 & 0.0005 & 0.0222 & 0.0010 \\
+16384 & 0.0031 & 0.5053 & 0.0026 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+Up to $160\times$ faster than the formula in NumPy, as fast as the
+parentheses placed by hand; and for a short sequence with a large
+dimension ($N = 16$, $d = 512$) ulm.lam takes the other order, which is
+$8\times$ faster there than the one that is right for long sequences.
+
+\paragraph{The Kalman filter} (\file{python/examples/kalman_filter.py}),
+predict and update in a loop, as in the textbook:
+\begin{lstlisting}[style=py]
+with lam.loop(steps, carry=[x0, P0]) as L:
+    x, P = L.carried
+    P = lam.assume(P, "symmetric")
+    x = F @ x                                       # predict
+    P = F @ P @ F.T + Q
+    S = lam.assume(H @ P @ H.T + R, "spd")          # update
+    K = P @ H.T @ S.inv
+    x = x + K @ (measure(L.index) - H @ x)
+    P = P - K @ H @ P
+    estimate(L.index, x)
+    L.next(x, P)
+\end{lstlisting}
+for data assimilation: a field on a periodic grid of $n$ points,
+transported and diffused, observed by $m$ sensors.
+Per step ulm.lam generates the expert's version: $Fx$ (\code{gemv}),
+$FPF\T + Q$ (two \code{gemm}), $HP$ (\code{gemm}) and
+$S = (HP)H\T + R$, the Cholesky factorisation of $S$,
+$K = (HP)\T S\inv$ by two triangular solves on a transposed copy of the
+computed $HP$ ($P$ is symmetric, so $PH\T = (HP)\T$), the update of $x$
+(two \code{gemv}), and $P - K(HP)$ (one \code{gemm}, $n^2 m$).
+NumPy evaluates $K H P$ from left to right, $(KH)P$, which adds $n^3$;
+the expert writes $HP$ once and solves with Cholesky (seconds):
+
+\begin{center}
+\begin{tabular}{rrrrrr}
+\toprule
+$n$ & $m$ & steps & ulm.lam & NumPy as written & NumPy by hand \\
+\midrule
+500 & 50 & 50 & 0.139 & 0.348 & 0.155 \\
+1000 & 100 & 50 & 0.927 & 1.673 & 1.064 \\
+2000 & 200 & 20 & 2.623 & 4.550 & 3.094 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+The program needed three general improvements of the compiler.
+An \code{assume} keeps the storage of its operand (a symmetric matrix
+stored as one triangle stays so, which also removed a completion before
+\code{potrf} in ridge regression).
+A loop-carried value that is not computed in the buffer of its iteration
+argument ($x = Fx$ cannot be in place) is copied into it at the end of the
+step, instead of being allocated in every step.
+And the reuse of computed products ignores the transposition of
+symmetric factors, so that $PH\T$ is found as the transpose of $HP$.
+Still possible: $FPF\T$ and $HPH\T$ are symmetric, so \code{gemmtr} would
+halve the second product.
+
+% =====================================================================
 \section{Testing strategy}
 % =====================================================================
 
@@ -2714,12 +2839,31 @@ catalogue) Linnea is clearly ahead; in what a compiler needs to be used
         generated library with \code{ccall}.
         Julia is where a linear algebra compiler finds its community,
         and ulmBLAS aims at being a BLAS for Julia as well.
-  \item \emph{More showcases} that ulm.lam can do now or nearly:
-        ridge regression $(X\T X + \lambda I)\inv X\T y$ (\code{syrk},
-        \code{adddiag}, Cholesky); linear attention, where the order of
-        $Q K\T V$ is chosen at run time from the sizes; Bayesian linear
-        regression and the full Kalman filter (predict and update), which
-        need run-time scalars on products and \code{gemmtr}.
+  \item \emph{More showcases}: ridge regression, linear attention and the
+        Kalman filter are done (\cref{sec:showcases}).
+        Next: Bayesian linear regression, which needs run-time scalars on
+        products ($\beta\Phi\T\Phi$), and \code{gemmtr} for the symmetric
+        products of the Kalman filter.
+  \item \emph{PyTorch}: PyTorch maps every operation by itself onto
+        BLAS/LAPACK or cuBLAS/cuSOLVER, and \code{torch.compile} fuses
+        elementwise operations but does no linear algebra mapping
+        (\cite{tfpt} measures what is missing).
+        Steps: CPU tensors in and out of compiled functions without
+        copies (DLPack); a \code{torch.compile} backend that replaces the
+        linear algebra in the FX graphs (matrix chains, \code{inv},
+        \code{solve}, \code{cholesky}, also in the backward graph of
+        autograd) by functions generated by ulm.lam, with the expressions
+        of \cite{tfpt} as the showcase; and, separately, float32 and a GPU
+        backend (cuBLAS, cuSOLVER), where most PyTorch users compute.
+  \item \emph{Mojo} (an idea, to be checked first): Mojo is a
+        Python-like language on MLIR whose strength is fast kernels
+        (GEMM and others), but which, as far as known here, does no
+        linear algebra mapping.
+        ulm.lam could serve it as a frontend (formulas written in Mojo,
+        the generated library called through Mojo's C interface; whether
+        Mojo programs can be traced like Python and Julia ones is open) or
+        use Mojo's kernels as a backend, like the CBLAS one (which LAPACK
+        functionality Mojo's libraries provide is open).
   \item \emph{Linnea's 25 application problems and the LAMP benchmark}
         (\url{https://github.com/HPAC/LAMP_benchmark}): run them through
         ulm.lam and compare FLOPs and coverage per problem with Linnea.
@@ -2747,30 +2891,52 @@ catalogue) Linnea is clearly ahead; in what a compiler needs to be used
 
 \code{make} compiles every example with \file{scripts/ulm-lam-compile.sh}
 and keeps the C++ in \file{examples/*/generated/}.
-The files are reproduced here in full, as generated (EmitC's variable
-names, formatted with \code{clang-format}).
+For every example this appendix shows three stages: the source program
+(\code{ulm_lam} IR, written by hand or traced from Python), the kernels
+that \code{ulm-lam-select-kernels} chose for it (\code{ulm_lamk} on
+tensors, before bufferization: the BLAS and LAPACK calls with their
+operands, \file{build/*/*.selected.mlir}), and the generated C++ in full,
+as generated (EmitC's variable names, formatted with \code{clang-format}).
 
-\newcommand{\generated}[2]{%
-  \subsection{\texorpdfstring{\code{#1}}{#1}}
-  #2
-  \IfFileExists{\src #1}{%
-    \lstinputlisting[style=c,basicstyle=\ttfamily\scriptsize]{\src #1}}{%
+\newcommand{\stage}[3]{%
+  \par\smallskip\noindent\textbf{#1} (\file{#2}):
+  \IfFileExists{\src #2}{%
+    \lstinputlisting[style=#3,basicstyle=\ttfamily\scriptsize]{\src #2}}{%
     \fbox{run \code{make} to generate this file}}}
+\newcommand{\generated}[5]{%
+  \subsection{\texorpdfstring{\code{#1}}{#1}}
+  #5
+  \stage{Source}{#2}{mlir}
+  \stage{Kernels after selection}{#3}{mlir}
+  \stage{Generated C++}{#1}{c}}
 
-\generated{examples/gls/generated/gls.cpp}{Generalised least squares from
-its normal form (\cref{sec:example}).}
-\generated{examples/gls/generated/gls_inout.cpp}{GLS with $M$ and $y$
-declared \code{inout} (\cref{sec:ulmblas}).}
-\generated{examples/loop/generated/accumulate.cpp}{$X \mathrel{+}= ABC$ in a
-loop (\cref{sec:loops}).}
-\generated{examples/kalman/generated/estimate.cpp}{Formula (1) in a loop with
-a constant covariance (\cref{sec:kalman}).}
-\generated{examples/kalman/generated/adaptive.cpp}{Formula (1) in a loop with
-the covariance updated in every step (\cref{sec:adaptive}).}
-\generated{examples/compose/generated/compose.cpp}{Functions with workspaces
-calling functions with workspaces (\cref{sec:workspace}).}
-\generated{examples/cases/generated/cases.cpp}{The kernel selection cases
-of \file{examples/cases/cases.mlir}.}
+\generated{examples/gls/generated/gls.cpp}{examples/gls/02-normal.mlir}%
+  {build/gls/gls.selected.mlir}{}{Generalised least squares from its
+  normal form (\cref{sec:example}).}
+\generated{examples/gls/generated/gls_inout.cpp}{examples/gls/gls_inout.mlir}%
+  {build/gls/gls_inout.selected.mlir}{}{GLS with $M$ and $y$ declared
+  \code{inout} (\cref{sec:ulmblas}).}
+\generated{examples/loop/generated/accumulate.cpp}{examples/loop/accumulate.mlir}%
+  {build/loop/accumulate.selected.mlir}{}{$X \mathrel{+}= ABC$ in a loop
+  (\cref{sec:loops}).}
+\generated{examples/kalman/generated/estimate.cpp}{examples/kalman/estimate.mlir}%
+  {build/kalman/estimate.selected.mlir}{}{Formula (1) in a loop with a
+  constant covariance; with enough steps the operator is formed before the
+  loop (\cref{sec:kalman}).}
+\generated{examples/kalman/generated/adaptive.cpp}{examples/kalman/adaptive.mlir}%
+  {build/kalman/adaptive.selected.mlir}{}{Formula (1) in a loop with the
+  covariance updated in every step (\cref{sec:adaptive}).}
+\generated{examples/compose/generated/compose.cpp}{examples/compose/compose.mlir}%
+  {build/compose/compose.selected.mlir}{}{Functions with workspaces calling
+  functions with workspaces (\cref{sec:workspace}).}
+\generated{examples/cases/generated/cases.cpp}{examples/cases/cases.mlir}%
+  {build/cases/cases.selected.mlir}{}{The kernel selection cases of
+  \file{examples/cases/cases.mlir}.}
+\generated{python/examples/generated/gp.cpp}{build/python/gp_py/gp_py.mlir}%
+  {build/python/gp_py/gp_py.selected.mlir}{}{GP regression, traced from
+  the Python function \code{gp} of \file{python/examples/gp.py}
+  (\cref{sec:glance,sec:gp}); the source is the IR the Python frontend
+  writes.}
 
 % =====================================================================
 \begin{thebibliography}{99}\small
