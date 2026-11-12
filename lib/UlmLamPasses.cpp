@@ -1447,7 +1447,22 @@ class Selector
     {
 	SmallVector<std::pair<MulOp, double>> products;
 	SmallVector<std::pair<Value, double>> plain;
+	// alpha * I: added to the diagonal at the end (adddiag), alpha the
+	// product of the scales, constants or values known at run time
+	SmallVector<SmallVector<Value>> identities;
 	for (Value t : add.getTerms()) {
+	    SmallVector<Value> alphas;
+	    Value v = t;
+	    while (auto sc = v.getDefiningOp<ScaleOp>()) {
+		alphas.push_back(sc.getAlpha());
+		v = sc.getOperand();
+	    }
+	    while (auto as = v.getDefiningOp<AssumeOp>())
+		v = as.getOperand();
+	    if (v.getDefiningOp<IdentityOp>()) {
+		identities.push_back(alphas);
+		continue;
+	    }
 	    auto [inner, alpha] = peelScale(t);
 	    auto mul = inner.getDefiningOp<MulOp>();
 	    if (mul && inner.hasOneUse() && (inner == t || t.hasOneUse()))
@@ -1492,6 +1507,23 @@ class Selector
 	    acc = *r;
 	    beta = 1.0;
 	    consumed.insert(mul);
+	}
+	if (!identities.empty() && !acc)
+	    return add.emitError("ulm-lam-select-kernels: a sum of identities "
+	                         "only (not supported yet)"),
+	           failure();
+	for (ArrayRef<Value> alphas : identities) {
+	    Type elt = elementType(acc);
+	    Value a;
+	    for (Value x : alphas)
+		a = a ? arith::MulFOp::create(b, loc, a, x).getResult() : x;
+	    if (!a)
+		a = constant(elt, 1.0, loc);
+	    bool lower = lowerOnly.contains(acc);
+	    acc = lk::AdddiagOp::create(b, loc, TypeRange{acc.getType()}, a, acc)
+	              ->getResult(0);
+	    if (lower) // the diagonal belongs to the stored triangle too
+		lowerOnly.insert(acc);
 	}
 	return acc;
     }

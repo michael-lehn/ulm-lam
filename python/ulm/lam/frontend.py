@@ -305,9 +305,17 @@ class Value:
         return (-1.0) * self
 
     def __mul__(self, alpha) -> "Value":
+        if isinstance(self.type, FloatType):  # s * M, s a Float parameter
+            if isinstance(alpha, Value) and isinstance(alpha.type,
+                                                       MatrixType):
+                return _scale_by(self, alpha)
+            raise LamError("a Float parameter scales matrices only")
         if isinstance(alpha, (int, float)):
             return _scale(float(alpha), self)
-        raise LamError("* is scaling by a number; use @ for products")
+        if isinstance(alpha, Value) and isinstance(alpha.type, FloatType):
+            return _scale_by(alpha, self)
+        raise LamError("* is scaling by a number or a Float parameter; use "
+                       "@ for products")
 
     __rmul__ = __mul__
 
@@ -338,6 +346,45 @@ def _scale(alpha: float, x: Value) -> Value:
     v = Value(b.fresh(), r, b.region.id)
     b.emit(f"{v.name} = ulm_lam.scale {c.name}, {x._use()} : f64, {t.mlir()} "
            f"-> {r.mlir()}")
+    return v
+
+
+def _scale_by(alpha: Value, x: Value) -> Value:
+    """alpha * x for a scalar known at run time (a Float parameter)."""
+    t = x._matrix("scaling")
+    b = _builder()
+    r = MatrixType(t.rows, t.cols)
+    v = Value(b.fresh(), r, b.region.id)
+    b.emit(f"{v.name} = ulm_lam.scale {alpha._use()}, {x._use()} : f64, "
+           f"{t.mlir()} -> {r.mlir()}")
+    return v
+
+
+def eye(n: int | str) -> Value:
+    """The n x n identity; n a number or the name of a run-time size of the
+    function (e.g. K + s2 * lam.eye("n"): kernel selection adds s2 to the
+    diagonal, the identity is never formed)."""
+    t = Matrix(n, n, "identity")
+    b = _builder()
+    sizes = _size_values([n], "eye") * 2 if isinstance(n, str) else []
+    v = Value(b.fresh(), t, b.region.id)
+    operands = f"({', '.join(sizes)})" if sizes else ""
+    b.emit(f"{v.name} = ulm_lam.identity{operands} : {t.mlir()}")
+    return v
+
+
+def assume(x: Value, *props: str) -> Value:
+    """x with properties the compiler cannot derive, e.g.
+    assume(K + s2 * eye("n"), "spd") for s2 > 0 and K spsd.  Trusted, not
+    checked; a Cholesky factorisation of a matrix that is not spd returns
+    info > 0 (lam.InfoError in Python)."""
+    x = _as_value(x)
+    t = x._matrix("assume")
+    r = Matrix(t.rows, t.cols, *props)
+    b = _builder()
+    v = Value(b.fresh(), r, b.region.id)
+    b.emit(f"{v.name} = ulm_lam.assume {x._use()} : {t.mlir()} -> "
+           f"{r.mlir()}")
     return v
 
 

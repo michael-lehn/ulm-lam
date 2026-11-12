@@ -31,12 +31,13 @@ Data (downloaded on first use into build/data/):
     Progress in Artificial Intelligence, 2013).  Tabular regression with up
     to 16000 training hours: timings.
 
-The generated function gp gets K, K* and K** as finished matrices.  This
-script computes them before the call, with NumPy: the kernel matrices
-(elementwise functions of the data) and the noise term s^2 I.  Moving
-them into the ulm.lam program would need elementwise operations, the
-identity and scalars known at run time.  The hyperparameters are fitted
-by scikit-learn on a subset; in ulm.lam that would need log det K =
+The noise term is part of the program: K + s2 * lam.eye("n") with s2 a
+Float parameter; the generated code adds s2 to the diagonal (O(n)) of the
+copy of K that it factorises, the identity is never formed.  The kernel
+matrices k(X, X), K* and K** (elementwise functions of the data) are
+computed by this script with NumPy before the call; moving them into the
+program would need elementwise operations.  The hyperparameters are
+fitted by scikit-learn on a subset; in ulm.lam that would need log det K =
 2 sum log L_ii and traces (scalar results reusing the factorisation).
 
     python3 python/examples/gp.py            # n up to 8000
@@ -57,7 +58,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ulm import lam  # noqa: E402
-from ulm.lam import Matrix, Vector  # noqa: E402
+from ulm.lam import Float, Matrix, Vector  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 DATA = ROOT / "build" / "data"
@@ -75,10 +76,13 @@ except ImportError:
 
 
 @lam.function
-def gp(K: Matrix("n", "n", "spd"), Ks: Matrix("n", "m"),
+def gp(K: Matrix("n", "n", "symmetric"), s2: Float, Ks: Matrix("n", "m"),
        Kss: Matrix("m", "m", "symmetric"), y: Vector("n")):
-    mean = Ks.T @ K.inv @ y
-    cov = Kss - Ks.T @ K.inv @ Ks
+    # K + s2 I is spd for s2 > 0 (K is a kernel matrix): asserted, and
+    # checked by the Cholesky factorisation (info, lam.InfoError)
+    Kn = lam.assume(K + s2 * lam.eye("n"), "spd")
+    mean = Ks.T @ Kn.inv @ y
+    cov = Kss - Ks.T @ Kn.inv @ Ks
     return mean, cov
 
 
@@ -183,13 +187,13 @@ def co2(lib):
 
     def predict(train, test):
         mu = ppm[train].mean()
-        K = co2_kernel(t[train], t[train]) + CO2_NOISE**2 * np.eye(
-            train.sum())
+        K = co2_kernel(t[train], t[train])
         Ks = co2_kernel(t[train], test)
         Kss = co2_kernel(test, test)
-        mean, cov = lib.gp(K, Ks, Kss, ppm[train] - mu)
+        mean, cov = lib.gp(K, CO2_NOISE**2, Ks, Kss, ppm[train] - mu)
+        Kn = K + CO2_NOISE**2 * np.eye(train.sum())  # for the reference
         errs.append(difference((mean, cov),
-                               reference(K, Ks, Kss, ppm[train] - mu)))
+                               reference(Kn, Ks, Kss, ppm[train] - mu)))
         if GaussianProcessRegressor:
             g = co2_sklearn().fit(t[train, None], ppm[train] - mu)
             errs.append(difference((mean, cov),
@@ -321,16 +325,18 @@ def bike(lib, lib_cblas, sizes):
     for n in sizes:
         tr = pool[:n]
         t0 = time.perf_counter()
-        K = rbf(Xs[tr], Xs[tr], var) + s2 * np.eye(n)
+        K = rbf(Xs[tr], Xs[tr], var)
         Ks = rbf(Xs[tr], Xs[test], var)
         Kss = rbf(Xs[test], Xs[test], var)
         t_kernel = time.perf_counter() - t0
+        # the versions without ulm.lam get K + s2 I (not timed)
+        Kn = K + s2 * np.eye(n)
         yt = y[tr].copy()
         reps = 3 if n <= 4000 else 1
-        t_lam, got = best(lambda: lib.gp(K, Ks, Kss, yt), reps)
-        t_lcb, got_cb = best(lambda: lib_cblas.gp(K, Ks, Kss, yt), reps)
-        t_ref, ref = best(lambda: reference(K, Ks, Kss, yt), reps)
-        t_lit = (best(lambda: numpy_literal(K, Ks, Kss, yt), 1)[0]
+        t_lam, got = best(lambda: lib.gp(K, s2, Ks, Kss, yt), reps)
+        t_lcb, got_cb = best(lambda: lib_cblas.gp(K, s2, Ks, Kss, yt), reps)
+        t_ref, ref = best(lambda: reference(Kn, Ks, Kss, yt), reps)
+        t_lit = (best(lambda: numpy_literal(Kn, Ks, Kss, yt), 1)[0]
                  if n <= 8000 else float("nan"))
         t_sk = float("nan")
         if GaussianProcessRegressor:

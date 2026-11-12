@@ -46,12 +46,17 @@ from its textbook formula,
 
 ```python
 @lam.function
-def gp(K: Matrix("n", "n", "spd"), Ks: Matrix("n", "m"),
+def gp(K: Matrix("n", "n", "symmetric"), s2: Float, Ks: Matrix("n", "m"),
        Kss: Matrix("m", "m", "symmetric"), y: Vector("n")):
-    mean = Ks.T @ K.inv @ y
-    cov = Kss - Ks.T @ K.inv @ Ks
+    Kn = lam.assume(K + s2 * lam.eye("n"), "spd")
+    mean = Ks.T @ Kn.inv @ y
+    cov = Kss - Ks.T @ Kn.inv @ Ks
     return mean, cov
 ```
+
+(`s2`: the noise variance, a `Float` known at run time; `lam.eye("n")` is
+never formed, s2 is added to the diagonal; `lam.assume` asserts what the
+compiler cannot know, and the Cholesky factorisation checks it.)
 
 and ulm.lam derives what scikit-learn's `GaussianProcessRegressor` does by
 hand: one Cholesky factorisation, `L^-1 K*` once (trsm), `K** - V^T V` by
@@ -132,7 +137,7 @@ What is checked (`make`):
   info for an indefinite and a singular matrix and a too small workspace.
 - `make dynamic`: one compiled GLS with run-time sizes for six sizes.
 - `make gp`: the GP showcase above (needs the network once).
-- `make python`: the Python frontend: 36 unit tests (among them symmetric
+- `make python`: the Python frontend: 41 unit tests (among them symmetric
   matrices stored as one triangle, with NaN in the other one) and the two
   Kalman examples against NumPy.
 

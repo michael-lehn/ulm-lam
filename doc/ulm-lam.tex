@@ -369,6 +369,29 @@ overwrites; the notation becomes Python, traced at run time
 (\cref{sec:python}); and the efficient evaluation is done by kernel
 selection and ulmBLAS.
 
+\paragraph{FLENS-LAPACK: the work of a compiler, by hand.}
+FLENS-LAPACK re-implemented a significant part of LAPACK on top of
+FLENS, bit for bit: compiled with \code{CHECK_CXXLAPACK}, every
+FLENS-LAPACK function also calls the reference LAPACK on copies of its
+arguments and requires identical results, compared by exact equality
+(\file{flens/lapack/debug/isidentical.tcc}); in addition it is checked
+with the Netlib LAPACK test suite (\file{flens/lapack/check-results.sh},
+known deviations listed in \file{check-expected.txt}).
+The work was so mechanical that it felt like doing the job of a
+compiler: factorisations hoisted out of loops by hand, views of matrices
+mapped onto workspace arrays by hand, and the size of every workspace
+derived by hand through nested calls.
+It also showed what LAPACK requires to avoid temporaries deep inside
+nested calls: a workspace provided by the caller, a query that returns
+its size (accumulated over the callees), in-place kernels on strided
+views, and an \code{info} instead of an abort.
+These requirements are the conventions of the code ulm.lam generates
+(\cref{sec:workspace,sec:info}), and the mechanical work is what it
+automates: loop-invariant code motion and the operator chosen by the
+trip count (\cref{sec:kalman}), one factorisation per matrix, and the
+workspace layout computed from the bufferized program.
+So ulm.lam is the compiler that FLENS-LAPACK was written without.
+
 % =====================================================================
 \section{Architecture}
 % =====================================================================
@@ -1054,7 +1077,7 @@ The kernel sequence is identical, so the time of the generated code on
 MKL compared with the hand-written MKL version measures the mapping, and
 the same code on ulmBLAS compared with it on MKL measures ulmBLAS
 (\cref{sec:gpcluster}).
-All 36 Python tests pass with both backends.
+All 41 Python tests pass with both backends.
 
 \paragraph{The ulm.lam ABI.}
 \begin{itemize}
@@ -1998,6 +2021,15 @@ a number times a matrix is \code{ulm_lam.scale}, \code{.T} is
         \code{InOut(Matrix(...))} may be overwritten, and with
         \code{lam.update(param, value)} it holds \code{value} on exit.
         Return values are \code{out}.
+  \item \code{Float} parameters are scalars known only at run time; they
+        scale matrices (\code{s2 * A}).  \code{lam.eye(n)} is the
+        identity ($n$ a number or a size name), never formed: a term
+        $\alpha I$ of a sum is added to the diagonal.
+        \code{lam.assume(x, "spd")} asserts properties the compiler cannot
+        derive (e.g.\ for $K + \sigma^2 I$); a factorisation checks them at
+        run time (\code{info}).
+        So far a run-time scalar may scale identities only; a scaled
+        matrix or product with one is the next step.
   \item \code{with lam.loop(n, carry=[X]) as L:} is a loop with
         loop-carried matrices (\code{L.carried}, \code{L.next(...)},
         \code{L.results}); the formula can be written inside the loop, and
@@ -2070,11 +2102,12 @@ faster than the formula written literally.
 Before the operator was formed by kernel selection (with the per-step
 solves), ulm.lam took 482\,ms here and lost against the hand-written
 version.
-\file{python/tests/test_lam.py} (36 tests, \code{make python}) checks
+\file{python/tests/test_lam.py} (41 tests, \code{make python}) checks
 GLS with lists, buffers and NumPy arrays, \code{inout} parameters, loops
 with carried matrices and callbacks, the operator chosen by the trip
 count, functions calling functions, two results, NumPy layouts, one
-triangle of symmetric matrices, run-time sizes, \code{info},
+triangle of symmetric matrices, run-time sizes, identity terms with
+run-time scalars, \code{info},
 exceptions in callbacks, and the errors of the frontend.
 
 \paragraph{The adaptive filter in Python.}
@@ -2141,13 +2174,26 @@ In ulm.lam the formula is the program
 (\code{python/examples/gp.py}):
 \begin{lstlisting}[style=py]
 @lam.function
-def gp(K: Matrix("n", "n", "spd"), Ks: Matrix("n", "m"),
+def gp(K: Matrix("n", "n", "symmetric"), s2: Float, Ks: Matrix("n", "m"),
        Kss: Matrix("m", "m", "symmetric"), y: Vector("n")):
-    mean = Ks.T @ K.inv @ y
-    cov = Kss - Ks.T @ K.inv @ Ks
+    Kn = lam.assume(K + s2 * lam.eye("n"), "spd")
+    mean = Ks.T @ Kn.inv @ y
+    cov = Kss - Ks.T @ Kn.inv @ Ks
     return mean, cov
 \end{lstlisting}
-and kernel selection derives the hand version: one \code{potrf}, two
+Here $K$ is the kernel matrix $k(X, X)$ and \code{s2} the noise variance
+$\sigma^2$, a \code{Float} parameter known only at run time.
+\code{lam.eye("n")} is the identity of the run-time size $n$; it is never
+formed: a term $\alpha I$ of a sum becomes the kernel \code{adddiag}
+($A := A + \alpha I$, $O(n)$), with $\alpha$ a constant or a run-time
+value.
+Whether $K + \sigma^2 I$ is spd depends on the sign of $\sigma^2$, which
+the compiler cannot know, so the program asserts it with
+\code{lam.assume}; the Cholesky factorisation checks the assertion at run
+time (a negative \code{s2} gives \code{info} 1, ``Cholesky factorisation
+of a matrix computed from v3: not positive definite'').
+Kernel selection derives the hand version: \code{adddiag} on the copy of
+$K$ that is factorised, one \code{potrf}, two
 \code{trsv} and a \code{gemv} for $\mu$, one \code{trlsm} for
 $V = L\inv K_*$, and \code{sylrk} with $\beta = 1$ into a copy of
 $K_{**}$ for $\Sigma$, which is then completed (\code{sycomplete}).
@@ -2168,11 +2214,12 @@ With \code{backend="cblas"} (\cref{sec:cblas}) the code is the same, with
   \srcbetween[style=c]{\src python/examples/generated/gp.cpp}{/* gp: matrices}{}{gpcpp}}{%
   \fbox{run \code{make gp} to generate this listing}}
 \captionsetup{hypcap=false}
-\captionof{figure}{The function \code{gp} generated from the four lines of
+\captionof{figure}{The function \code{gp} generated from the five lines of
 Python above (\file{python/examples/generated/gp.cpp}, without the
-\code{\#include} lines and the helpers \code{ulm_lam_copy} and
-\code{ulm_lam_sycomplete} in front of it).  $K$ is copied into the
-workspace and factorised there (\code{potrf}); $\alpha = L\invT L\inv y$
+\code{\#include} lines and the helpers \code{ulm_lam_copy},
+\code{ulm_lam_adddiag} and \code{ulm_lam_sycomplete} in front of it).
+$K$ is copied into the workspace, $\sigma^2$ is added to its diagonal,
+and it is factorised there (\code{potrf}); $\alpha = L\invT L\inv y$
 by two triangular solves; the mean by \code{gemv}; $V = L\inv K_*$ by
 \code{trtrs} on a copy of $K_*$; $\Sigma = K_{**} - V\T V$ by \code{sylrk}
 with $\beta = 1$ on a copy of $K_{**}$, whose upper triangle is then
@@ -2234,15 +2281,14 @@ M5, ulmBLAS's \code{potrf} with OpenMP beats OpenBLAS (at $n = 8000$:
 0.54\,s against 0.67\,s).
 
 \paragraph{What the example shows is missing.}
-The generated function \code{gp} receives finished matrices: $K$, $K_*$
-and $K_{**}$ are its parameters.
-The Python script \file{gp.py} computes them before the call, with NumPy:
-the kernel matrices $k(X, X)$, $k(X, X_*)$ and $k(X_*, X_*)$ (elementwise
-functions of the data, e.g.\ $\exp(-\lVert x_i - x_j\rVert^2/2\ell^2)$),
-and the noise term $\sigma^2 I$ added to $k(X, X)$.
-To move these into the ulm.lam program, ulm.lam would need elementwise
-operations, the identity matrix in the frontend, and scalars such as
-$\sigma^2$ that are known only at run time.
+The kernel matrices $k(X, X)$, $k(X, X_*)$ and $k(X_*, X_*)$ are
+parameters of \code{gp}: the Python script \file{gp.py} computes them
+before the call, with NumPy (elementwise functions of the data, e.g.\
+$\exp(-\lVert x_i - x_j\rVert^2/2\ell^2)$).
+To move them into the ulm.lam program, ulm.lam would need elementwise
+operations; it could then compute only the triangle that \code{potrf}
+reads, obtain squared distances from \code{syrk}, and write $K$ directly
+into the buffer that is factorised.
 Likewise the hyperparameters ($\ell$, $\sigma$, \dots) are fitted
 outside, by scikit-learn on 1500 points: fitting needs
 $\log\det K = 2\sum_i \log L_{ii}$ and traces such as
@@ -2371,6 +2417,44 @@ $O(n^3)$ factorisation, and a fast \code{potrf}, the point.
         GLS stages 1–4 parse and verify.
 \end{itemize}
 
+\paragraph{Compared with Linnea.}
+Linnea itself has not been run for this comparison, and the comparison on
+Linnea's 25 application problems is still to be done (see below), so it
+compares features, and the one case where both have been compared.
+\begin{itemize}
+  \item \emph{Linnea is ahead in the mapping itself.}
+        It searches a graph of alternative derivations (best-first,
+        anytime), with choices of factorisations and common
+        subexpressions across statements; ulm.lam has
+        \code{strategy=gmc} only: per product the generalised matrix
+        chain (Linnea's inner algorithm), plus reuse of computed
+        intervals, \code{syrk} for $Z\T Z$, inverses of products factor
+        by factor, and the operator before a loop.
+        Linnea knows more factorisations and kernels (QR, eigenvalue
+        decomposition, diagonal matrices, \code{trmm}) and more rewrite
+        rules; ulm.lam has Cholesky and LU, \code{symm}, \code{symv},
+        \code{syrk}, triangular solves and \code{adddiag}.
+        Linnea was evaluated on 25 applications and 100 random
+        expressions against Julia, Armadillo, Eigen and Matlab; ulm.lam
+        on GLS, the Kalman update, GP regression and the cases of
+        \file{examples/cases}.
+  \item \emph{Equal where compared:} for GLS ulm.lam derives exactly
+        Linnea's kernel sequence (\cref{tab:derivation}).
+  \item \emph{ulm.lam goes beyond what Linnea generates} (straight-line
+        Julia code for fixed sizes): sizes known only at run time, with
+        the plan chosen at run time; loops, with invariant work moved out
+        and the operator formed before the loop by the trip count;
+        memory planned by bufferization (in-place kernels, \code{inout},
+        a LAPACK-style workspace with query, no allocation in loops);
+        \code{info} instead of aborting; symmetric matrices stored as one
+        triangle; scalars known at run time; a Python frontend with
+        callbacks; two backends (ulmBLAS, CBLAS/LAPACK); problems up to
+        $n = 100\,000$ (\cref{sec:gpcluster}).
+\end{itemize}
+In short: in the breadth of the mapping (search, factorisations, kernel
+catalogue) Linnea is clearly ahead; in what a compiler needs to be used
+(sizes, loops, memory, errors, integration into a language) ulm.lam is.
+
 \paragraph{Plan.}
 \begin{enumerate}[label=M\arabic*]
   \item \emph{Largely done.} Dialects, verifiers, property closure and
@@ -2402,8 +2486,27 @@ $O(n^3)$ factorisation, and a fast \code{potrf}, the point.
   \item \emph{Done for Python} (\cref{sec:python}): a frontend that
         traces Python to \code{ulm_lam} IR, with a runtime and callbacks.
         Open: \code{strategy=egraph} experiments; QR and $LDL\T$ once
-        ulmBLAS has them (\cref{sec:ulmblas}); dynamic sizes in the
-        frontend.
+        ulmBLAS has them (\cref{sec:ulmblas}).
+\end{enumerate}
+
+\paragraph{Next steps, in this order.}
+\begin{enumerate}
+  \item \emph{A Julia binding}: a frontend that traces Julia functions
+        to \code{ulm_lam} IR, as the Python one does, and calls the
+        generated library with \code{ccall}.
+        Julia is where a linear algebra compiler finds its community,
+        and ulmBLAS aims at being a BLAS for Julia as well.
+  \item \emph{More showcases} that ulm.lam can do now or nearly:
+        ridge regression $(X\T X + \lambda I)\inv X\T y$ (\code{syrk},
+        \code{adddiag}, Cholesky); linear attention, where the order of
+        $Q K\T V$ is chosen at run time from the sizes; Bayesian linear
+        regression and the full Kalman filter (predict and update), which
+        need run-time scalars on products and \code{gemmtr}.
+  \item \emph{Linnea's 25 application problems and the LAMP benchmark}
+        (\url{https://github.com/HPAC/LAMP_benchmark}): run them through
+        ulm.lam and compare FLOPs and coverage per problem with Linnea.
+        That gives the precise list of missing rules, factorisations and
+        kernels, and the basis for \code{strategy=search}.
 \end{enumerate}
 
 \paragraph{Open questions.}

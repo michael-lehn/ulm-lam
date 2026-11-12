@@ -73,6 +73,20 @@ def UlmLamk_GescalOp : UlmLamk_Op<"gescal", "X", [ScalarOf<"alpha", "X">]> {
   }];
 }
 
+def UlmLamk_AdddiagOp : UlmLamk_Op<"adddiag", "A", [ScalarOf<"alpha", "A">]> {
+  let summary = "A := A + alpha * I  (A square)";
+  let description = [{
+    The term alpha * I of a sum (e.g. K + s2 * I in GP regression): alpha
+    is added to the diagonal, the identity is never formed.  alpha may be
+    a constant or a value known only at run time.
+  }];
+  let arguments = (ins UlmLamk_Float:$alpha, UlmLamk_Shaped:$A);
+  let assemblyFormat = [{
+    `alpha` `(` $alpha `)` `outs` `(` $A `:` type($A) `)`
+    attr-dict (`->` type($result)^)?
+  }];
+}
+
 //===----------------------------------------------------------------------===//
 // BLAS 3
 //===----------------------------------------------------------------------===//

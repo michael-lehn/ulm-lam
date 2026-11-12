@@ -801,6 +801,7 @@ ULM_LAMK_COMMON(GetrfOp)
 ULM_LAMK_COMMON(GetrsOp)
 ULM_LAMK_COMMON(GeaxpyOp)
 ULM_LAMK_COMMON(GescalOp)
+ULM_LAMK_COMMON(AdddiagOp)
 ULM_LAMK_COMMON(SymvOp)
 ULM_LAMK_COMMON(SycompleteOp)
 #undef ULM_LAMK_COMMON
@@ -820,6 +821,7 @@ ULM_LAMK_GENERAL(PotrfOp) // only one triangle is meaningful
 ULM_LAMK_GENERAL(GetrsOp)
 ULM_LAMK_GENERAL(GeaxpyOp)
 ULM_LAMK_GENERAL(GescalOp)
+ULM_LAMK_GENERAL(AdddiagOp)
 ULM_LAMK_GENERAL(SymvOp)
 #undef ULM_LAMK_GENERAL
 
@@ -852,6 +854,7 @@ ULM_LAMK_VERIFY_DPS(PotrfOp)
 ULM_LAMK_VERIFY_DPS(GetrsOp)
 ULM_LAMK_VERIFY_DPS(GeaxpyOp)
 ULM_LAMK_VERIFY_DPS(GescalOp)
+ULM_LAMK_VERIFY_DPS(AdddiagOp)
 ULM_LAMK_VERIFY_DPS(SymvOp)
 ULM_LAMK_VERIFY_DPS(SycompleteOp)
 #undef ULM_LAMK_VERIFY_DPS
@@ -971,6 +974,14 @@ mlir::ulm_lamk::GeaxpyOp::estimateFlops(const SizeAssignment &)
     return 2.0 * m * n;
 }
 FailureOr<double>
+mlir::ulm_lamk::AdddiagOp::estimateFlops(const SizeAssignment &)
+{
+    auto [m, n] = shapeOf(getA());
+    if (anyDynamic({m, n}))
+	return failure();
+    return 1.0 * std::min(m, n);
+}
+FailureOr<double>
 mlir::ulm_lamk::GescalOp::estimateFlops(const SizeAssignment &)
 {
     auto [m, n] = shapeOf(getX());
@@ -1081,7 +1092,7 @@ mlir::ulm_lam::registerBufferizationModels(DialectRegistry &registry)
 	using namespace mlir::ulm_lamk;
 	attachAll<GemmOp, SymmOp, TrmmOp, TrsmOp, SyrkOp, GemvOp, SymvOp,
 	          SycompleteOp, TrsvOp, PotrfOp, GetrfOp, GetrsOp, GeaxpyOp,
-	          GescalOp, CallOp>(ctx);
+	          GescalOp, AdddiagOp, CallOp>(ctx);
     });
 }
 

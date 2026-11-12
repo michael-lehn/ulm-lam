@@ -16,7 +16,7 @@ front of every function:
   * inout matrices: a writable C-contiguous float64 buffer; the function
     may overwrite it (with lam.update it holds the updated value);
   * out matrices (the return values): allocated here and returned;
-  * index parameters: Python ints;
+  * index parameters: Python ints; Float parameters: numbers;
   * the workspace: queried (workspace_info = -1) and allocated here, once
     per distinct index arguments.
 
@@ -149,11 +149,16 @@ def _info_codes(cpp: str) -> dict[str, dict[int, str]]:
     out = {}
     for m in _IFACE.finditer(cpp):
         codes = {}
+        last = None
         parts = m.group(2).split(" * returns info:")
         for line in parts[1].splitlines() if len(parts) > 1 else []:
             c = _INFO.match(line.lstrip(" *"))
             if c:
-                codes[int(c.group(1))] = c.group(2)
+                last = int(c.group(1))
+                codes[last] = c.group(2)
+            elif last is not None and line.startswith(" *   ") \
+                    and not line.startswith(" * ("):
+                codes[last] += " " + line.strip(" *")  # wrapped text
         out[m.group(1)] = codes
     return out
 
@@ -707,6 +712,11 @@ class CompiledFunction:
                            f"{self.name}: {pname}")
                 keep.append(arg)
                 cargs.append(arg.ptr)
+            elif isinstance(pt, fe.FloatType):
+                if not isinstance(a, (int, float)):
+                    raise fe.LamError(f"{self.name}: {pname} must be a "
+                                       "number")
+                cargs.append(float(a))
             else:
                 if not isinstance(a, int) or a < 0:
                     raise fe.LamError(f"{self.name}: {pname} must be a "

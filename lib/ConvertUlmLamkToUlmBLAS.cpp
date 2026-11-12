@@ -710,6 +710,18 @@ ULM_LAMK_LOWERING(GescalLowering, lk::GescalOp)
         .call(o, "ulmBLAS::gescal" kIndexType);
 }
 
+// A := A + alpha I (ulm.lam's own helper, for both backends)
+ULM_LAMK_LOWERING(AdddiagLowering, lk::AdddiagOp)
+{
+    View A = view(rw, o.getA());
+    return Args{rw}
+        .dim(A.rows)
+        .op(a.getAlpha())
+        .op(a.getA())
+        .strides(A)
+        .call(o, "ulm_lam_adddiag");
+}
+
 // A = L L^T in place
 ULM_LAMK_LOWERING(PotrfLowering, lk::PotrfOp)
 {
@@ -800,6 +812,17 @@ ulm_lam_copy(void *dst, const void *src, std::size_t bytes)
     }
 #endif
     std::memcpy(dst, src, bytes);
+}
+)";
+
+/// A := A + alpha I (ulm_lamk.adddiag), e.g. the noise term s^2 I.
+const char *kAdddiag = R"(template <typename T>
+static void
+ulm_lam_adddiag(std::ptrdiff_t n, T alpha, T *A, std::ptrdiff_t incRow,
+                std::ptrdiff_t incCol)
+{
+    for (std::ptrdiff_t i = 0; i < n; ++i)
+        A[i * (incRow + incCol)] += alpha;
 }
 )";
 
@@ -935,9 +958,26 @@ describe(func::FuncOp f)
 	for (auto &c : codes)
 	    w = std::max(w, c.first.size());
 	s += "\n * returns info:";
-	for (auto &[code, text] : codes)
-	    s += "\n *   " + std::string(w - code.size() + 1, ' ') + code +
-	         "  " + text;
+	// wrapped at 78 columns, continuation lines aligned with the text
+	// (clang-format would otherwise reflow the comment)
+	for (auto &[code, text] : codes) {
+	    std::string head =
+	        " *   " + std::string(w - code.size() + 1, ' ') + code + "  ";
+	    std::string line = head;
+	    size_t start = line.size();
+	    for (StringRef rest = text; !rest.empty();) {
+		auto [word, tail] = rest.split(' ');
+		rest = tail;
+		if (line.size() > start && line.size() + 1 + word.size() > 78) {
+		    s += "\n" + line;
+		    line = " *" + std::string(head.size() - 2, ' ');
+		} else if (line.size() > start) {
+		    line += ' ';
+		}
+		line += word.str();
+	    }
+	    s += "\n" + line;
+	}
 	s += "\n * (info != 0: the outputs are unspecified)";
     }
     return s + "\n */";
@@ -1037,8 +1077,9 @@ struct ConvertUlmLamkToUlmBLAS
 
 	// Which ulmBLAS LAPACK headers and info checks the output needs.
 	bool potrf = false, getrf = false, getrs = false, sycomplete = false,
-	     trtrs = false, copy = false;
+	     trtrs = false, copy = false, adddiag = false;
 	module.walk([&](Operation *op) {
+	    adddiag |= isa<lk::AdddiagOp>(op);
 	    copy |= isa<memref::CopyOp>(op);
 	    potrf |= isa<lk::PotrfOp>(op);
 	    if (auto t = dyn_cast<lk::TrsmOp>(op))
@@ -1054,6 +1095,7 @@ struct ConvertUlmLamkToUlmBLAS
 	             IndexAndLowering, IndexMaxSILowering, GemmLowering, SymmLowering, SymvLowering,
 	             SycompleteLowering, SyrkLowering, GemvLowering,
 	             TrsmLowering, TrsvLowering, GeaxpyLowering, GescalLowering,
+	             AdddiagLowering,
 	             PotrfLowering, GetrfLowering, GetrsLowering, CallLowering>(
 	    tc, ctx);
 	populateArithToEmitCPatterns(tc, patterns);
@@ -1121,6 +1163,8 @@ struct ConvertUlmLamkToUlmBLAS
 	    include("ulmblas/lapack/trtrs.h");
 	if (copy)
 	    emitc::VerbatimOp::create(b, loc, kCopy);
+	if (adddiag)
+	    emitc::VerbatimOp::create(b, loc, kAdddiag);
 	if (sycomplete)
 	    emitc::VerbatimOp::create(b, loc, kSycomplete);
     }

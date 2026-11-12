@@ -15,7 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ulm import lam  # noqa: E402
-from ulm.lam import Index, InOut, LamError, Matrix, Vector  # noqa: E402
+from ulm.lam import Float, Index, InOut, LamError, Matrix, Vector  # noqa: E402
 
 N, K = 40, 6
 rnd = random.Random(4)
@@ -694,6 +694,79 @@ class WithNumPy(unittest.TestCase):
                  record=lambda i, b: seen.append((type(b), b.shape)))
         lib.estimate(np.array(Lam.X), np.array(Lam.M), 2)
         self.assertEqual(seen, [(np.ndarray, (K, 1))] * 2)
+
+
+@unittest.skipIf(np is None, "NumPy is not installed")
+class Identity(unittest.TestCase):
+    """alpha * I in sums (lam.eye), alpha a constant or a Float parameter
+    known at run time: added to the diagonal (adddiag), never formed."""
+
+    @classmethod
+    def setUpClass(cls):
+        n, m = 30, 4
+
+        @lam.function
+        def noise(K: Matrix(n, n, "symmetric"), s2: Float, B: Matrix(n, m)):
+            return lam.assume(K + s2 * lam.eye(n), "spd").inv @ B
+
+        @lam.function
+        def noise_d(K: Matrix("n", "n", "symmetric"), s2: Float,
+                    B: Matrix("n", "m")):
+            return lam.assume(K + s2 * lam.eye("n"), "spd").inv @ B
+
+        @lam.function
+        def terms(A: Matrix(n, n), B: Matrix(n, n), s: Float):
+            return A @ B + 2 * lam.eye(n) - s * lam.eye(n) + A
+
+        @lam.function
+        def gram(X: Matrix(n, m), s: Float):
+            # syrk computes one triangle; adddiag keeps it
+            return X.T @ X + s * lam.eye(m)
+
+        cls.lib = lam.compile([noise, noise_d, terms, gram], name="identity")
+        cls.rng = np.random.default_rng(5)
+        cls.n, cls.m = n, m
+
+    def kernel(self, n):
+        x = self.rng.uniform(-1, 1, (n, 2))
+        return np.exp(-((x[:, None] - x[None]) ** 2).sum(-1))
+
+    def test_noise(self):
+        n, m = self.n, self.m
+        K, B = self.kernel(n), self.rng.uniform(-1, 1, (n, m))
+        ref = np.linalg.solve(K + 0.1 * np.eye(n), B)
+        for f in (self.lib.noise, self.lib.noise_d):
+            got = f(K, 0.1, B)
+            self.assertLess(np.abs(got - ref).max() / np.abs(ref).max(),
+                            1e-10)
+            self.assertIn("ulm_lam_adddiag(", f.cpp)
+        got = self.lib.noise_d(self.kernel(50), 0.5,
+                               self.rng.uniform(-1, 1, (50, 3)))
+        self.assertEqual(got.shape, (50, 3))
+
+    def test_wrong_assumption_raises(self):
+        K, B = self.kernel(self.n), np.ones((self.n, self.m))
+        with self.assertRaises(lam.InfoError) as e:
+            self.lib.noise(K, -3.0, B)
+        self.assertIn("computed from", str(e.exception))
+
+    def test_several_terms(self):
+        n = self.n
+        A, B = self.rng.uniform(-1, 1, (n, n)), self.rng.uniform(-1, 1, (n, n))
+        ref = A @ B + (2 - 0.7) * np.eye(n) + A
+        got = self.lib.terms(A, B, 0.7)
+        self.assertLess(np.abs(got - ref).max() / np.abs(ref).max(), 1e-13)
+
+    def test_one_triangle_kept(self):
+        X = self.rng.uniform(-1, 1, (self.n, self.m))
+        got = self.lib.gram(X, 0.25)
+        ref = X.T @ X + 0.25 * np.eye(self.m)
+        self.assertLess(np.abs(got - ref).max() / np.abs(ref).max(), 1e-13)
+        self.assertIn("sylrk", self.lib.gram.cpp)
+
+    def test_float_argument(self):
+        with self.assertRaises(LamError):
+            self.lib.terms(np.eye(self.n), np.eye(self.n), "x")
 
 
 class Errors(unittest.TestCase):

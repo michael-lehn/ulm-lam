@@ -214,10 +214,19 @@ struct UlmLamInfo : PassWrapper<UlmLamInfo, OperationPass<ModuleOp>>
 	};
 	if (std::string n = argName(m); !n.empty())
 	    return n;
+	// a kernel other than the factorisation that writes m (e.g. adddiag:
+	// K + s^2 I is factorised, not K)
+	bool changed = llvm::any_of(m.getUsers(), [&](Operation *u) {
+	    auto d = dyn_cast<DestinationStyleOpInterface>(u);
+	    return d && !isa<ulm_lamk::PotrfOp, ulm_lamk::GetrfOp>(u) &&
+	           llvm::any_of(d.getDpsInits(),
+	                        [&](Value v) { return v == m; });
+	});
 	for (Operation *u : m.getUsers())
 	    if (auto c = dyn_cast<memref::CopyOp>(u); c && c.getTarget() == m)
 		if (std::string n = argName(c.getSource()); !n.empty())
-		    return n; // a copy of it (the function works on a copy)
+		    // a copy of it (the function works on a copy)
+		    return changed ? "a matrix computed from " + n : n;
 	return "a computed matrix";
     }
 
