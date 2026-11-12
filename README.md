@@ -1,43 +1,32 @@
-# ulm.lam: Ulm Linear Algebra Mapping
+# ulm.lam: write the formula, get the BLAS/LAPACK calls an expert would write
 
-A solution of the Linear Algebra Mapping Problem (LAMP) on MLIR.
+ulm.lam (Ulm Linear Algebra Mapping) is a compiler built on MLIR
+(Multi-Level Intermediate Representation).  You write linear algebra in
+Julia or Python the way it is written in a paper,
+`inv(X' * inv(M) * X) * X' * inv(M) * y`, and declare what you know about
+the matrices (symmetric positive definite, full rank, triangular, …).
+ulm.lam derives the sequence of BLAS (Basic Linear Algebra Subprograms) and
+LAPACK (Linear Algebra PACKage) calls a numerical analyst would write by
+hand:
 
-A Linnea-style compiler built on MLIR (Multi-Level Intermediate
-Representation). It maps linear algebra expressions such as
-`b = (X^T M^-1 X)^-1 X^T M^-1 y` onto calls to the C++ interface of
-ulmBLAS: BLAS (Basic Linear Algebra Subprograms) and LAPACK (Linear Algebra
-PACKage) routines as header-only templates on strided matrices.
+- factorisations and triangular solves instead of inverses, each
+  factorisation computed once and reused;
+- symmetry exploited (`syrk` instead of `gemm`: one triangle, half the
+  flops);
+- the cheaper order of a product, chosen at run time when the sizes are
+  only known then;
+- temporaries in one workspace that is reused across calls, loop state
+  updated in place: no allocations inside loops;
+- failed factorisations reported like LAPACK's `info`, with a description.
 
-## Python
+`@code_lam` shows what it derived.  The generated C++ calls the BLAS and
+LAPACK Julia uses (OpenBLAS, or whatever libblastrampoline forwards to,
+e.g. [UlmBLAS.jl](https://github.com/michael-lehn/UlmBLAS.jl)), the
+header-only C++ library [ulmBLAS](https://github.com/michael-lehn/ulmBLAS),
+or any CBLAS (C interface to the BLAS) and LAPACK, such as MKL (Intel Math
+Kernel Library) or Apple's Accelerate.
 
-```python
-from ulm import lam
-from ulm.lam import Matrix, Vector
-
-@lam.function
-def gls(X: Matrix(2000, 200, "full_rank"), M: Matrix(2000, 2000, "spd"),
-        y: Vector(2000)):
-    return (X.T @ M.inv @ X).inv @ X.T @ M.inv @ y
-
-lib = lam.compile(gls)          # ulm_lam IR -> C++ with ulmBLAS -> shared library
-b = lib.gls(X, M, y)            # NumPy arrays (or any float64 buffer) in and out
-print(lib.gls.cpp)               # the generated C++ of gls
-```
-
-Sizes can be names, `Matrix("n", "m", "full_rank")`: they are run-time
-parameters taken from the arrays, so one compiled library serves all sizes
-(and where the best evaluation depends on the sizes, the generated code
-chooses at run time).
-
-`python/ulm/lam/` is the frontend (tracing Python to `ulm_lam` IR, loops,
-external functions with Python callbacks, parameter intents, symmetric
-matrices stored as one triangle: `Matrix(n, n, "spd", stored="lower")`) and
-the runtime (compilation, workspaces, calling).  A factorisation that fails
-numerically (a matrix assumed spd that is not, a singular one) raises
-`lam.InfoError`.  Temporaries live in a 64-byte aligned workspace that the library
-reuses (`lib.workspace`), or in one passed as `work=lam.Workspace(size)`.  See `python/examples/kalman.py`,
-`python/examples/adaptive_kalman.py` (the covariance updated in place by a
-Python callback in every step) and `python/tests/`.  NumPy is optional.
+An early research prototype: real double precision, dense matrices.
 
 ## Julia
 
@@ -48,137 +37,216 @@ using UlmLam, LinearAlgebra
     inv(X' * inv(M) * X) * X' * inv(M) * y
 end
 
-lib = UlmLam.compile(gls)       # the same pipeline as from Python
-b = lib.gls(X, M, y)            # Julia arrays in and out (ccall, no Python)
+β = gls(X, M, y)          # Julia arrays; the first call compiles (about 0.5 s)
 ```
 
-`julia/UlmLam` (`make julia`): `X'`, `inv`, `A \ B`, `B / A`, `K + s2*I`,
-`assume`, `loop` (do-block), `extern` with Julia callbacks (`bind!`),
-`InOut`, `Float`/`Index` parameters, sizes as symbols, workspaces,
-`InfoError`, `backend=:cblas`.  Julia's column-major arrays are passed as
-the row-major transposes, without copies; kernel selection turns the
-transposes into strides.  `julia/examples/kalman.jl` is the Kalman loop.
+```
+julia> @code_lam gls(X, M, y)
+gls(X::n×m full_rank, M::n×n spd, y::n)
+  potrf    L1 ← chol(M)                      M = L1 L1ᵀ, Cholesky
+  copy     T1 ← X
+  trsm     T1 ← L1⁻¹ T1
+  syrk     T2 ← T1ᵀ T1                       one triangle only
+  potrf    L2 ← chol(T2)                     T2 = L2 L2ᵀ, Cholesky
+  trsv     T3 ← L1⁻¹ y
+  gemv     T4 ← T1ᵀ T3
+  trsv     T4 ← L2⁻¹ T4
+  trsv     T4 ← L2⁻ᵀ T4
+  return T4
+info (as LAPACK's; InfoError in Julia):
+    1  Cholesky factorisation of M: not positive definite
+    2  Cholesky factorisation of a computed matrix: not positive definite
+```
 
-## Showcase: Gaussian process regression
+`inv(M)` appears twice and is factorised once; $X^T M^{-1} X$ becomes
+$(L_1^{-1}X)^T(L_1^{-1}X)$, a triangular solve and a symmetric rank-k
+update; no inverse is formed, and neither `M` nor `X` is overwritten.
 
-`python/examples/gp.py` (`make gp`) predicts with a GP (Gaussian process)
-from its textbook formula,
+A loop with its state carried in place and callbacks into Julia: the
+Kalman filter as in the textbook,
+
+```julia
+measure = extern(:measure, [Index], Vec(:m))      # implemented in Julia
+estimate = extern(:estimate, [Index, Vec(:n)])
+
+@lam function kalman(F::Mat(:n, :n), Q::Mat(:n, :n, :spsd), H::Mat(:m, :n),
+                     R::Mat(:m, :m, :spd), x0::Vec(:n), P0::Mat(:n, :n, :spd),
+                     steps::Index)
+    loop(steps, x0, P0) do i, x, P
+        P = assume(P, :symmetric)
+        x = F * x
+        P = F * P * F' + Q
+        S = assume(H * P * H' + R, :spd)
+        K = P * H' * inv(S)
+        x = x + K * (measure(i) - H * x)
+        P = P - K * H * P
+        estimate(i, x)
+        (x, P)
+    end
+end
+
+bind!(kalman; measure = i -> zs[i+1], estimate = (i, x) -> ...)
+x, P = kalman(F, Q, H, R, x0, P0, steps)
+```
+
+`@code_lam kalman(...)` shows one Cholesky factorisation of $S$ per step,
+$K$ from two triangular solves instead of $S^{-1}$, $H P$ computed once and
+reused for $S$ and for $K H P$ (evaluated as $K (H P)$), and no allocation
+in the loop.
+
+The Pluto notebook [`notebook/ulm-lam.jl`](notebook/ulm-lam.jl) has these
+and more to play with: GP (Gaussian process) regression compared with
+AbstractGPs.jl, linear attention with the order of $Q K^T V$ chosen at run
+time, and the MLIR the Julia code is traced into.
+
+## Python
 
 ```python
+from ulm import lam
+from ulm.lam import Matrix, Vector
+
 @lam.function
-def gp(K: Matrix("n", "n", "symmetric"), s2: Float, Ks: Matrix("n", "m"),
-       Kss: Matrix("m", "m", "symmetric"), y: Vector("n")):
-    Kn = lam.assume(K + s2 * lam.eye("n"), "spd")
-    mean = Ks.T @ Kn.inv @ y
-    cov = Kss - Ks.T @ Kn.inv @ Ks
-    return mean, cov
+def gls(X: Matrix("n", "m", "full_rank"), M: Matrix("n", "n", "spd"),
+        y: Vector("n")):
+    return (X.T @ M.inv @ X).inv @ X.T @ M.inv @ y
+
+lib = lam.compile(gls)     # one shared library for all sizes
+b = lib.gls(X, M, y)       # NumPy arrays (or any float64 buffer), no copies
+print(lib.gls.cpp)         # the generated C++
 ```
 
-(`s2`: the noise variance, a `Float` known at run time; `lam.eye("n")` is
-never formed, s2 is added to the diagonal; `lam.assume` asserts what the
-compiler cannot know, and the Cholesky factorisation checks it.)
+## What you can write
 
-and ulm.lam derives what scikit-learn's `GaussianProcessRegressor` does by
-hand: one Cholesky factorisation, `L^-1 K*` once (trsm), `K** - V^T V` by
-syrk, no inverse.  On public data, downloaded into `build/data/`: the
-Mauna Loa CO2 forecast of Rasmussen and Williams (NOAA, National Oceanic
-and Atmospheric Administration; plot in `build/gp/co2.png`) and hourly bike
-rentals (UCI, University of California, Irvine), timed for n up to 8000
-(`--full`: 16000) against NumPy, SciPy and scikit-learn; ulm.lam runs on
-ulmBLAS and, with `backend="cblas"`, on the OpenBLAS of NumPy.  Optional:
-SciPy, scikit-learn, Matplotlib.  `examples/gp_cluster/` runs it with n up
-to 100 000 on bwUniCluster 3.0: ulm.lam on MKL is as fast as the same steps
-written by hand with MKL; ulmBLAS is 3.8x slower there (thread scaling).
+| | Julia | Python |
+|:--|:--|:--|
+| matrix | `Mat(rows, cols, props...)` | `Matrix(rows, cols, *props)` |
+| vector | `Vec(n)` | `Vector(n)` |
+| sizes | numbers, or symbols for run-time sizes (`:n`) | numbers, or strings (`"n"`) |
+| run-time scalar | `Float` | `Float` |
+| integer | `Index` (trip counts, callback arguments) | `Index` |
+| product, sum | `*`, `+`, `-`, scalars | `@`, `+`, `-`, scalars |
+| transpose | `X'`, `transpose(X)` | `X.T` |
+| inverse, solve | `inv(A)`, `A \ B`, `B / A` | `A.inv`, `lam.inv(A)` |
+| identity | `I`, `eye(n)` (never formed) | `lam.eye(n)` |
+| facts | `assume(A, :spd)` | `lam.assume(A, "spd")` |
+| loops | `loop(n, carry...) do i, x... end` | `with lam.loop(n, carry=[...]) as L:` |
+| callbacks | `extern(name, argtypes, result)`, `bind!` | `lam.extern(...)`, `lib.bind(...)` |
+| overwritable parameter | `InOut(Mat(...))` | `InOut(Matrix(...))` |
+| several results | a tuple | a tuple |
+| inspect | `@code_lam f(args...)` | `lib.f.cpp` |
 
-## Conventions of the generated code
+Properties: `symmetric`, `spd` (symmetric positive definite), `spsd`
+(symmetric positive semidefinite), `lower_tri`, `upper_tri`, `unit_diag`,
+`diagonal`, `full_rank`, `non_singular`, `orthogonal`, `permutation`,
+`identity`, `zero`.  Properties of results are inferred ($X^T M^{-1} X$ is
+spd when $M$ is spd and $X$ has full rank); `assume` adds what cannot be
+derived, and a factorisation that finds it wrong says so (`InfoError`).
 
-- Matrices by reference (row-major), owned by the caller; parameters are
-  `in` (read only), `inout` (may be overwritten) or `out`.  Sizes may be
-  run-time parameters (`size_t`, attribute `ulm_lam.dims`).
-- Every function returns an `int64_t info`, as LAPACK routines do: 0, k > 0
-  if its check k failed (a factorisation, or a call of another generated
-  function), -i if argument i is illegal (a workspace that is too small).
-  The interface comment in front of each function lists the checks.
-- Temporaries live in a caller-provided workspace (`work`,
-  `*workspace_info`: -1 query, 0 allocate, > 0 its size in bytes); a query
-  accumulates those of the callees.
-- ulmBLAS is called with `IndexType = std::ptrdiff_t`.
-- A second lowering, `BACKEND=cblas` (`lam.compile(..., backend="cblas")`,
-  or `ULM_LAM_BACKEND=cblas`): the same kernel calls on CBLAS and LAPACK
-  (MKL, OpenBLAS, Accelerate) via `include/ulm_lam/cblas_backend.h`, so
-  that the mapping can be measured independently of ulmBLAS.  Link flags:
-  `ULM_LAM_BLAS_LIBS` (default: Homebrew's OpenBLAS).
+## Measurements
 
-## Document
+Apple M5, Julia 1.13 with its OpenBLAS (4 threads), from the notebook;
+time and memory allocated per call:
 
-The design document is `doc/ulm-lam.pdf`, built with LuaLaTeX from
-`doc/ulm-lam.tex`.
+| | ulm.lam | Julia, the formula as written | Julia, written by an expert |
+|:--|--:|--:|--:|
+| GLS (generalised least squares), n = 2000, m = 50 | 26 ms, 4.7 KiB | 221 ms (8.4×), 64 MiB | 25 ms, 31 MiB |
+| GP regression, 4000 training and 1000 test points | 279 ms, 336 MiB | | AbstractGPs.jl: 287 ms, 618 MiB |
+| Kalman filter, n = 1000, m = 100, 20 steps | 389 ms, 15 MiB | 447 ms, 832 MiB | |
+| linear attention, N = 4096, d = 64 | 0.47 ms | `(Q * K') * V`: 20 ms (43×) | `Q * (K' * V)`: 0.48 ms |
+
+The GP memory includes the kernel matrices (KernelFunctions.jl); the
+Kalman memory is mostly the n × n result.  From Python: GP regression with
+n = 8000 is 1.4× faster than SciPy written by hand and 8× faster than NumPy
+with `inv`; ridge regression 3–4× faster than with `inv`; a linear layer
+trained by gradient descent, written as formulas, is as fast as PyTorch on
+the same BLAS and 5× faster than PyTorch's autograd for a small layer.  On
+a cluster node (96 threads, MKL), GP regression with n = 100 000 runs as
+fast as the same steps written by hand with MKL.
+
+## How it works
+
+```
+Julia / Python ─trace─▶ ulm_lam dialect ─normalise, infer properties─▶ kernel selection
+  ─▶ ulm_lamk dialect (BLAS/LAPACK kernels on tensors) ─one-shot bufferization, workspace, info─▶
+  memrefs ─EmitC─▶ C++ calling the BLAS ─▶ shared library ─▶ called without copying the arrays
+```
+
+- `ulm_lam` (`include/ulm_lam/UlmLamOps.td`): operations of linear algebra
+  (`mul`, `add`, `transpose`, `inverse`, `assume`, …) on tensors whose
+  types carry properties.  Normalisation and property inference are MLIR
+  passes.
+- Kernel selection derives the evaluation, in the spirit of Linnea
+  (Barthels, Psarras and Bientinesi): it matches factorisations and kernels
+  against the expression, costs them in flops (polynomials in the run-time
+  sizes) and, where the best plan depends on sizes known only at run time,
+  emits both plans behind an `scf.if`.  Operators that do not change inside
+  a loop are hoisted out of it when the trip count makes that pay.
+- `ulm_lamk` (`include/ulm_lam/UlmLamKernelOps.td`): `gemm`, `syrk`,
+  `trsm`, `potrf`, `getrf`, `getrs`, … in destination-passing style, so
+  that MLIR's one-shot bufferization updates results in place.  Further
+  passes put the temporaries into one caller-provided workspace and turn
+  failed factorisations into LAPACK-style `info` codes.
+- A lowering to EmitC produces C++ that calls the BLAS.  A Julia matrix
+  (column-major) is passed as its row-major transpose; the transposes
+  become strides and BLAS transposition flags, never copies.
+
+The design document [`doc/ulm-lam.pdf`](doc/ulm-lam.pdf) describes the
+dialects, the derivations and the measurements, and compares ulm.lam with
+Linnea (`examples/linnea/`).
+
+## Installation
+
+Developed on macOS (Apple silicon) with Homebrew's LLVM.  The generated
+C++ is portable; it has also been built and run on Linux (GCC, MKL).
+
+```sh
+brew install llvm          # LLVM with MLIR 23
+git clone https://github.com/michael-lehn/ulm-lam
+cd ulm-lam
+make plugin                # the MLIR dialects and passes, an mlir-opt plugin
+```
+
+Julia (tested with 1.13):
+
+```sh
+julia --project=notebook -e 'using Pkg; Pkg.instantiate()'
+julia --project=notebook -e 'using Pluto; Pluto.run(notebook="notebook/ulm-lam.jl")'
+```
+
+or `] dev julia/UlmLam` in your own environment.  Python 3 (NumPy
+optional): `PYTHONPATH=python python3 python/examples/gp.py`.
+
+Environment: `LLVM_PREFIX` (default `brew --prefix llvm`), `ULM_LAM_BACKEND`
+(`julia`, `ulmblas` or `cblas`), `ULMBLAS_DIR` (the ulmBLAS sources, for
+`ulmblas`), `ULM_LAM_BLAS_LIBS` (link flags for `cblas`), `CXX`, `OPENMP=0`
+(without OpenMP, Open Multi-Processing).
+
+## Development
+
+`make` builds and checks everything: the ODS (Operation Definition
+Specification) files, the plugin, the hand-written design stages, the
+examples in `examples/` (each against an independent evaluation; their
+generated C++ is kept in `examples/*/generated/`), the Python tests, the
+Julia tests and examples, and the document (LuaLaTeX).  `make gp
+showcases torch` runs the Python showcases.
 
 | Path | Content |
 |---|---|
-| `include/ulm_lam/*.td` | ODS (Operation Definition Specification) for the `ulm.lam` (algebra) and `ulm_lamk` (kernels) dialects, interfaces, passes, kernel catalogue |
-| `lib/` | the implementation, an mlir-opt plugin: both dialects, `ulm-lam-normalize`, `ulm-lam-infer-properties`, `ulm-lam-select-kernels` (strategy=gmc, with inverses), `ulm-lam-strip-properties`, `ulm-lam-results-to-out-params`, `ulm-lam-workspace`, `ulm-lam-info`, `convert-ulm-lamk-to-ulmblas` |
-| `python/ulm/lam/` | the Python frontend and runtime (`from ulm import lam`) |
-| `scripts/ulm-lam-compile.sh` | the pipeline: ulm_lam ops to C++ calling ulmBLAS (writes every stage) |
-| `examples/gls/` | generalised least squares: hand-written design stages 1–4; from stage 2 to C++ by passes; `gls_inout.mlir` with M and y declared `inout` |
-| `examples/kalman/` | formula (1) in a loop, a new measurement y_i in every step (Kalman measurement update with an uninformative prior): factorisations before the loop, O(n²) per step; `adaptive.mlir`: the covariance is updated in place in every step by an external function |
-| `examples/loop/` | `X += A*B*C` in a loop: no allocation or copy inside the loop |
-| `examples/compose/` | a function with a workspace calling functions with workspaces (a generated one and an external one): the workspace query accumulates |
-| `examples/dynamic/` | GLS with sizes as run-time parameters: one compiled function for six sizes |
-| `examples/cases/` | inverses (LU, Cholesky, triangular, from the left and the right) and sums, checked numerically |
+| `include/ulm_lam/*.td` | ODS of the `ulm_lam` and `ulm_lamk` dialects, interfaces, passes, the kernel catalogue |
+| `lib/` | the mlir-opt plugin: both dialects, normalisation, property inference, kernel selection, workspace, info, lowering to EmitC |
+| `scripts/ulm-lam-compile.sh` | the pipeline from `ulm_lam` to C++ (keeps every stage) |
+| `include/ulm_lam/cblas_backend.h` | the CBLAS/LAPACK backend of the generated code |
+| `julia/UlmLam/` | the Julia frontend (`@lam`, `@code_lam`) and runtime |
+| `python/ulm/lam/` | the Python frontend and runtime |
+| `notebook/` | the Pluto notebook and its environment |
+| `examples/` | design stages, loops, workspaces, run-time sizes, inverses, Linnea's versions of the problems, the cluster runs |
+| `python/examples/`, `julia/examples/` | the showcases |
+| `doc/` | the design document |
 
-Every example keeps the C++ generated from it in `examples/*/generated/`
-(written by `make`).
+## Background
 
-What is checked (`make`):
-
-- `make ods`: every `mlir-tblgen` backend accepts the ODS.
-- `make stages`: the hand-written GLS stages 1–4 parse and verify with the
-  implemented dialects; stage 3 bufferizes into exactly the copies stage 4
-  shows.
-- `make gls`: from the normal form (stage 2), kernel selection finds the
-  derivation (two Cholesky factorisations, W = L^-1 X, S = W^T W by syrk,
-  solves),
-  the C++ runs and is verified against an independent LU solve.
-- `make kalman`: formula (1) in a loop with changing y; everything that does
-  not depend on y runs once before the loop, and if the loop runs often
-  enough (decided at run time from the trip count) the whole operator
-  (H^T R^-1 H)^-1 H^T R^-1 is formed there too, leaving one gemv per step;
-  compared with the same code
-  without loop-invariant code motion and with explicit inverses.  Second
-  example: the covariance is updated in place in every step
-  (`update_covariance(i, R)`, R by reference).
-- `make loop`: kernel selection and memory placement of the loop example;
-  the C++ runs and is verified against naive C loops.
-- `make compose`: the workspace query of a function accumulates those of
-  its callees; given, self-allocated and too small workspaces; a failing
-  callee makes the caller return its info at once.
-- `make cases`: eight kernel selection cases against naive evaluations;
-  info for an indefinite and a singular matrix and a too small workspace.
-- `make dynamic`: one compiled GLS with run-time sizes for six sizes.
-- `make gp`: the GP showcase above (needs the network once).
-- `make showcases`: ridge regression on random Fourier features of the bike
-  data (as fast as NumPy/SciPy/scikit-learn by hand, 3-4x faster than with
-  `inv`), linear attention (the order of Q K^T V chosen at run time: up to
-  160x faster than NumPy as written) and the Kalman filter with predict and
-  update (1.1-1.2x faster than NumPy written by an expert, 1.7-2.5x faster
-  than as written) and Bayesian linear regression (run-time scalars alpha,
-  beta on products; as fast as SciPy by hand, 3.4-4.6x faster than with
-  `inv`).  The same in Julia: `make julia`.
-- `make torch`: a linear layer trained by mini-batch gradient descent,
-  forward pass, gradients and SGD step written as formulas, against
-  PyTorch on the same BLAS (Accelerate): as fast where the gemms dominate,
-  5x faster than autograd for a small layer.  Runs in `build/venv-torch`
-  (NumPy and PyTorch from pip: PyTorch's OpenMP runtime clashes with
-  Homebrew's).
-- `make python`: the Python frontend: 44 unit tests (among them symmetric
-  matrices stored as one triangle, with NaN in the other one) and the two
-  Kalman examples against NumPy.
-
-Requirements: Julia (for `make julia`), Homebrew `llvm` (LLVM, originally "Low Level Virtual Machine";
-MLIR 23), ulmBLAS (`ULMBLAS_DIR`, default `~/git/ulmBLAS`), TeX Live with
-LuaLaTeX.
-
-```sh
-make            # ods, plugin, stages, loop, gls, kalman, compose, cases, dynamic, python, julia, doc
-```
+ulm.lam is the compiler that [FLENS](https://github.com/michael-lehn/FLENS)
+needed.  FLENS gave C++ a mathematical notation for linear algebra, and its
+LAPACK reimplementation, FLENS-LAPACK (verified bit for bit against
+LAPACK), was written by mapping formulas onto BLAS calls by hand.  ulm.lam
+does that mapping automatically.

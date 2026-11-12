@@ -101,7 +101,7 @@
 % ---------------------------------------------------------------- document
 \title{ulm.lam: Write the Formula,\\Get the Expert's BLAS and LAPACK Code\\[4pt]
   \large Ulm Linear Algebra Mapping with MLIR and ulmBLAS}
-\author{Design draft}
+\author{Michael Lehn}
 \date{\today}
 
 \begin{document}
@@ -123,8 +123,12 @@ $1.4\times$ faster than the same steps written by hand with SciPy and
 $8\times$ faster than the formula written in NumPy, and scales to
 $n = 100\,000$ on a cluster node, where it is as fast as the same steps
 written by hand with Intel's MKL (Math Kernel Library).
-A Kalman filter loop, written as the formula, is $3\times$ faster than
-NumPy code optimised by hand.
+A loop of Kalman measurement updates, written as the formula, is
+$3\times$ faster than NumPy code in which the operator was formed by hand
+before the loop.
+In Julia, a \code{@lam} function is called with Julia arrays, runs on
+Julia's own BLAS, and \code{@code_lam} shows the BLAS and LAPACK calls
+ulm.lam derived.
 Behind it is a solution of the \emph{Linear Algebra Mapping Problem}
 (LAMP) on MLIR (Multi-Level Intermediate Representation)~\cite{mlir}:
 two dialects (the algebra with matrix properties, and the kernels in
@@ -2339,8 +2343,8 @@ end
     (Ks' * inv(Kn) * y, Kss - Ks' * inv(Kn) * Ks)
 end
 
-lib = UlmLam.compile([gls, gp])
-b = lib.gls(X, M, y)            # Julia arrays in and out
+b = gls(X, M, y)                # Julia arrays; compiled at the first call
+@code_lam gls(X, M, y)          # the derivation
 \end{lstlisting}
 \code{X'}, \code{inv}, \code{A \textbackslash{} B}, \code{B / A},
 \code{I} from \code{LinearAlgebra}, \code{assume}, \code{loop} (a
@@ -2376,13 +2380,41 @@ result) is materialised by \code{gecopy}.
 Callbacks of external functions get vectors as \code{Vector} and matrices
 as lazy transposes of the row-major buffers, without copies.
 
+\paragraph{Calling, inspecting, Julia's BLAS.}
+A \code{@lam} function called with Julia arrays is compiled at its first
+call (about half a second: the pipeline takes 0.3\,s, the C++ compiler
+the rest) and the library is kept; \code{UlmLam.compile} builds one
+library for several functions, \code{bind!(f; \ldots)} implements the
+external functions of \code{f}.
+\code{@code_lam f(args)} shows the derivation: the kernels after selection
+(\cref{sec:select}), each written as an assignment in place in Julia's
+terms (\code{T1 ← L1⁻¹ T1} for a \code{trsm}), with loops, the plans of a
+decision taken at run time, callbacks, and the meaning of every
+\code{info} value.
+Since the IR holds a Julia matrix as its transpose, each IR value is
+shown as a matrix or its transpose; where the IR leaves the choice (a new
+temporary), \code{@code_lam} shows the orientation with the fewest
+transposes, so that $Q (K\T V)$ reads as \code{T1 ← Kᵀ V},
+\code{T2 ← Q T1}.
+The default backend, \code{:julia}, is the CBLAS lowering compiled
+against the libblastrampoline Julia has loaded, with 64-bit integers and
+its \code{64\_} symbols (\file{include/ulm\_lam/cblas\_backend.h},
+\code{ULM\_LAM\_CBLAS\_ILP64}): the generated code runs on OpenBLAS, or on
+ulmBLAS after \code{UlmBLAS.forward()} of
+UlmBLAS.jl~\cite{ulmblasjl}; \code{:ulmblas} and \code{:cblas} are the
+other two.
+The Pluto notebook \file{notebook/ulm-lam.jl} demonstrates all of this
+(GLS, GP regression against AbstractGPs.jl, the Kalman filter, linear
+attention).
+
 \paragraph{Results.}
-\file{julia/UlmLam/test/runtests.jl} (48 tests) runs GLS with fixed and
+\file{julia/UlmLam/test/runtests.jl} (75 tests) runs GLS with fixed and
 run-time sizes, solves from the left and from the right (Cholesky and
 LU), a chain chosen at run time, two results, a loop with callbacks, a
 loop-carried matrix, GP with \code{s2 * I} and a wrong assumption
 (\code{InfoError}), \code{InOut}, a given workspace and argument errors,
-on ulmBLAS and on OpenBLAS (\code{backend=:cblas}).
+on Julia's BLAS, on ulmBLAS and on OpenBLAS (\code{backend=:cblas}),
+and \code{@code_lam}.
 \file{julia/examples/gp.jl} and \file{julia/examples/kalman.jl} are the
 benchmarks of \cref{sec:glance}: the GP prediction against Julia code
 written by hand ($2$--$2.4\times$ faster on ulmBLAS, $1.3$--$1.6\times$ on
@@ -3226,6 +3258,10 @@ A linear layer trained by gradient descent, compared with PyTorch (\cref{sec:sho
 \bibitem{ulmblas} M.~Lehn.
   ulmBLAS: a BLAS implementation in C++.
   \url{https://github.com/michael-lehn/ulmBLAS}.
+\bibitem{ulmblasjl} M.~Lehn.
+  UlmBLAS.jl: Julia interface to ulmBLAS.
+  \url{https://github.com/michael-lehn/UlmBLAS.jl}.
+
 \bibitem{lapis} LAPIS: A performance portable, high productivity compiler
   framework. 2025.
   \href{https://arxiv.org/abs/2509.25605}{arXiv:2509.25605}.
