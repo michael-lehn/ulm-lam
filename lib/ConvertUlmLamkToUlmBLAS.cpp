@@ -942,14 +942,20 @@ static void
 ulm_lam_sycomplete(bool lower, std::ptrdiff_t n, T *A, std::ptrdiff_t incRow,
                    std::ptrdiff_t incCol)
 {
-    for (std::ptrdiff_t i = 0; i < n; ++i)
-        for (std::ptrdiff_t j = 0; j < i; ++j) {
-            T &lo = A[i * incRow + j * incCol], &up = A[j * incRow + i * incCol];
-            if (lower)
-                up = lo;
-            else
-                lo = up;
-        }
+    // in tiles of b x b: an element-wise transposed copy would touch a new
+    // cache line with every write
+    const std::ptrdiff_t b = 64;
+    for (std::ptrdiff_t ib = 0; ib < n; ib += b)
+        for (std::ptrdiff_t jb = 0; jb <= ib; jb += b)
+            for (std::ptrdiff_t i = ib; i < n && i < ib + b; ++i)
+                for (std::ptrdiff_t j = jb; j < i && j < jb + b; ++j) {
+                    T &lo = A[i * incRow + j * incCol],
+                      &up = A[j * incRow + i * incCol];
+                    if (lower)
+                        up = lo;
+                    else
+                        lo = up;
+                }
 })";
 
 // ---- the interface comment ------------------------------------------------

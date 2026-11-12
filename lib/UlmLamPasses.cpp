@@ -279,8 +279,15 @@ struct Leaf
     bool
     isTransposeOf(const Leaf &o) const
     {
-	return kind == o.kind && v == o.v && piv == o.piv && lower == o.lower &&
-	       trans != o.trans;
+	if (kind == o.kind && v == o.v && piv == o.piv && lower == o.lower &&
+	    trans != o.trans)
+	    return true;
+	// a symmetric matrix is its own transpose (P in (H P)^T = P H^T)
+	if (kind != Mat || o.kind != Mat || v != o.v || trans != o.trans)
+	    return false;
+	auto t = cast<RankedTensorType>(v.getType());
+	return bitEnumContainsAll(closure(propertiesOf(t), t.getShape()),
+	                          Properties::symmetric);
     }
 };
 
@@ -320,10 +327,12 @@ struct Factor
 class Selector
 {
   public:
-    explicit Selector(func::FuncOp f, bool lapack = false)
-        : func(f), b(f.getContext()), dom(f), lapack(lapack)
+    explicit Selector(func::FuncOp f, bool lapack = false, bool expand = true)
+        : func(f), b(f.getContext()), dom(f), lapack(lapack), expand(expand)
     {
     }
+    /// expandFactors: computed factors of a product may be expanded
+    bool expand = true;
     /// The backend has LAPACK (CBLAS/LAPACK): L D L^T (sytrf) for symmetric
     /// matrices that are not known to be spd, instead of LU; least squares
     /// by QR (gels) instead of the normal equations.
@@ -368,6 +377,8 @@ class Selector
 	                             : selectProduct(cast<MulOp>(op));
 	    if (failed(r))
 		return failure();
+	    if (auto m = dyn_cast<MulOp>(op))
+		origin[*r] = m;
 	    replace(op, *r);
 	}
 	// A loop-carried value that is not computed in the buffer of its
@@ -383,8 +394,10 @@ class Selector
 		    continue;
 		b.setInsertionPoint(yield);
 		Value r = into(v, arg, yield.getLoc());
-		if (r.getType() != v.getType())
-		    r = AssumeOp::create(b, yield.getLoc(), v.getType(), r,
+		// (the yield has the type of the loop's state; a value stored
+		// as one triangle is completed before the copy, see below)
+		if (r.getType() != arg.getType())
+		    r = AssumeOp::create(b, yield.getLoc(), arg.getType(), r,
 		                         false);
 		o.set(r);
 	    }
@@ -432,8 +445,20 @@ class Selector
 		if (storageOf(o.get()))
 		    uses.push_back(&o);
 	});
-	for (OpOperand *o : uses)
-	    o->set(full(o->get()));
+	for (OpOperand *o : uses) {
+	    Value v = full(o->get());
+	    // a result has the type the function declares (completed, the
+	    // storage is no longer part of it)
+	    if (auto ret = dyn_cast<func::ReturnOp>(o->getOwner())) {
+		Type want =
+		    func.getFunctionType().getResult(o->getOperandNumber());
+		if (v.getType() != want) {
+		    b.setInsertionPoint(ret);
+		    v = AssumeOp::create(b, ret.getLoc(), want, v, false);
+		}
+	    }
+	    o->set(v);
+	}
 	return cleanup();
     }
 
@@ -1681,6 +1706,10 @@ class Selector
 	return cst(0);
     }
 
+    /// The product a selected value was computed from (K = P H^T S^-1): a
+    /// later product with K as a factor can expand it (see chain).
+    llvm::DenseMap<Value, MulOp> origin;
+
     // in the other branch of choleskySandwich (its result is passed on as
     // one triangle, so gemmtr is allowed there)
     bool noSandwich = false;
@@ -1819,6 +1848,51 @@ class Selector
 	return FailureOr<Value>(ifOp.getResult(0));
     }
 
+    /// A factor that is itself a computed product (K in K H P, with
+    /// K = P H^T S^-1) may be replaced by the leaves of that product, if
+    /// the longer chain is cheaper: it can expose structure across the two
+    /// products (here (H P)^T S^-1 (H P): trsm and syrk instead of gemm),
+    /// and intervals already computed (H P, the factorisation of S, L^-1 H P)
+    /// are reused.  Found by the equality saturation experiment
+    /// (experiments/egraph): the e-graph keeps both forms of the product.
+    void
+    expandFactors(Chain &c, MulOp mul)
+    {
+	auto factors = mul.getFactors();
+	for (unsigned fi = 0; fi < factors.size(); ++fi) {
+	    Value f = factors[fi];
+	    while (auto as = f.getDefiningOp<AssumeOp>())
+		f = as.getOperand();
+	    auto it = origin.find(f);
+	    if (it == origin.end())
+		continue;
+	    MulOp om = it->second;
+	    Chain c2;
+	    c2.symmetric = c.symmetric;
+	    bool ok = true;
+	    for (unsigned j = 0; j < factors.size() && ok; ++j) {
+		if (j != fi) {
+		    ok = succeeded(
+		        leavesOf(factors[j], mul, c2.leaves, c2.alpha));
+		    continue;
+		}
+		for (Value g : om.getFactors())
+		    ok = ok && succeeded(leavesOf(g, mul, c2.leaves, c2.alpha));
+	    }
+	    if (!ok || !dynScales.empty()) {
+		dynScales.clear();
+		continue;
+	    }
+	    int k1 = c.leaves.size(), k2 = c2.leaves.size();
+	    solveChain(c, mul);
+	    double cost1 = c.cost[0][k1 - 1];
+	    solveChain(c2, mul);
+	    double cost2 = c2.cost[0][k2 - 1];
+	    if (cost2 < cost1)
+		c = std::move(c2);
+	}
+    }
+
     /// beta * dest + alpha * (product), dest null: a new value.
     FailureOr<Value>
     chain(MulOp mul, Value dest, double alpha, double beta,
@@ -1835,6 +1909,8 @@ class Selector
 	    if (failed(leavesOf(f, mul, c.leaves, c.alpha)))
 		return failure();
 	dynScales.append(extraScales.begin(), extraScales.end());
+	if (dynScales.empty() && expand)
+	    expandFactors(c, mul);
 	if (dynScales.empty() && !inBranch && !noSandwich)
 	    if (auto r = choleskySandwich(c, mul, dest, alpha, beta))
 		return *r;
@@ -2394,6 +2470,12 @@ struct UlmLamSelectKernels
 	               "(sytrf) for symmetric matrices not known to be spd, "
 	               "least squares by QR (gels)"),
         llvm::cl::init(false)};
+    Option<bool> expandFactors{
+        *this, "expand-factors",
+        llvm::cl::desc("a factor that is a computed product may be replaced "
+	               "by its factors where that is cheaper (K H P with "
+	               "K = P H^T S^-1: syrk)"),
+        llvm::cl::init(true)};
     void
     runOnOperation() override
     {
@@ -2403,7 +2485,7 @@ struct UlmLamSelectKernels
 	        "implemented");
 	    return signalPassFailure();
 	}
-	if (failed(Selector(getOperation(), lapack).run()))
+	if (failed(Selector(getOperation(), lapack, expandFactors).run()))
 	    signalPassFailure();
     }
 };

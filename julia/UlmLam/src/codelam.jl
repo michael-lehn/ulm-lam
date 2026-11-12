@@ -90,6 +90,7 @@ mutable struct Renderer
     ifname::Dict{Int,String}   # an scf.if -> the name of its result
     sym::Set{String}           # names of symmetric temporaries (no ᵀ shown)
     inits::Set{String}         # initial values of loops
+    lastuse::Dict{String,Int}  # the last line that uses a value
 end
 
 fresh!(r::Renderer, c) = (r.counter[c] = get(r.counter, c, 0) + 1; "$c$(r.counter[c])")
@@ -119,7 +120,8 @@ function result!(r::Renderer, k, res, out; prefix="T")
         c = r.choice[k]
         n = c == k ? fresh!(r, prefix) : r.ifname[c]
         r.vals[res] = (n, r.flags[c])
-    elseif out in r.params || prefix != "T"
+    elseif out in r.params || prefix != "T" || get(r.lastuse, out, 0) > k
+        # a parameter, a factor, or a value still used later: a new name
         r.vals[res] = (fresh!(r, prefix), flag(r, out))
     else
         r.vals[res] = val(r, out)
@@ -136,7 +138,13 @@ function accumulate_text(β, c, αc, prod)
 end
 
 function render_once(f::LamFunction, body, choice, flags, infos)
-    r = Renderer(Dict(), Dict(), Dict(), String[], Set(), flags, choice, Dict(), Set(), Set())
+    r = Renderer(Dict(), Dict(), Dict(), String[], Set(), flags, choice, Dict(), Set(), Set(),
+                 Dict{String,Int}())
+    for (k, line) in enumerate(body), m in eachmatch(r"(%[\w#]+)", line)
+        d = defined(line)
+        m.captures[1] == d && continue
+        r.lastuse[m.captures[1]] = k
+    end
     for line in body, m in eachmatch(r"%\w+ = (%[\w#]+)", something(match(r"iter_args\((.*)\) ->", line), (captures=[""],)).captures[1])
         push!(r.inits, m.captures[1])
     end

@@ -33,3 +33,38 @@ using UlmLam, LinearAlgebra, Random, Test
     @test occursin("sytrf", string(@code_lam fa_sym(S, B)))
     @test occursin("gels", string(@code_lam fa_ls(X, y)))
 end
+
+@testset "expanded factors (Kalman update)" begin
+    Random.seed!(23)
+    ef_measure = extern(:ef_measure, [Index], Vec(:m))
+    ef_estimate = extern(:ef_estimate, [Index, Vec(:n)])
+    @lam function ef_kalman(F::Mat(:n, :n), Q::Mat(:n, :n, :spsd), H::Mat(:m, :n),
+                            R::Mat(:m, :m, :spd), x0::Vec(:n), P0::Mat(:n, :n, :spd),
+                            steps::Index)
+        loop(steps, x0, P0) do i, x, P
+            P = assume(P, :symmetric)
+            x = F * x
+            P = F * P * F' + Q
+            S = assume(H * P * H' + R, :spd)
+            K = P * H' * inv(S)
+            x = x + K * (ef_measure(i) - H * x)
+            P = P - K * H * P
+            ef_estimate(i, x)
+            (x, P)
+        end
+    end
+    n, m, steps = 40, 6, 8
+    F = randn(n, n) / sqrt(n); A = randn(n, n); Q = A * A' / n; H = randn(m, n)
+    R = Matrix(1.0I, m, m); x0 = randn(n); P0 = Matrix(1.0I, n, n)
+    zs = [randn(m) for _ in 1:steps]
+    bind!(ef_kalman; ef_measure = i -> zs[i+1], ef_estimate = (i, x) -> nothing)
+    x, P = ef_kalman(F, Q, H, R, x0, P0, steps)
+    xr, Pr = x0, P0
+    for z in zs
+        xr = F * xr; Pr = F * Pr * F' + Q; S = H * Pr * H' + R; K = Pr * H' * inv(S)
+        xr = xr + K * (z - H * xr); Pr = Pr - K * H * Pr
+    end
+    @test norm(x - xr) / norm(xr) < 1e-12 && norm(P - Pr) / norm(Pr) < 1e-12
+    @test P == P'                     # syrk: symmetric by construction
+    @test occursin(r"syrk +T\d+ ← T\d+ − T\d+ T\d+ᵀ", string(@code_lam ef_kalman()))
+end
