@@ -22,7 +22,16 @@ include "mlir/IR/TensorEncoding.td"
 //   lower_tri & upper_tri  ==  diagonal  (a case group, not a bit)
 //
 // The encoding is an *assertion*: absence of a bit means "unknown", never
-// "false".  Dropping bits is always sound.
+// "false".  Dropping bits is always sound -- except for the two storage
+// bits:
+//
+//   lower_stored / upper_stored   (symmetric matrices only) only this
+//                 triangle is referenced; the other one may hold anything.
+//
+// Storage is not a property of the value but of its memory.  It is never
+// inferred and never propagated to the result of an op; kernel selection
+// resolves it for every use (symm/symv, Cholesky with this uplo, or an
+// explicit completion, ulm_lamk.sycomplete).
 //===----------------------------------------------------------------------===//
 
 def UlmLam_PropNone       : I32BitEnumAttrCaseNone<"general">;
@@ -39,6 +48,8 @@ def UlmLam_PropOrthogonal : I32BitEnumAttrCaseBit<"orthogonal",   9>;
 def UlmLam_PropPermutation: I32BitEnumAttrCaseBit<"permutation", 10>;
 def UlmLam_PropNonSingular: I32BitEnumAttrCaseBit<"non_singular",11>;
 def UlmLam_PropFullRank   : I32BitEnumAttrCaseBit<"full_rank",   12>;
+def UlmLam_PropLowerStored: I32BitEnumAttrCaseBit<"lower_stored",13>;
+def UlmLam_PropUpperStored: I32BitEnumAttrCaseBit<"upper_stored",14>;
 def UlmLam_PropDiagonal   : I32BitEnumAttrCaseGroup<"diagonal",
                               [UlmLam_PropLowerTri, UlmLam_PropUpperTri]>;
 
@@ -47,7 +58,7 @@ def UlmLam_Properties : I32BitEnumAttr<"Properties", "matrix properties", [
     UlmLam_PropSPD, UlmLam_PropLowerTri, UlmLam_PropUpperTri, UlmLam_PropUnitDiag,
     UlmLam_PropIdentity, UlmLam_PropZero, UlmLam_PropOrthogonal,
     UlmLam_PropPermutation, UlmLam_PropNonSingular, UlmLam_PropFullRank,
-    UlmLam_PropDiagonal]> {
+    UlmLam_PropLowerStored, UlmLam_PropUpperStored, UlmLam_PropDiagonal]> {
   let separator = ", ";
   let cppNamespace = "::mlir::ulm_lam";
   let genSpecializedAttr = 0;

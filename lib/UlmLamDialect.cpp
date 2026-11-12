@@ -152,6 +152,13 @@ PropertiesAttr::verifyEncoding(
 	return emitError() << "#ulm_lam.props needs a rank-2 tensor";
     if (has(p, P::zero) && has(p, P::full_rank))
 	return emitError() << "#ulm_lam.props: zero contradicts full rank";
+    if (has(p, P::lower_stored | P::upper_stored))
+	return emitError() << "#ulm_lam.props: lower_stored and upper_stored "
+	                      "exclude each other";
+    if ((has(p, P::lower_stored) || has(p, P::upper_stored)) &&
+        !has(p, P::symmetric))
+	return emitError() << "#ulm_lam.props: lower_stored / upper_stored "
+	                      "need a symmetric matrix";
     if (has(p, P::square) && !ShapedType::isDynamic(shape[0]) &&
         !ShapedType::isDynamic(shape[1]) && shape[0] != shape[1])
 	return emitError() << "#ulm_lam.props: square property on a "
@@ -308,7 +315,9 @@ addProperties(ValueRange terms)
 P
 transposeProperties(P p)
 {
-    P r = p & ~(P::lower_tri | P::upper_tri);
+    // (storage is never propagated to the result of an op)
+    P r =
+        p & ~(P::lower_tri | P::upper_tri | P::lower_stored | P::upper_stored);
     if (has(p, P::lower_tri))
 	r = r | P::upper_tri;
     if (has(p, P::upper_tri))
@@ -770,6 +779,8 @@ ULM_LAMK_COMMON(GetrfOp)
 ULM_LAMK_COMMON(GetrsOp)
 ULM_LAMK_COMMON(GeaxpyOp)
 ULM_LAMK_COMMON(GescalOp)
+ULM_LAMK_COMMON(SymvOp)
+ULM_LAMK_COMMON(SycompleteOp)
 #undef ULM_LAMK_COMMON
 
 #define ULM_LAMK_GENERAL(OP)                                                   \
@@ -787,6 +798,7 @@ ULM_LAMK_GENERAL(PotrfOp) // only one triangle is meaningful
 ULM_LAMK_GENERAL(GetrsOp)
 ULM_LAMK_GENERAL(GeaxpyOp)
 ULM_LAMK_GENERAL(GescalOp)
+ULM_LAMK_GENERAL(SymvOp)
 #undef ULM_LAMK_GENERAL
 
 ::mlir::ulm_lam::Properties
@@ -818,6 +830,8 @@ ULM_LAMK_VERIFY_DPS(PotrfOp)
 ULM_LAMK_VERIFY_DPS(GetrsOp)
 ULM_LAMK_VERIFY_DPS(GeaxpyOp)
 ULM_LAMK_VERIFY_DPS(GescalOp)
+ULM_LAMK_VERIFY_DPS(SymvOp)
+ULM_LAMK_VERIFY_DPS(SycompleteOp)
 #undef ULM_LAMK_VERIFY_DPS
 
 LogicalResult
@@ -942,6 +956,27 @@ mlir::ulm_lamk::GescalOp::estimateFlops(const SizeAssignment &)
 	return failure();
     return 1.0 * m * n;
 }
+FailureOr<double>
+mlir::ulm_lamk::SymvOp::estimateFlops(const SizeAssignment &)
+{
+    auto [m, n] = shapeOf(getA());
+    if (anyDynamic({m, n}))
+	return failure();
+    return 2.0 * m * n;
+}
+FailureOr<double>
+mlir::ulm_lamk::SycompleteOp::estimateFlops(const SizeAssignment &)
+{
+    return 0.0; // memory traffic only (estimateBytes)
+}
+::mlir::ulm_lam::Properties
+mlir::ulm_lamk::SycompleteOp::inferResultProperties(
+    unsigned, ArrayRef<::mlir::ulm_lam::Properties> ps)
+{
+    // the same matrix, now stored completely
+    return (ps.empty() ? P::symmetric : ps.back() | P::symmetric) &
+           ~(P::lower_stored | P::upper_stored);
+}
 
 /// The callee is unknown: besides its operands it may read and write any
 /// memory (and do I/O), so the call is never hoisted, duplicated or removed.
@@ -1022,8 +1057,9 @@ mlir::ulm_lam::registerBufferizationModels(DialectRegistry &registry)
 {
     registry.addExtension(+[](MLIRContext *ctx, ulm_lamk::UlmLamkDialect *) {
 	using namespace mlir::ulm_lamk;
-	attachAll<GemmOp, SymmOp, TrmmOp, TrsmOp, SyrkOp, GemvOp, TrsvOp,
-	          PotrfOp, GetrfOp, GetrsOp, GeaxpyOp, GescalOp, CallOp>(ctx);
+	attachAll<GemmOp, SymmOp, TrmmOp, TrsmOp, SyrkOp, GemvOp, SymvOp,
+	          SycompleteOp, TrsvOp, PotrfOp, GetrfOp, GetrsOp, GeaxpyOp,
+	          GescalOp, CallOp>(ctx);
     });
 }
 

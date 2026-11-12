@@ -93,12 +93,17 @@ def UlmLamk_GemmOp : UlmLamk_Op<"gemm", "C",
 
 def UlmLamk_SymmOp : UlmLamk_Op<"symm", "C",
     [ScalarOf<"alpha", "A">, ScalarOf<"beta", "C">]> {
-  let summary = "C := alpha * A * B + beta * C (A symmetric, side=left)";
+  let summary = "C := alpha A op(B) + beta C (left) or alpha op(B) A + beta C (right), A symmetric";
+  let description = [{
+    Only the `uplo` triangle of A is read (a symmetric matrix stored as
+    one triangle).  B is general, op(B) = B or B^T (`trans_b`).
+  }];
   let arguments = (ins UlmLamk_SideAttr:$side, UlmLamk_UploAttr:$uplo,
+                       UlmLamk_TransAttr:$trans_b,
                        UlmLamk_Float:$alpha, UlmLamk_Shaped:$A, UlmLamk_Shaped:$B,
                        UlmLamk_Float:$beta, UlmLamk_Shaped:$C);
   let assemblyFormat = [{
-    `side` `(` $side `)` `uplo` `(` $uplo `)`
+    `side` `(` $side `)` `uplo` `(` $uplo `)` `trans_b` `(` $trans_b `)`
     `alpha` `(` $alpha `)` `beta` `(` $beta `)`
     `ins` `(` $A `,` $B `:` type($A) `,` type($B) `)`
     `outs` `(` $C `:` type($C) `)` attr-dict (`->` type($result)^)?
@@ -153,6 +158,35 @@ def UlmLamk_SyrkOp : UlmLamk_Op<"syrk", "C",
 //===----------------------------------------------------------------------===//
 // BLAS 2
 //===----------------------------------------------------------------------===//
+
+def UlmLamk_SymvOp : UlmLamk_Op<"symv", "Y",
+    [ScalarOf<"alpha", "A">, ScalarOf<"beta", "y">]> {
+  let summary = "y := alpha * A * x + beta * y (A symmetric, uplo triangle)";
+  let arguments = (ins UlmLamk_UploAttr:$uplo,
+                       UlmLamk_Float:$alpha, UlmLamk_Shaped:$A, UlmLamk_Shaped:$x,
+                       UlmLamk_Float:$beta, UlmLamk_Shaped:$y);
+  let assemblyFormat = [{
+    `uplo` `(` $uplo `)` `alpha` `(` $alpha `)` `beta` `(` $beta `)`
+    `ins` `(` $A `,` $x `:` type($A) `,` type($x) `)`
+    `outs` `(` $y `:` type($y) `)` attr-dict (`->` type($result)^)?
+  }];
+}
+
+def UlmLamk_SycompleteOp : UlmLamk_Op<"sycomplete", "A"> {
+  let summary = "complete a symmetric matrix: mirror the uplo triangle";
+  let description = [{
+    A symmetric matrix of which only the `uplo` triangle is stored becomes
+    a full (general) matrix: the other triangle is overwritten with the
+    mirror image.  In place, as every DPS op: bufferization works on the
+    matrix itself when it may be overwritten (a temporary, or an inout
+    parameter), and on a copy otherwise.  n^2 / 2 element copies.
+  }];
+  let arguments = (ins UlmLamk_UploAttr:$uplo, UlmLamk_Shaped:$A);
+  let assemblyFormat = [{
+    `uplo` `(` $uplo `)` `outs` `(` $A `:` type($A) `)`
+    attr-dict (`->` type($result)^)?
+  }];
+}
 
 def UlmLamk_GemvOp : UlmLamk_Op<"gemv", "Y",
     [ScalarOf<"alpha", "A">, ScalarOf<"beta", "y">]> {

@@ -169,6 +169,26 @@ costSize(int64_t d)
     return ShapedType::isDynamic(d) ? kNominal : static_cast<double>(d);
 }
 
+/// The stored triangle of a matrix value (lower_stored / upper_stored).
+int
+storageOf(Value v)
+{
+    auto t = dyn_cast<RankedTensorType>(v.getType());
+    if (!t)
+	return 0;
+    // a kernel result has the type of its destination, but the kernel
+    // decides what it holds (sycomplete: the whole matrix)
+    if (Operation *def = v.getDefiningOp();
+        def && isa<lk::UlmLamkDialect>(def->getDialect()))
+	return 0;
+    Properties p = propertiesOf(t);
+    if (bitEnumContainsAll(p, Properties::lower_stored))
+	return 1;
+    if (bitEnumContainsAll(p, Properties::upper_stored))
+	return 2;
+    return 0;
+}
+
 /// A factor of a product after inverses have been replaced by solves.
 struct Leaf
 {
@@ -182,6 +202,14 @@ struct Leaf
     Value piv; // LUSolve: pivots
     bool trans = false; // Mat: op(v) = v^T ; solves: op(v)^-1 = v^-T
     bool lower = true;  // TriSolve: v is lower triangular
+    /// Mat: a symmetric matrix of which only one triangle is stored
+    /// (lower_stored / upper_stored); never transposed (S^T = S).
+    enum Storage
+    {
+	Full,
+	Lower,
+	Upper
+    } stored = Full;
 
     RankedTensorType
     type() const
@@ -276,6 +304,18 @@ class Selector
 		return failure();
 	    replace(op, *r);
 	}
+	// Other uses (return, calls, loops) get the whole matrix: the storage
+	// of a matrix ends with the ops that know it.
+	SmallVector<OpOperand *> uses;
+	func.walk([&](Operation *op) {
+	    if (isUlmLamOp(op) || isa<lk::UlmLamkDialect>(op->getDialect()))
+		return;
+	    for (OpOperand &o : op->getOpOperands())
+		if (storageOf(o.get()))
+		    uses.push_back(&o);
+	});
+	for (OpOperand *o : uses)
+	    o->set(full(o->get()));
 	return cleanup();
     }
 
@@ -356,6 +396,68 @@ class Selector
 	return {v, 1.0};
     }
 
+    // ---- storage -----------------------------------------------------------
+
+    /// Completed (full) versions of matrices stored as one triangle.
+    llvm::DenseMap<Value, Value> completed;
+
+    /// `m` (a symmetric matrix of which one triangle is stored) as a full
+    /// matrix: ulm_lamk.sycomplete, once, right after the definition of m.
+    /// In place: bufferization works on m itself if it may be overwritten
+    /// and is not read afterwards, on a copy otherwise.
+    Value
+    full(Value m)
+    {
+	int st = storageOf(m);
+	if (!st)
+	    return m;
+	if (Value c = completed.lookup(m))
+	    return c;
+	OpBuilder::InsertionGuard guard(b);
+	if (Operation *def = m.getDefiningOp())
+	    b.setInsertionPointAfter(def);
+	else
+	    b.setInsertionPointToStart(m.getParentBlock());
+	Value c = lk::SycompleteOp::create(
+	              b, m.getLoc(), TypeRange{m.getType()},
+	              st == 1 ? lk::Uplo::lower : lk::Uplo::upper, m)
+	              ->getResult(0);
+	completed[m] = c;
+	return c;
+    }
+
+    /// `l` as an operand of a kernel that reads the whole matrix.
+    Leaf
+    fullLeaf(Leaf l)
+    {
+	if (l.kind == Leaf::Mat && l.stored != Leaf::Full) {
+	    l.v = full(l.v);
+	    l.stored = Leaf::Full;
+	}
+	return l;
+    }
+
+    /// Which of two triangle-stored factors to complete: one that is
+    /// complete already, else one that bufferization can complete in place
+    /// (a computed matrix, or a parameter that may be overwritten), else
+    /// the right one.
+    bool
+    completeLeft(const Leaf &l, const Leaf &r)
+    {
+	if (completed.contains(r.v))
+	    return false;
+	if (completed.contains(l.v))
+	    return true;
+	auto writable = [](Value v) {
+	    auto a = dyn_cast<BlockArgument>(v);
+	    if (!a)
+		return true;
+	    auto f = dyn_cast<func::FuncOp>(a.getOwner()->getParentOp());
+	    return f && f.getArgAttr(a.getArgNumber(), "ulm_lam.inout");
+	};
+	return writable(l.v) && !writable(r.v);
+    }
+
     // ---- factorisations ----------------------------------------------------
 
     /// Cost of factorising an n x n matrix with properties p (0: it is
@@ -425,12 +527,13 @@ class Selector
 	auto t = cast<RankedTensorType>(m.getType());
 	Properties p = closure(propertiesOf(t), t.getShape());
 	Factor f;
+	int st = storageOf(m); // only one triangle of m is stored
 	if (bitEnumContainsAll(p, Properties::lower_tri) ||
 	    bitEnumContainsAll(p, Properties::upper_tri)) {
 	    f = {Factor::Triangular,
 	         m,
 	         {},
-	         bitEnumContainsAll(p, Properties::lower_tri)};
+	         st ? st == 1 : bitEnumContainsAll(p, Properties::lower_tri)};
 	} else {
 	    OpBuilder::InsertionGuard guard(b);
 	    if (Operation *def = m.getDefiningOp())
@@ -439,11 +542,15 @@ class Selector
 		b.setInsertionPointToStart(m.getParentBlock());
 	    Location loc = m.getLoc();
 	    if (bitEnumContainsAll(p, Properties::spd)) {
+		// A = L L^T, or A = U^T U from the upper triangle
+		bool lower = st != 2;
 		auto potrf = lk::PotrfOp::create(
 		    b, loc, TypeRange{m.getType(), b.getI64Type()},
-		    lk::Uplo::lower, m);
-		f = {Factor::Cholesky, potrf->getResult(0), {}, true};
+		    lower ? lk::Uplo::lower : lk::Uplo::upper, m);
+		f = {Factor::Cholesky, potrf->getResult(0), {}, lower};
 	    } else {
+		if (st)
+		    m = full(m); // LU reads the whole matrix
 		auto pivTy = RankedTensorType::get(
 		    {t.getDimSize(0)}, IntegerType::get(b.getContext(), 32));
 		SmallVector<Value> n;
@@ -500,7 +607,12 @@ class Selector
 		           "a dynamic dimension (missing ")
 		       << kDimsAttr << "?)";
 	if (!inv) {
-	    out.push_back({Leaf::Mat, v, {}, trans, true});
+	    Leaf l{Leaf::Mat, v, {}, trans, true};
+	    if (int st = storageOf(v)) {
+		l.stored = st == 1 ? Leaf::Lower : Leaf::Upper;
+		l.trans = false; // symmetric
+	    }
+	    out.push_back(l);
 	    return success();
 	}
 	// (F_1 ... F_k)^-1 = F_k^-1 ... F_1^-1, (F_1 ... F_k)^-T = F_1^-T ...
@@ -519,9 +631,11 @@ class Selector
 	case Factor::Triangular:
 	    out.push_back({Leaf::TriSolve, f.f, {}, trans, f.lower});
 	    break;
-	case Factor::Cholesky: // (L L^T)^-1 = L^-T L^-1, also for the transpose
-	    out.push_back({Leaf::TriSolve, f.f, {}, true, true});
-	    out.push_back({Leaf::TriSolve, f.f, {}, false, true});
+	case Factor::Cholesky:
+	    // (L L^T)^-1 = L^-T L^-1 and (U^T U)^-1 = U^-1 U^-T, also for the
+	    // transpose
+	    out.push_back({Leaf::TriSolve, f.f, {}, f.lower, f.lower});
+	    out.push_back({Leaf::TriSolve, f.f, {}, !f.lower, f.lower});
 	    break;
 	case Factor::LU:
 	    out.push_back({Leaf::LUSolve, f.f, f.piv, trans, true});
@@ -697,6 +811,31 @@ class Selector
 	if (!dest)
 	    dest = empty(l, r, elt, loc);
 	auto t = [](bool x) { return x ? lk::Trans::trans : lk::Trans::none; };
+	// a symmetric factor stored as one triangle: symm / symv (if both
+	// are, one of them is completed first)
+	if (l.stored != Leaf::Full && r.stored != Leaf::Full) {
+	    if (completeLeft(l, r))
+		l = fullLeaf(l);
+	    else
+		r = fullLeaf(r);
+	}
+	if (l.stored != Leaf::Full || r.stored != Leaf::Full) {
+	    bool left = l.stored != Leaf::Full;
+	    const Leaf &a = left ? l : r, &g = left ? r : l;
+	    auto uplo =
+	        a.stored == Leaf::Lower ? lk::Uplo::lower : lk::Uplo::upper;
+	    if (left && isVector(g.cols()) && !g.trans)
+		return lk::SymvOp::create(b, loc, TypeRange{dest.getType()},
+		                          uplo, constant(elt, alpha, loc), a.v,
+		                          g.v, constant(elt, beta, loc), dest)
+		    ->getResult(0);
+	    return lk::SymmOp::create(b, loc, TypeRange{dest.getType()},
+	                              left ? lk::Side::left : lk::Side::right,
+	                              uplo, t(g.trans),
+	                              constant(elt, alpha, loc), a.v, g.v,
+	                              constant(elt, beta, loc), dest)
+	        ->getResult(0);
+	}
 	if (isVector(r.cols()) && !r.trans)
 	    return lk::GemvOp::create(b, loc, TypeRange{dest.getType()},
 	                              t(l.trans), constant(elt, alpha, loc),
@@ -739,12 +878,12 @@ class Selector
 	    return gemm(zt, z, dest, alpha, beta, loc);
 	}
 	case Choice::SolveLeft: {
-	    Leaf rhs = operand(c, s + 1, j, loc);
+	    Leaf rhs = fullLeaf(operand(c, s + 1, j, loc));
 	    return accumulate(solveInPlace(c.leaves[i], rhs.v, loc), dest,
 	                      alpha, beta, loc);
 	}
 	case Choice::SolveRight: {
-	    Leaf lhs = operand(c, i, s, loc);
+	    Leaf lhs = fullLeaf(operand(c, i, s, loc));
 	    const Leaf &t = c.leaves[j];
 	    Value x = lk::TrsmOp::create(
 	                  b, loc, TypeRange{lhs.v.getType()}, lk::Side::right,
@@ -813,12 +952,14 @@ class Selector
 	    else
 		plain.push_back({inner, alpha});
 	}
-	for (auto &[v, alpha] : plain)
+	for (auto &[v, alpha] : plain) {
 	    if (v.getDefiningOp<TransposeOp>() || v.getDefiningOp<InverseOp>())
 		return add.emitError(
 		           "ulm-lam-select-kernels: transposed or inverted "
 		           "term of a sum (not supported yet)"),
 		       failure();
+	    v = full(v); // geaxpy / gescal read the whole matrix
+	}
 	Location loc = add.getLoc();
 	Value acc;
 	double beta = 0.0;
@@ -974,6 +1115,18 @@ struct UlmLamStripProperties
 			a.setType(stripProperties(a.getType()));
 	    if (auto f = dyn_cast<FunctionOpInterface>(op)) {
 		auto ft = cast<FunctionType>(f.getFunctionType());
+		// the storage of a parameter stays visible (interface comment)
+		for (auto [i, t] : llvm::enumerate(ft.getInputs())) {
+		    Properties p = propertiesOf(t);
+		    if (bitEnumContainsAll(p, Properties::lower_stored))
+			f.setArgAttr(
+			    i, "ulm_lam.stored",
+			    StringAttr::get(op->getContext(), "lower"));
+		    if (bitEnumContainsAll(p, Properties::upper_stored))
+			f.setArgAttr(
+			    i, "ulm_lam.stored",
+			    StringAttr::get(op->getContext(), "upper"));
+		}
 		auto strip = [](TypeRange ts) {
 		    return llvm::map_to_vector(
 		        ts, [](Type t) { return stripProperties(t); });

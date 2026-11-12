@@ -100,15 +100,29 @@ Index = IndexType()
 Float = FloatType()
 
 
-def Matrix(rows: int, cols: int, *props: str) -> MatrixType:
-    """An m x n matrix of doubles with properties, e.g. Matrix(n, n, "spd")."""
+def Matrix(rows: int, cols: int, *props: str,
+           stored: str | None = None) -> MatrixType:
+    """An m x n matrix of doubles with properties, e.g. Matrix(n, n, "spd").
+
+    stored="lower" or "upper" (symmetric matrices only): only this triangle
+    is referenced, the other one may hold anything (LAPACK's uplo).  By
+    default all elements are stored and read."""
     for p in props:
         if p not in PROPERTIES:
             raise LamError(f"unknown matrix property {p!r}; known: "
                             + ", ".join(PROPERTIES))
     if rows <= 0 or cols <= 0:
         raise LamError(f"matrix sizes must be positive, got {rows}x{cols}")
-    return MatrixType(rows, cols, frozenset(props))
+    ps = set(props)
+    if stored is not None:
+        if stored not in ("lower", "upper"):
+            raise LamError(f"stored must be 'lower' or 'upper', got "
+                            f"{stored!r}")
+        if not ps & {"symmetric", "spsd", "spd", "identity"}:
+            raise LamError("stored= needs a symmetric matrix (symmetric, "
+                            "spsd or spd)")
+        ps.add(f"{stored}_stored")
+    return MatrixType(rows, cols, frozenset(ps))
 
 
 def Vector(n: int, *props: str) -> MatrixType:

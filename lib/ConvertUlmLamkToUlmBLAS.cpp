@@ -487,6 +487,62 @@ ULM_LAMK_LOWERING(GemmLowering, lk::GemmOp)
         .call(o, "ulmBLAS::gemm" kIndexType);
 }
 
+// C := alpha A op(B) + beta C (left), alpha op(B) A + beta C (right); A
+// symmetric, its uplo triangle stored.  ulmBLAS has the left side; the
+// right side is the left one on transposed views: C^T = A op(B)^T.
+ULM_LAMK_LOWERING(SymmLowering, lk::SymmOp)
+{
+    bool left = o.getSide() == lk::Side::left;
+    bool tb = o.getTransB() == lk::Trans::trans;
+    View A = view(rw, o.getA());
+    View B = view(rw, o.getB(), left ? tb : !tb);
+    View C = view(rw, o.getC(), !left);
+    return Args{rw}
+        .dim(C.rows)
+        .dim(C.cols)
+        .op(a.getAlpha())
+        .op(a.getA())
+        .strides(A)
+        .op(a.getB())
+        .strides(B)
+        .op(a.getBeta())
+        .op(a.getC())
+        .strides(C)
+        .call(o, o.getUplo() == lk::Uplo::lower ? "ulmBLAS::sylmm" kIndexType
+                                                : "ulmBLAS::syumm" kIndexType);
+}
+
+// y := alpha A x + beta y, A symmetric (uplo triangle).  ulmBLAS has
+// sylmv only: the upper triangle of A is the lower one of A^T = A, i.e.
+// of the transposed view.
+ULM_LAMK_LOWERING(SymvLowering, lk::SymvOp)
+{
+    View A = view(rw, o.getA(), o.getUplo() == lk::Uplo::upper);
+    return Args{rw}
+        .dim(A.rows)
+        .op(a.getAlpha())
+        .op(a.getA())
+        .strides(A)
+        .op(a.getX())
+        .lit(1)
+        .op(a.getBeta())
+        .op(a.getY())
+        .lit(1)
+        .call(o, "ulmBLAS::sylmv" kIndexType);
+}
+
+// A := the whole symmetric matrix from its uplo triangle
+ULM_LAMK_LOWERING(SycompleteLowering, lk::SycompleteOp)
+{
+    View A = view(rw, o.getA());
+    return Args{rw}
+        .flag(o.getUplo() == lk::Uplo::lower)
+        .dim(A.rows)
+        .op(a.getA())
+        .strides(A)
+        .call(o, "ulm_lam_sycomplete");
+}
+
 // y := alpha op(A) x + beta y
 ULM_LAMK_LOWERING(GemvLowering, lk::GemvOp)
 {
@@ -640,6 +696,23 @@ struct CallLowering : OpConversionPattern<lk::CallOp>
 
 // ---- checks of LAPACK info, emitted into the output ----------------------
 
+/// Mirror the stored triangle of a symmetric matrix (ulm_lamk.sycomplete);
+/// ulmBLAS has no such routine.
+const char *kSycomplete = R"(template <typename T>
+static void
+ulm_lam_sycomplete(bool lower, std::ptrdiff_t n, T *A, std::ptrdiff_t incRow,
+                   std::ptrdiff_t incCol)
+{
+    for (std::ptrdiff_t i = 0; i < n; ++i)
+        for (std::ptrdiff_t j = 0; j < i; ++j) {
+            T &lo = A[i * incRow + j * incCol], &up = A[j * incRow + i * incCol];
+            if (lower)
+                up = lo;
+            else
+                lo = up;
+        }
+})";
+
 // ---- the interface comment ------------------------------------------------
 
 /// What the caller must know about each parameter (LAPACK documents it;
@@ -710,6 +783,9 @@ describe(func::FuncOp f)
 		    intent = "in";
 		    what = "read only";
 		}
+		if (auto st =
+		        f.getArgAttrOfType<StringAttr>(i, "ulm_lam.stored"))
+		    what += ", " + st.str() + " triangle (symmetric)";
 	    }
 	} else {
 	    type = cType(t);
@@ -830,17 +906,19 @@ struct ConvertUlmLamkToUlmBLAS
 	populateEmitCSizeTTypeConversions(tc);
 
 	// Which ulmBLAS LAPACK headers and info checks the output needs.
-	bool potrf = false, getrf = false, getrs = false;
+	bool potrf = false, getrf = false, getrs = false, sycomplete = false;
 	module.walk([&](Operation *op) {
 	    potrf |= isa<lk::PotrfOp>(op);
 	    getrf |= isa<lk::GetrfOp>(op);
 	    getrs |= isa<lk::GetrsOp>(op);
+	    sycomplete |= isa<lk::SycompleteOp>(op);
 	});
 
 	RewritePatternSet patterns(ctx);
 	patterns.add<AllocLowering, DeallocLowering, CopyLowering, ViewLowering,
 	             CastLowering, LoadLowering, StoreLowering,
-	             IndexAndLowering, GemmLowering, GemvLowering, TrsmLowering,
+	             IndexAndLowering, GemmLowering, SymmLowering, SymvLowering,
+	             SycompleteLowering, GemvLowering, TrsmLowering,
 	             TrsvLowering, GeaxpyLowering, GescalLowering,
 	             PotrfLowering, GetrfLowering, GetrsLowering, CallLowering>(
 	    tc, ctx);
@@ -897,6 +975,8 @@ struct ConvertUlmLamkToUlmBLAS
 	    include("ulmblas/lapack/getrf.h");
 	if (getrs)
 	    include("ulmblas/lapack/getrs.h");
+	if (sycomplete)
+	    emitc::VerbatimOp::create(b, loc, kSycomplete);
     }
 };
 

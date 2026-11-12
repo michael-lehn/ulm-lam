@@ -271,7 +271,6 @@ except ImportError:
     np = None
 
 
-@unittest.skipIf(np is None, "NumPy is not installed")
 class Rewrites(unittest.TestCase):
 
     def test_inverse_of_product_factorwise(self):
@@ -349,6 +348,119 @@ class Cache(unittest.TestCase):
             self.assertAlmostEqual(lib.cube(A)[0][0], 8.0)
 
 
+@unittest.skipIf(np is None, "NumPy is not installed")
+class Storage(unittest.TestCase):
+    """Symmetric matrices stored as one triangle (stored="lower"/"upper"):
+    the other triangle holds NaN, so any kernel that reads it shows."""
+
+    n, k = 30, 7
+
+    @classmethod
+    def setUpClass(cls):
+        n, k = cls.n, cls.k
+        lo = dict(stored="lower")
+        up = dict(stored="upper")
+
+        @lam.function
+        def left(A: Matrix(n, n, "symmetric", **lo), B: Matrix(n, k)):
+            return A @ B
+
+        @lam.function
+        def right(A: Matrix(n, n, "symmetric", **up), C: Matrix(k, n)):
+            return C @ A
+
+        @lam.function
+        def left_t(A: Matrix(n, n, "symmetric", **lo), C: Matrix(k, n)):
+            return A @ C.T
+
+        @lam.function
+        def vec(A: Matrix(n, n, "symmetric", **up), x: Vector(n)):
+            return A @ x
+
+        @lam.function
+        def both(A: Matrix(n, n, "symmetric", **lo),
+                 S: Matrix(n, n, "symmetric", **up)):
+            return A @ S
+
+        @lam.function
+        def chol_up(R: Matrix(n, n, "spd", **up), B: Matrix(n, k)):
+            return R.inv @ B
+
+        @lam.function
+        def chol_lo(R: Matrix(n, n, "spd", **lo), B: Matrix(n, k)):
+            return R.inv @ B
+
+        @lam.function
+        def plus(A: Matrix(n, n, "symmetric", **lo), G: Matrix(n, n)):
+            return A + G
+
+        @lam.function
+        def lu_sym(A: Matrix(n, n, "symmetric", **up), B: Matrix(n, k)):
+            return A.inv @ B
+
+        cls.lib = lam.compile([left, right, left_t, vec, both, chol_up,
+                               chol_lo, plus, lu_sym], name="storage")
+        rng = np.random.default_rng(1)
+        cls.rng = rng
+
+    def sym(self, spd=False):
+        n = self.n
+        M = self.rng.uniform(-1, 1, (n, n))
+        M = M + M.T
+        return M @ M.T + n * np.eye(n) if spd else M
+
+    def half(self, M, tri):
+        H = M.copy()
+        H[np.triu_indices(self.n, 1) if tri == "lower"
+          else np.tril_indices(self.n, -1)] = np.nan
+        return H
+
+    def check(self, got, ref):
+        got = np.asarray(got)
+        self.assertFalse(np.isnan(got).any(), "the NaN triangle was read")
+        self.assertLess(np.abs(got - ref).max() / np.abs(ref).max(), 1e-12)
+
+    def test_products(self):
+        n, k, lib = self.n, self.k, self.lib
+        A, S = self.sym(), self.sym()
+        B = self.rng.uniform(-1, 1, (n, k))
+        C = self.rng.uniform(-1, 1, (k, n))
+        x = self.rng.uniform(-1, 1, (n, 1))
+        self.check(lib.left(self.half(A, "lower"), B), A @ B)
+        self.check(lib.right(self.half(A, "upper"), C), C @ A)
+        self.check(lib.left_t(self.half(A, "lower"), C), A @ C.T)
+        self.check(lib.vec(self.half(A, "upper"), x), A @ x)
+        self.check(lib.both(self.half(A, "lower"), self.half(S, "upper")),
+                   A @ S)
+        for f in ("left", "right", "left_t", "vec"):
+            self.assertNotIn("gemm", getattr(lib, f).cpp)
+            self.assertNotIn("gemv", getattr(lib, f).cpp)
+            self.assertNotIn("sycomplete(", getattr(lib, f).cpp)
+        self.assertEqual(lib.both.cpp.count("ulm_lam_sycomplete("), 1)
+
+    def test_factorisations_and_sums(self):
+        n, k, lib = self.n, self.k, self.lib
+        A, R = self.sym(), self.sym(spd=True)
+        B = self.rng.uniform(-1, 1, (n, k))
+        G = self.rng.uniform(-1, 1, (n, n))
+        self.check(lib.chol_up(self.half(R, "upper"), B),
+                   np.linalg.solve(R, B))
+        self.check(lib.chol_lo(self.half(R, "lower"), B),
+                   np.linalg.solve(R, B))
+        self.assertIn("potrf<std::ptrdiff_t>(false,", lib.chol_up.cpp)
+        self.check(lib.plus(self.half(A, "lower"), G), A + G)
+        self.check(lib.lu_sym(self.half(A, "upper"), B),
+                   np.linalg.solve(A, B))
+
+    def test_interface_names_the_triangle(self):
+        self.assertIn("lower triangle", self.lib.left.cpp)
+
+    def test_stored_needs_symmetric(self):
+        with self.assertRaises(LamError):
+            Matrix(4, 4, stored="lower")
+
+
+@unittest.skipIf(np is None, "NumPy is not installed")
 class WithNumPy(unittest.TestCase):
 
     def test_numpy_arrays(self):
