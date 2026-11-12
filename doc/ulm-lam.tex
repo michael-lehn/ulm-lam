@@ -633,16 +633,63 @@ On tensors, their semantics are those of BLAS: the \code{uplo} triangle
 receives the result, and the strict other triangle keeps the init's values.
 With a \code{tensor.empty} init those values are undefined.
 Kernel selection guarantees that every consumer reads only the defined
-triangle.
-It inserts an explicit symmetrisation when a full matrix is needed.
+triangle: the factor of \code{potrf} is only used by triangular solves
+with the same \code{uplo}, and the result of \code{syrk} is passed on as a
+matrix stored in its lower triangle (next paragraph).
+
+\paragraph{Symmetric matrices stored as one triangle.}\label{sec:storage}
+By default a matrix is stored completely, also a symmetric one, and the
+generated code may read every element (e.g.\ with \code{gemm}).
+As with the \code{uplo} argument of LAPACK, a parameter can instead be
+declared to be stored as one triangle: \code{Matrix(n, n, "spd",
+stored="lower")}, in the encoding \code{\#ulm_lam.props<spd, lower_stored>}.
+The other triangle may then hold anything.
+Unlike the other bits of the encoding, these two are not assertions about
+the value but about its memory, so dropping them is \emph{not} sound.
+They are never inferred and never propagated to the result of an op;
+kernel selection resolves every use:
+\begin{itemize}
+  \item a product with such a factor uses \code{symm} (ulmBLAS
+        \code{sylmm}/\code{syumm}; the right side $BA$ is the left one on
+        transposed views, $C\T = AB\T$) or \code{symv}
+        (\code{sylmv}; for the upper triangle on the transposed view,
+        because $A\T = A$), never \code{gemm}/\code{gemv};
+  \item a Cholesky factorisation uses the stored triangle:
+        $A = LL\T$, or $A = U\T U$ and $A\inv = U\inv U\invT$;
+  \item where a kernel reads the whole matrix (a product of two such
+        factors, sums, right-hand sides of solves, LU, and uses outside
+        the selected code: returns, calls, loops) the matrix is completed
+        by \code{ulm_lamk.sycomplete}, which mirrors the stored triangle.
+        It is created once, right after the definition of the matrix, and
+        shared by all such uses.  As every DPS op it works in place, and
+        One-Shot Bufferize decides where: on the matrix itself if it may
+        be overwritten (a temporary, or an \code{inout} parameter) and is
+        not read afterwards, on a copy otherwise.
+        Of two such factors of one product, the one that is complete
+        already, else one that can be completed in place, is completed.
+\end{itemize}
+The interface comment names the triangle (\code{read only, lower triangle
+(symmetric)}).
+The tests fill the other triangle with NaN, so that any kernel reading it
+shows in the result.
+
+The result of \code{syrk} is handled the same way.
+A Gram product $Z\T Z$ that makes up a whole product and goes into a new
+matrix is computed by \code{syrk} ($n^2k$ instead of $2n^2k$ FLOPs, and
+the DP prices it so); its result is passed on as stored in the lower
+triangle.  The following Cholesky factorisation reads that triangle
+anyway; a return or a sum gets it completed (an $n^2$ copy instead of
+$n^2k$ FLOPs).
+Gram products inside a larger chain, or reused by later products, stay
+\code{gemm}.
 
 \paragraph{Costs.}
 Every op implements \code{KernelCostOpInterface}, with FLOPs and bytes
 moved.
 Sizes come from static shapes.
-For dynamic dimensions they come from a \code{ulm_lam.size_hint} attribute on
-function arguments.
-Kernel selection needs sizes, as Linnea does.
+For dynamic dimensions (\cref{sec:dynamic}) kernel selection currently
+compares costs with a nominal size of 1000; choosing between the plans at
+run time, by the actual sizes, is the next step.
 Multi-versioning with a run-time dispatch on sizes is future work.
 
 \paragraph{Scalars.}
@@ -674,8 +721,10 @@ Op & ulmBLAS & Semantics & FLOPs \\
 \caption{\code{ulm_lamk} operations and the ulmBLAS routines they are
 lowered to.  The BLAS-like operations keep the familiar \code{trans} and
 \code{side} attributes; in the lowering they become strides
-(\cref{sec:ulmblas}).  \code{symm}, \code{trmm} and \code{syrk} are
-defined but not yet produced by kernel selection.}
+(\cref{sec:ulmblas}).  \code{trmm} is defined but not yet produced by
+kernel selection.  Not listed: \code{symv} (\code{sylmv}) and
+\code{sycomplete} (a helper in the generated code), see
+\cref{sec:storage}.}
 \label{tab:ulm_lamk}
 \end{table}
 
@@ -822,12 +871,20 @@ The implementation of \code{ulm-lam-select-kernels}
         \code{trans_a(trans)}, $\alpha=2$ and $\beta=1$ that writes into
         $X$.
   \item \textbf{Diagnosed, not miscompiled:} explicit inverses, right
-        solves with an LU factorisation, transposed accumulators,
-        transposes that are not kernel operands, and dynamic shapes.
+        solves with an LU factorisation, transposed accumulators, and
+        transposes that are not kernel operands.
 \end{itemize}
-\code{syrk} is not used yet for $Z\T Z$, because it defines only one
-triangle and the consumer may read both; \code{gemm} computes the full
-product (twice the FLOPs of \code{syrk}).
+$Z\T Z$ uses \code{syrk} where its result goes into a new matrix
+(\cref{sec:storage}).
+An inverse of a product of square, non-singular factors,
+$(F_1\cdots F_k)\inv$, is inverted factor by factor,
+$F_k\inv\cdots F_1\inv$, when factorising the distinct factors costs less
+than forming the product and factorising it: $(RR)\inv$ with $R$ spd is one
+Cholesky factorisation of $R$ ($n^3/3$ instead of $2n^3 + n^3/3$, and
+$\kappa(R)$ instead of $\kappa(R)^2$).
+Products that read the same backwards when transposed,
+$F_1\cdots F_k$ with $F_i\T = F_{k+1-i}$, are symmetric (if the middle
+factor is), spsd, or spd: $A\T A$, $A\T PA$, but also $RR$ and $R^3$.
 
 The other passes are \code{ulm-lam-normalize} (flattening of products and
 sums, folding of double transposes and inverses, of transposes of
@@ -1052,6 +1109,35 @@ requires), \code{free} and \code{memcpy}.
 Upstream \code{convert-memref-to-emitc} is not used: it types arguments as
 C arrays (\code{double[500][500]}) but allocations as pointers, which
 leaves unresolved casts.
+
+\paragraph{Dynamic sizes.}\label{sec:dynamic}
+Matrix sizes can be run-time parameters.  The argument (and result)
+attribute \code{ulm_lam.dims} ties every dynamic dimension of a matrix to
+an index parameter of its function (argument positions, one per \code{?}):
+\begin{lstlisting}[style=mlir]
+func.func @gls(%n: index, %m: index,
+               %X: tensor<?x?xf64, #fr> {ulm_lam.dims = [0, 1]},
+               %M: tensor<?x?xf64, #spd> {ulm_lam.dims = [0, 0]},
+               %y: tensor<?x1xf64> {ulm_lam.dims = [0]})
+    -> (tensor<?x1xf64> {ulm_lam.dims = [1]})
+\end{lstlisting}
+The generated function takes the sizes as \code{size_t} parameters,
+\code{gls(size_t v1, size_t v2, double *v3, ...)}, and the interface
+comment says \code{double[v1][v2]}.
+\code{ulm_lam::dimOf} traces the size of a dimension through the ops of
+the pipeline to a parameter, an allocation, or a call result (whose
+callee names the size by \code{ulm_lam.dims} on its result); kernel
+selection, the workspace layout and the lowering use it.
+The results of a public function become out parameters before
+bufferization, and with \code{eliminate-empty-tensors} the kernels write
+into the caller's buffer directly (\code{buffer-results-to-out-params}
+can only do that for static shapes).
+The workspace query is computed from the sizes and returns what exactly
+the evaluation chosen by the compiler needs.
+All ulmBLAS calls name their index type, \code{ulmBLAS::gemm<std::ptrdiff_t>},
+so that literals and \code{size_t} parameters convert to it.
+\file{examples/dynamic} checks one compiled GLS for six sizes, from
+$1\times1$ to $2000\times200$.
 
 \paragraph{Workspaces.}\label{sec:workspace}
 A generated function does not allocate memory behind the caller's back.
@@ -1473,9 +1559,8 @@ common subexpression up to transposition), and reuse it for the
 right-hand side, $W\T z$ with $z=L\inv y$.
 $S$ is spd, so the second Cholesky factorisation turns $S\inv$ into
 solves.
-They differ in one place: ulm.lam forms $W\T W$ with \code{gemm}, because
-\code{syrk} defines only one triangle (\cref{sec:impl}).
-This costs $2\%$ more FLOPs.
+The kernel sequences are the same, including \code{syrk} for $W\T W$
+(\cref{sec:storage}).
 
 \begin{table}[t]
 \centering\small
@@ -1486,12 +1571,12 @@ Step & Kernel & FLOPs & Kernel & FLOPs \\
 \midrule
 $M=LL\T$ & \code{potrf} & $2.67\cdot10^9$ & \code{potrf} & $2.67\cdot10^9$ \\
 $W=L\inv X$ & \code{trsm} & $8.00\cdot10^8$ & \code{trsm} & $8.00\cdot10^8$ \\
-$S=W\T W$ & \code{syrk} & $8.00\cdot10^7$ & \code{gemm} & $1.60\cdot10^8$ \\
+$S=W\T W$ & \code{syrk} & $8.00\cdot10^7$ & \code{syrk} & $8.00\cdot10^7$ \\
 $S=KK\T$ & \code{potrf} & $2.67\cdot10^6$ & \code{potrf} & $2.67\cdot10^6$ \\
 $c=W\T L\inv y$ & \code{trsv}, \code{gemv} & $4.80\cdot10^6$ & \code{trsv}, \code{gemv} & $4.80\cdot10^6$ \\
 $b=K\invT K\inv c$ & $2\times$\code{trsv} & $8.00\cdot10^4$ & $2\times$\code{trsv} & $8.00\cdot10^4$ \\
 \midrule
-total & & $3.55\cdot10^9$ & & $3.63\cdot10^9$ \\
+total & & $3.55\cdot10^9$ & & $3.55\cdot10^9$ \\
 \bottomrule
 \end{tabular}
 \caption{The derivation for \cref{eq:gls}, with $n=2000$ and $m=200$.
@@ -1808,7 +1893,9 @@ a number times a matrix is \code{ulm_lam.scale}, \code{.T} is
 \code{ulm_lam.transpose}, \code{.inv} is \code{ulm_lam.inverse}).
 \begin{itemize}
   \item Parameters have types with properties: \code{Matrix(n, n, "spd")},
-        \code{Vector(n)}, \code{Index}.
+        \code{Vector(n)}, \code{Index}; a symmetric matrix can be stored
+        as one triangle, \code{Matrix(n, n, "spd", stored="lower")}
+        (\cref{sec:storage}).
         Intermediate results get their properties from
         \code{ulm-lam-infer-properties}.
   \item Parameters have intents: a matrix is \code{in} by default;
@@ -2016,12 +2103,16 @@ overwritten.
         transposes and inverses to the leaves and hoisting scales.
   \item \emph{Done for what kernel selection emits.} \code{ulm_lamk} with DPS,
         bufferization and the ulmBLAS lowering.
-        Missing: lowerings of \code{symm}, \code{trmm}, \code{syrk}.
+        Missing: the lowering of \code{trmm}.
   \item \emph{Partly done.} \code{strategy=gmc} with gemm, gemv, solves,
         factorisations and $Z\T Z$.
-        Missing: \code{syrk}/\code{gemmtr} for $Z\T Z$ (tracking which
-        triangle a consumer reads), and the catalogue backend, so that new
-        kernels are added as records.
+        \code{syrk} and \code{symm}/\code{symv} with triangles tracked
+        (\cref{sec:storage}).
+        Missing: \code{gemmtr} for symmetric products that are not
+        $Z\T Z$, triangular matrices stored as one triangle (\code{trmm}),
+        the catalogue backend, so that new kernels are added as records,
+        and a fallback plan where a factorisation fails
+        (\cref{sec:info}).
   \item \code{strategy=search}: sharing across products beyond reuse of
         computed intervals, factorisation choices, anytime search; the LAMP
         benchmark; a full Kalman filter (\cref{sec:kalman}).

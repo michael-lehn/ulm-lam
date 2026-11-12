@@ -25,10 +25,27 @@ print(lib.gls.cpp)               # the generated C++ of gls
 ```
 
 `python/ulm/lam/` is the frontend (tracing Python to `ulm_lam` IR, loops,
-external functions with Python callbacks, parameter intents) and the runtime
-(compilation, workspaces, calling).  See `python/examples/kalman.py`,
+external functions with Python callbacks, parameter intents, symmetric
+matrices stored as one triangle: `Matrix(n, n, "spd", stored="lower")`) and
+the runtime (compilation, workspaces, calling).  A factorisation that fails
+numerically (a matrix assumed spd that is not, a singular one) raises
+`lam.InfoError`.  See `python/examples/kalman.py`,
 `python/examples/adaptive_kalman.py` (the covariance updated in place by a
 Python callback in every step) and `python/tests/`.  NumPy is optional.
+
+## Conventions of the generated code
+
+- Matrices by reference (row-major), owned by the caller; parameters are
+  `in` (read only), `inout` (may be overwritten) or `out`.  Sizes may be
+  run-time parameters (`size_t`, attribute `ulm_lam.dims`).
+- Every function returns an `int64_t info`, as LAPACK routines do: 0, k > 0
+  if its check k failed (a factorisation, or a call of another generated
+  function), -i if argument i is illegal (a workspace that is too small).
+  The interface comment in front of each function lists the checks.
+- Temporaries live in a caller-provided workspace (`work`,
+  `*workspace_info`: -1 query, 0 allocate, > 0 its size in bytes); a query
+  accumulates those of the callees.
+- ulmBLAS is called with `IndexType = std::ptrdiff_t`.
 
 ## Document
 
@@ -38,13 +55,14 @@ The design document is `doc/ulm-lam.pdf`, built with LuaLaTeX from
 | Path | Content |
 |---|---|
 | `include/ulm_lam/*.td` | ODS (Operation Definition Specification) for the `ulm.lam` (algebra) and `ulm_lamk` (kernels) dialects, interfaces, passes, kernel catalogue |
-| `lib/` | the implementation, an mlir-opt plugin: both dialects, `ulm-lam-normalize`, `ulm-lam-infer-properties`, `ulm-lam-select-kernels` (strategy=gmc, with inverses), `ulm-lam-strip-properties`, `ulm-lam-results-to-out-params`, `convert-ulm-lamk-to-ulmblas` |
+| `lib/` | the implementation, an mlir-opt plugin: both dialects, `ulm-lam-normalize`, `ulm-lam-infer-properties`, `ulm-lam-select-kernels` (strategy=gmc, with inverses), `ulm-lam-strip-properties`, `ulm-lam-results-to-out-params`, `ulm-lam-workspace`, `ulm-lam-info`, `convert-ulm-lamk-to-ulmblas` |
 | `python/ulm/lam/` | the Python frontend and runtime (`from ulm import lam`) |
 | `scripts/ulm-lam-compile.sh` | the pipeline: ulm_lam ops to C++ calling ulmBLAS (writes every stage) |
 | `examples/gls/` | generalised least squares: hand-written design stages 1–4; from stage 2 to C++ by passes; `gls_inout.mlir` with M and y declared `inout` |
 | `examples/kalman/` | formula (1) in a loop, a new measurement y_i in every step (Kalman measurement update with an uninformative prior): factorisations before the loop, O(n²) per step; `adaptive.mlir`: the covariance is updated in place in every step by an external function |
 | `examples/loop/` | `X += A*B*C` in a loop: no allocation or copy inside the loop |
 | `examples/compose/` | a function with a workspace calling functions with workspaces (a generated one and an external one): the workspace query accumulates |
+| `examples/dynamic/` | GLS with sizes as run-time parameters: one compiled function for six sizes |
 | `examples/cases/` | inverses (LU, Cholesky, triangular, from the left and the right) and sums, checked numerically |
 
 Every example keeps the C++ generated from it in `examples/*/generated/`
@@ -57,7 +75,8 @@ What is checked (`make`):
   implemented dialects; stage 3 bufferizes into exactly the copies stage 4
   shows.
 - `make gls`: from the normal form (stage 2), kernel selection finds the
-  derivation (two Cholesky factorisations, W = L^-1 X, S = W^T W, solves),
+  derivation (two Cholesky factorisations, W = L^-1 X, S = W^T W by syrk,
+  solves),
   the C++ runs and is verified against an independent LU solve.
 - `make kalman`: formula (1) in a loop with changing y; everything that does
   not depend on y runs once before the loop; compared with the same code
@@ -67,15 +86,19 @@ What is checked (`make`):
 - `make loop`: kernel selection and memory placement of the loop example;
   the C++ runs and is verified against naive C loops.
 - `make compose`: the workspace query of a function accumulates those of
-  its callees; given, self-allocated and too small workspaces.
-- `make python`: the Python frontend: 19 unit tests and the two Kalman
-  examples against NumPy.
-- `make cases`: eight kernel selection cases against naive evaluations.
+  its callees; given, self-allocated and too small workspaces; a failing
+  callee makes the caller return its info at once.
+- `make cases`: eight kernel selection cases against naive evaluations;
+  info for an indefinite and a singular matrix and a too small workspace.
+- `make dynamic`: one compiled GLS with run-time sizes for six sizes.
+- `make python`: the Python frontend: 28 unit tests (among them symmetric
+  matrices stored as one triangle, with NaN in the other one) and the two
+  Kalman examples against NumPy.
 
 Requirements: Homebrew `llvm` (LLVM, originally "Low Level Virtual Machine";
 MLIR 23), ulmBLAS (`ULMBLAS_DIR`, default `~/git/ulmBLAS`), TeX Live with
 LuaLaTeX.
 
 ```sh
-make            # ods, plugin, stages, loop, gls, kalman, compose, cases, python, doc
+make            # ods, plugin, stages, loop, gls, kalman, compose, cases, dynamic, python, doc
 ```
