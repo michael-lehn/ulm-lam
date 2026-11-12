@@ -342,10 +342,11 @@ function render_once(f::LamFunction, body, choice, flags, infos)
     end
     checks = sort([k for k in keys(infos) if k > 0])
     if !isempty(checks)
-        push!(r.lines, "info (as LAPACK's; InfoError in Julia):")
+        # not errors: the checks at run time and what a failure reports
+        push!(r.lines, "if a factorisation fails, the call throws InfoError with")
         cname(m) = (k = parse(Int, m[2:end]); k <= length(labels) ? labels[k][1] : m)
         for k in checks
-            push!(r.lines, "  " * lpad(k, 3) * "  " * replace(infos[k], r"\bv\d+" => cname))
+            push!(r.lines, "  info $k:  " * replace(infos[k], r"\bv\d+" => cname))
         end
     end
     r.lines

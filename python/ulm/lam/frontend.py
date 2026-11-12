@@ -344,6 +344,19 @@ class Value:
 
     __rmul__ = __mul__
 
+    def __pow__(self, k: int) -> "Value":
+        """A ** k: products (k > 0), the identity (k = 0), inverses (k < 0)."""
+        a = self._matrix("**")
+        if not isinstance(k, int):
+            raise LamError("A ** k needs an integer k")
+        if a.rows != a.cols:
+            raise LamError(f"A ** k needs a square matrix, got {a}")
+        if k == 0:
+            return eye(a.rows)
+        if k < 0:
+            return inv(self) ** (-k)
+        return self if k == 1 else self @ self ** (k - 1)
+
     def __repr__(self) -> str:
         return f"<ulm_lam value {self.name}: {self.type}>"
 

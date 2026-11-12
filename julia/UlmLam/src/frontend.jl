@@ -265,6 +265,28 @@ Base.:\(a::LamValue, b::LamValue) =
                             scalar_op("divf", 1.0, a) * b) : inv(a) * b
 Base.:\(a::Real, b::LamValue) = b / a
 
+# A^k: products (k > 0), the identity (k = 0), inverses (k < 0)
+function Base.:^(a::LamValue, k::Integer)
+    t = mat(a, "^")
+    t.rows == t.cols || throw(LamError("A^k needs a square matrix, got $(t.rows)×$(t.cols)"))
+    k == 0 && return eye(t.rows)
+    k < 0 && return inv(a)^(-k)
+    k == 1 ? a : a * a^(k - 1)
+end
+LinearAlgebra.dot(a::LamValue, b::LamValue) = transpose(a) * b
+# common functions that are not linear algebra ulm.lam maps (yet): a clear error
+for (m, f) in ((:LinearAlgebra, :tr), (:LinearAlgebra, :det), (:LinearAlgebra, :logdet),
+               (:LinearAlgebra, :norm), (:LinearAlgebra, :diag), (:Base, :sum),
+               (:Base, :exp), (:Base, :log), (:Base, :sqrt), (:Base, :abs), (:Base, :size))
+    @eval $m.$f(::LamValue, args...) =
+        throw(LamError(string($(QuoteNode(f)), " is not supported in a @lam function " *
+                              "(supported: *, +, -, ', transpose, inv, \\, /, ^, dot, " *
+                              "scalars, I, assume, loop, externs)")))
+end
+Base.broadcastable(::LamValue) =
+    throw(LamError("elementwise operations (x .* y, f.(x)) are not supported in a " *
+                   "@lam function: compute them in Julia, e.g. in a callback"))
+
 
 function Base.:+(a::LamValue, b::LamValue)
     a.type isa FloatType && return scalar_op("addf", a, b)
@@ -296,9 +318,8 @@ struct ScaledI
     alpha::Union{Float64,LamValue}
 end
 function Base.:*(s::LamValue, J::UniformScaling)
-    s.type isa FloatType || throw(LamError("matrix * I: write the matrix"))
-    J.λ == 1 || throw(LamError("$(J.λ) * s * I: not supported yet"))
-    ScaledI(s)
+    s.type isa FloatType || return J.λ == 1 ? s : Float64(J.λ) * s  # A * I = A
+    ScaledI(J.λ == 1 ? s : scalar_op("mulf", Float64(J.λ), s))
 end
 Base.:*(J::UniformScaling, s::LamValue) = s * J
 Base.:+(a::LamValue, J::UniformScaling) = a + ScaledI(Float64(J.λ))
@@ -581,7 +602,17 @@ function trace!(f::LamFunction)
             p = LamValue("%p.$n", t isa MatType ? abitype(t) : t, region(b).id)
             (t isa MatType && !t.isvec) ? transpose(p) : p
         end
-        out = f.fn(args...)
+        out = try
+            f.fn(args...)
+        catch e
+            # a Julia function without a method for ulm.lam values
+            if e isa MethodError && any(x -> x isa LamValue, e.args)
+                throw(LamError("$(f.name): $(e.f) is not supported in a @lam function " *
+                               "(supported: *, +, -, ', transpose, inv, \\, /, ^, dot, " *
+                               "scalars, I, assume, loop, externs)"))
+            end
+            rethrow()
+        end
         outs = out === nothing ? () : out isa Tuple ? out : (out,)
         f.results = MatType[]
         for o in outs

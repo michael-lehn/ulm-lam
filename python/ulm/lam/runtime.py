@@ -37,6 +37,7 @@ LAPACK) and ULM_LAM_BLAS_LIBS (its link flags, default OpenBLAS).
 from __future__ import annotations
 
 import ctypes
+import threading
 import hashlib
 import os
 import re
@@ -483,15 +484,28 @@ class Library:
         self._externs = externs
         self._callbacks = {}
         # the default workspace of the library's functions (reused)
+        # (other threads get their own: calls may run in parallel, ctypes
+        # releases the GIL)
         self.workspace = Workspace()
-        self._workspace_busy = 0
-        self._pending: list[BaseException] = []
+        self._tls = threading.local()
         self.functions = {}
         for name, rows in ifaces.items():
             f = CompiledFunction(self, name, rows, functions.get(name))
             self.functions[name] = f
             setattr(self, name, f)
 
+
+    def _thread_state(self):
+        """The workspace, the nesting depth of calls and the callback errors
+        of the calling thread (the main thread uses lib.workspace)."""
+        t = self._tls
+        if not hasattr(t, "pending"):
+            t.workspace = (self.workspace
+                           if threading.current_thread() is threading.main_thread()
+                           else Workspace())
+            t.busy = 0
+            t.pending = []
+        return t
     def bind(self, **impls) -> None:
         """Implement external functions in Python."""
         for name, fn in impls.items():
@@ -534,7 +548,8 @@ class Library:
                     dst = _view(cargs[nparams], t.rows, t.cols)
                     _copy_into(dst, r, t, name)
             except BaseException as e:  # re-raised after the call
-                lib._pending.append(e)
+                # (a callback runs on the thread of the call)
+                lib._thread_state().pending.append(e)
 
         cb = cfun(tramp)
         setter = getattr(self._dll, f"ulm_lam_set_{name}")
@@ -730,15 +745,15 @@ class CompiledFunction:
         array) for its temporaries; by default the library's workspace,
         which grows as needed and is reused by later calls."""
         cargs, outs, keep = self._arguments(args)
-        lib = self.lib
+        st = self.lib._thread_state()
         borrowed = False
         if self.has_workspace:
             size = self.workspace_size(*args)
             if work is None:
-                if lib._workspace_busy:  # a call from a callback
+                if st.busy:  # a call from a callback
                     work = Workspace(size)
                 else:
-                    work = lib.workspace
+                    work = st.workspace
                     work.reserve(size)
                     borrowed = True
             elif not isinstance(work, Workspace):
@@ -747,15 +762,15 @@ class CompiledFunction:
             info = ctypes.c_int64(max(work.size, 1))
             cargs += [work.address, ctypes.addressof(info)]
             keep.append(work)
-        lib._pending.clear()
-        lib._workspace_busy += borrowed
+        st.pending.clear()
+        st.busy += borrowed
         try:
             info = self._c(*cargs)
         finally:
-            lib._workspace_busy -= borrowed
+            st.busy -= borrowed
         del keep  # the argument buffers lived until here
-        if self.lib._pending:
-            raise self.lib._pending[0]
+        if st.pending:
+            raise st.pending[0]
         if info != 0:
             raise InfoError(self.name, info, self._codes.get(info, ""))
         if not outs:

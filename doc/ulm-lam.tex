@@ -2980,6 +2980,17 @@ halve the second product.
   \item the Python frontend and runtime (\code{from ulm import lam}):
         tracing, loops, external functions as Python callbacks,
         workspaces, NumPy or plain buffers;
+  \item the Julia frontend and runtime (\file{julia/UlmLam},
+        \cref{sec:julia}): \code{@lam} functions called with Julia arrays,
+        \code{@code_lam}, Julia's own BLAS through libblastrampoline,
+        callbacks, one workspace per task (calls from several threads);
+  \item a second lowering on CBLAS and LAPACK (MKL, OpenBLAS, Accelerate,
+        Julia's BLAS);
+  \item the operations of the vector spaces $\mathbb{R}^n$ and
+        $\mathbb{R}^{m\times n}$, combined with products, transposes,
+        solves and explicit inverses, checked against Julia and NumPy;
+  \item a Pluto notebook that runs in the browser (Binder, with
+        \file{binder/Dockerfile}) and as a static page;
   \item GLS from its normal form, formula (1) in a loop (with a constant
         and with an updated covariance), the loop example and eight kernel
         selection cases, compiled to C++ with
@@ -3056,10 +3067,16 @@ and arguments that are silently destroyed.
 \begin{enumerate}[label=M\arabic*]
   \item \emph{Largely done.} Dialects, verifiers, property closure and
         inference.
-        Missing: a CMake build with a \code{ulm-lam-opt} tool and
-        \code{lit} tests in place of the scripts.
-  \item \emph{Partly done.} \code{ulm-lam-normalize} lacks pushing
-        transposes and inverses to the leaves and hoisting scales.
+        Missing: a \code{ulm-lam-opt} tool and \code{lit} tests in place
+        of the scripts (with GNU Make, as the rest of the build).
+  \item \emph{Largely done.} \code{ulm-lam-normalize} flattens products
+        and sums, pushes transposes to the leaves ($(AB)\T = B\T A\T$,
+        also for sums and scales), folds double transposes and inverses
+        and scales of scales, and drops identity factors; kernel
+        selection inverts products factor by factor and collects the
+        scales of a product into the $\alpha$ of its last kernel.
+        Open: inverses pushed to the leaves already in the normal form,
+        so that other passes see them.
   \item \emph{Done for what kernel selection emits.} \code{ulm_lamk} with DPS,
         bufferization and the ulmBLAS lowering.
         Missing: the lowering of \code{trmm}.
@@ -3086,13 +3103,19 @@ and arguments that are silently destroyed.
         ulmBLAS has them (\cref{sec:ulmblas}).
 \end{enumerate}
 
-\paragraph{Next steps, in this order.}
+\paragraph{Next steps.}
 \begin{enumerate}
-  \item \emph{A Julia binding}: a frontend that traces Julia functions
-        to \code{ulm_lam} IR, as the Python one does, and calls the
-        generated library with \code{ccall}.
-        Julia is where a linear algebra compiler finds its community,
-        and ulmBLAS aims at being a BLAS for Julia as well.
+  \item \emph{Build and tests}: a \code{ulm-lam-opt} tool and
+        \code{lit}/\code{FileCheck} tests of the passes, driven by GNU
+        Make.
+  \item \emph{Kernels}: \code{trmm} for products with triangular
+        matrices (stored as one triangle), \code{gemmtr} for symmetric
+        products that are not $Z\T Z$, \code{ger} for rank-1 products.
+  \item \emph{Reactant.jl and Enzyme-JAX}: their \code{enzymexla}
+        dialect has BLAS and LAPACK operations, and their ``raising''
+        recognises linear algebra in lower-level code.
+        ulm.lam's kernel selection could take its input from raising and
+        emit their operations instead of C++.
   \item \emph{More showcases}: ridge regression, linear attention and the
         Kalman filter are done (\cref{sec:showcases}).
         Bayesian linear regression too, with run-time scalars on products

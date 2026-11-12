@@ -404,21 +404,41 @@ function workspace_size(f::CompiledFunction, args...)
     Int(info[])
 end
 
+"""The workspace of the library for the current task (reused by its calls)."""
+task_workspace(lib::Library) =
+    get!(Workspace, task_local_storage(), (:ulm_lam_workspace, objectid(lib)))::Workspace
+task_busy(lib::Library) =
+    get!(() -> Ref(0), task_local_storage(), (:ulm_lam_busy, objectid(lib)))::Base.RefValue{Int}
+"""Errors raised by callbacks during the current task's call."""
+task_pending(lib::Library) =
+    get!(() -> Any[], task_local_storage(), (:ulm_lam_pending, objectid(lib)))::Vector{Any}
+
 function (f::CompiledFunction)(args...; work::Union{Workspace,Nothing}=nothing)
     lib = f.lib
     cargs, outs, keep = arguments(f, args, false)
     info = Ref{Int64}(0)
     if f.has_workspace
         size = workspace_size(f, args...)
-        work = work === nothing ? reserve!(lib.workspace, size) : work
+        # one workspace per task: calls from several threads do not share it;
+        # a call from a callback (the task's workspace is busy) gets its own
+        busy = task_busy(lib)
+        work = work !== nothing ? work :
+               busy[] > 0 ? Workspace(size) : reserve!(task_workspace(lib), size)
         info[] = max(work.size, 1)
         push!(cargs, address(work), Ptr{Cvoid}(Base.unsafe_convert(Ptr{Int64}, info)))
         push!(keep, work)
     end
-    empty!(lib.pending)
+    pending = task_pending(lib)
+    empty!(pending)
     # (the ccall wrapper was created by eval: newer than the caller's world)
-    r = GC.@preserve keep info outs Base.invokelatest(f.call, cargs...)
-    isempty(lib.pending) || throw(lib.pending[1])
+    busy = task_busy(lib)
+    busy[] += 1
+    r = try
+        GC.@preserve keep info outs Base.invokelatest(f.call, cargs...)
+    finally
+        busy[] -= 1
+    end
+    isempty(pending) || throw(pending[1])
     r == 0 || throw(InfoError(f.name, Int(r), get(f.codes, Int(r), "")))
     isempty(outs) ? nothing : length(outs) == 1 ? outs[1] : Tuple(outs)
 end
@@ -472,7 +492,8 @@ function bind!(lib::Library; impls...)
                     dst .= r
                 end
             catch e
-                push!(L.pending, e)
+                # (a callback runs on the task of the call)
+                push!(task_pending(L), e)
             end
             nothing
         end

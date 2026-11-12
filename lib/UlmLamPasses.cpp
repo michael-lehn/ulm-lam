@@ -323,6 +323,7 @@ class Selector
     LogicalResult
     run()
     {
+	formIdentities();
 	formInverses();
 	SmallVector<Operation *> ops;
 	func.walk([&](Operation *op) {
@@ -511,6 +512,41 @@ class Selector
 		return true;
 	}
 	return false;
+    }
+
+    /// The identity used as a value (a result, A^0): formed (gescal 0,
+    /// adddiag 1).  In products it is dropped, in sums it is adddiag.
+    void
+    formIdentities()
+    {
+	SmallVector<IdentityOp> ids;
+	func.walk([&](IdentityOp id) {
+	    if (usedAsValue(id.getResult(), /*throughTranspose=*/true))
+		ids.push_back(id);
+	});
+	for (IdentityOp id : ids) {
+	    b.setInsertionPointAfter(id);
+	    Location loc = id.getLoc();
+	    auto t = cast<RankedTensorType>(stripProperties(id.getType()));
+	    Value e = tensor::EmptyOp::create(b, loc, t.getShape(),
+	                                      t.getElementType(),
+	                                      ValueRange(id->getOperands()));
+	    Type elt = t.getElementType();
+	    e = lk::GescalOp::create(b, loc, TypeRange{e.getType()},
+	                             constant(elt, 0.0, loc), e)
+	            ->getResult(0);
+	    e = lk::AdddiagOp::create(b, loc, TypeRange{e.getType()},
+	                              constant(elt, 1.0, loc), e)
+	            ->getResult(0);
+	    if (e.getType() != id.getType())
+		e = AssumeOp::create(b, loc, id.getType(), e, false);
+	    SmallVector<OpOperand *> uses;
+	    for (OpOperand &u : id->getUses())
+		if (!isa<MulOp, AddOp, ScaleOp, InverseOp>(u.getOwner()))
+		    uses.push_back(&u);
+	    for (OpOperand *u : uses)
+		u->set(e);
+	}
     }
 
     /// An inverse used as a value (a result, a term of a sum, a loop's

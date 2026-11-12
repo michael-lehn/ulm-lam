@@ -53,9 +53,9 @@ gls(X::n×m full_rank, M::n×n spd, y::n)
   trsv     T4 ← L2⁻¹ T4
   trsv     T4 ← L2⁻ᵀ T4
   return T4
-info (as LAPACK's; InfoError in Julia):
-    1  Cholesky factorisation of M: not positive definite
-    2  Cholesky factorisation of a computed matrix: not positive definite
+if a factorisation fails, the call throws InfoError with
+  info 1:  Cholesky factorisation of M: not positive definite
+  info 2:  Cholesky factorisation of a computed matrix: not positive definite
 ```
 
 `inv(M)` appears twice and is factorised once; $X^T M^{-1} X$ becomes

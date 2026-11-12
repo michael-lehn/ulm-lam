@@ -676,6 +676,36 @@ struct PushTranspose : OpRewritePattern<TransposeOp>
     }
 };
 
+/// A B I C -> A B C: the identity as a factor is dropped (all of them:
+/// one is kept).
+struct DropIdentity : OpRewritePattern<MulOp>
+{
+    using OpRewritePattern::OpRewritePattern;
+    LogicalResult
+    matchAndRewrite(MulOp op, PatternRewriter &rewriter) const override
+    {
+	auto isId = [](Value v) {
+	    while (auto as = v.getDefiningOp<AssumeOp>())
+		v = as.getOperand();
+	    return static_cast<bool>(v.getDefiningOp<IdentityOp>());
+	};
+	SmallVector<Value> fs;
+	for (Value f : op.getFactors())
+	    if (!isId(f))
+		fs.push_back(f);
+	if (fs.size() == op.getFactors().size())
+	    return failure();
+	if (fs.empty())
+	    fs.push_back(op.getFactors().front());
+	Value r = fs.size() == 1
+	              ? fs.front()
+	              : MulOp::create(rewriter, op.getLoc(), op.getType(), fs)
+	                    .getResult();
+	replaceKeepingType(rewriter, op, r);
+	return success();
+    }
+};
+
 /// inverse(inverse(x)) -> x.
 struct FoldInverse : OpRewritePattern<InverseOp>
 {
@@ -725,7 +755,7 @@ struct FoldScaleScale : OpRewritePattern<ScaleOp>
 	    ab = arith::ConstantOp::create(
 	        rewriter, op.getLoc(), a.getType(),
 	        rewriter.getFloatAttr(a.getType(), a.getValueAsDouble() *
-	                                               b.getValueAsDouble()));
+		                                       b.getValueAsDouble()));
 	else // scalars known at run time: a b as an arith.mulf
 	    ab = arith::MulFOp::create(rewriter, op.getLoc(), op.getAlpha(),
 	                               inner.getAlpha());
@@ -740,7 +770,7 @@ struct FoldScaleScale : OpRewritePattern<ScaleOp>
 void
 MulOp::getCanonicalizationPatterns(RewritePatternSet &results, MLIRContext *ctx)
 {
-    results.add<Flatten<MulOp>>(ctx);
+    results.add<Flatten<MulOp>, DropIdentity>(ctx);
 }
 void
 AddOp::getCanonicalizationPatterns(RewritePatternSet &results, MLIRContext *ctx)
