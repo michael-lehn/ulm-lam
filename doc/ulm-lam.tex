@@ -2747,7 +2747,9 @@ PyTorch uses on macOS; ulm.lam with \code{backend="cblas"}), 100 steps
 \begin{center}
 \begin{tabular}{rrrrrrr}
 \toprule
-$B$ & $p$ & $k$ & ulm.lam/Accelerate & ulm.lam/ulmBLAS & PyTorch autograd & PyTorch by hand \\
+& & & \multicolumn{2}{c}{ulm.lam} & \multicolumn{2}{c}{PyTorch} \\
+\cmidrule(lr){4-5}\cmidrule(l){6-7}
+$B$ & $p$ & $k$ & Accelerate & ulmBLAS & autograd & by hand \\
 \midrule
 32 & 64 & 16 & 0.001 & 0.001 & 0.004 & 0.001 \\
 256 & 1024 & 256 & 0.080 & 0.157 & 0.088 & 0.081 \\
@@ -2908,8 +2910,8 @@ Linnea finds each solution in under 10\,s.
 The kernel sequences (FLOPs for the sizes of the inputs):
 
 \begin{center}
-\small
-\begin{tabular}{@{}lp{0.4\linewidth}p{0.36\linewidth}@{}}
+\footnotesize
+\begin{tabularx}{\linewidth}{@{}>{\raggedright\arraybackslash}p{0.2\linewidth}>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X@{}}
 \toprule
 problem & Linnea & ulm.lam \\
 \midrule
@@ -2920,7 +2922,7 @@ ridge, Bayesian regression & syrk onto $\lambda I$ (the identity as an array, $\
 linear attention & $Q(K\T V)$, fixed when the code is generated & the same, chosen at run time \\
 SGD step & gemm, \code{ger} for the bias, gemm and gemv with $\alpha = -\mathrm{step}$ & the same, the bias as a gemm with $k = 1$ \\
 \bottomrule
-\end{tabular}
+\end{tabularx}
 \end{center}
 
 \noindent
@@ -2941,8 +2943,8 @@ Every other result gets a new \code{Array\{Float64\}(undef, ...)},
 allocated in every call and freed by Julia's garbage collector.
 In the generated code that means:
 \begin{center}
-\small
-\begin{tabular}{@{}lp{0.39\linewidth}p{0.39\linewidth}@{}}
+\footnotesize
+\begin{tabularx}{\linewidth}{@{}>{\raggedright\arraybackslash}p{0.14\linewidth}>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X@{}}
 \toprule
 & Linnea & ulm.lam \\
 \midrule
@@ -2954,7 +2956,7 @@ results & returned arrays, which may be inputs (the residual $R$ of the SGD step
 loops & none (straight-line programs; a filter step called in a loop allocates in every step, and the caller must copy $F$, $Q$, $R$ before each call) & no allocation in a loop; invariant work before it \\
 sizes, errors & fixed when the code is generated; Julia exceptions (\code{PosDefException}) & run-time sizes; \code{info} \\
 \bottomrule
-\end{tabular}
+\end{tabularx}
 \end{center}
 
 \noindent
