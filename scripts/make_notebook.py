@@ -186,7 +186,11 @@ begin
     Wtrue = randn(p, k) / sqrt(p)
     Xs = [randn(B, p) for _ in 1:nsteps]
     Ys = [X * Wtrue + 0.1 * randn(B, k) for X in Xs]
-    bind!(train; batch_x = i -> Xs[i+1], batch_y = i -> Ys[i+1])
+    # the same batches in Float32 (for the comparison below)
+    Xs32, Ys32 = Matrix{Float32}.(Xs), Matrix{Float32}.(Ys)
+    use32 = Ref(false)
+    bind!(train; batch_x = i -> use32[] ? Xs32[i+1] : Xs[i+1],
+                 batch_y = i -> use32[] ? Ys32[i+1] : Ys[i+1])
     W0, b0, onesB, lr_step = zeros(p, k), zeros(k), ones(B), 2 * 0.01 / B
 end;
 ''')
@@ -208,6 +212,20 @@ code(r'''
 let (W, b) = train(W0, b0, onesB, lr_step, nsteps),
     (W2, b2) = train_julia(W0, b0, Xs, Ys, lr_step)
     (norm(W - W2) / norm(W2), norm(b - b2) / norm(b2))
+end
+''')
+md(r'''
+Machine learning mostly computes in single precision.  Called with `Float32`
+arrays, a `@lam` function is compiled for `Float32` (a second library, as
+Julia specialises on argument types): the same derivation on `sgemm`,
+`spotrf`, …
+''')
+code(r'''
+let (W32, b32, o32) = (Float32.(W0), Float32.(b0), Float32.(onesB))
+    compare("ulm.lam, Float64" => () -> (use32[] = false;
+                                         train(W0, b0, onesB, lr_step, nsteps)),
+            "ulm.lam, Float32" => () -> (use32[] = true;
+                                         train(W32, b32, o32, Float32(lr_step), nsteps)))
 end
 ''')
 md(r'''
