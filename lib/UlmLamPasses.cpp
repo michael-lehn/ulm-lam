@@ -76,6 +76,25 @@ isUlmLamOp(Operation *op)
 /// uses in ulm_lam operations get x itself, which has more properties, and
 /// which other rules then recognise (P and P^T as each other's transpose,
 /// the full rank of P).  Other uses (return, calls) keep x'.
+/// assume(assume(x)) back to the type of x is x (a value whose properties
+/// were dropped and asserted again, as a call from Julia leaves behind for a
+/// symmetric matrix: transpose(S) -> S without properties -> the callee's
+/// type).
+struct FoldAssumeRoundTrip : OpRewritePattern<AssumeOp>
+{
+    using OpRewritePattern::OpRewritePattern;
+    LogicalResult
+    matchAndRewrite(AssumeOp op, PatternRewriter &rewriter) const override
+    {
+	auto inner = op.getOperand().getDefiningOp<AssumeOp>();
+	if (!inner || op.getChecked() || inner.getChecked() ||
+	    inner.getOperand().getType() != op.getType())
+	    return failure();
+	rewriter.replaceOp(op, inner.getOperand());
+	return success();
+    }
+};
+
 struct ForwardDroppingAssume : OpRewritePattern<AssumeOp>
 {
     using OpRewritePattern::OpRewritePattern;
@@ -121,7 +140,7 @@ struct UlmLamNormalize
     {
 	MLIRContext *ctx = &getContext();
 	RewritePatternSet patterns(ctx);
-	patterns.add<ForwardDroppingAssume>(ctx);
+	patterns.add<ForwardDroppingAssume, FoldAssumeRoundTrip>(ctx);
 	MulOp::getCanonicalizationPatterns(patterns, ctx);
 	AddOp::getCanonicalizationPatterns(patterns, ctx);
 	ScaleOp::getCanonicalizationPatterns(patterns, ctx);

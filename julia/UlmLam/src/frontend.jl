@@ -563,7 +563,9 @@ end
 
 mutable struct Program
     externs::Dict{Symbol,Extern}
+    functions::Vector{Any}  # LamFunctions called by others (defined below)
 end
+Program(externs::Dict{Symbol,Extern}) = Program(externs, Any[])
 const PROGRAM = Ref{Union{Program,Nothing}}(nothing)
 
 """A ulm.lam function (from `@lam`)."""
@@ -701,20 +703,124 @@ macro lam(fdef)
     end
 end
 
-"""The ulm_lam IR of a module with these functions."""
+"""The ulm_lam IR of a module with these functions (and the ulm.lam
+functions they call), its externals, and all its functions."""
 function lam_module(functions::Vector{LamFunction})
     outer = PROGRAM[]
     prog = Program(Dict{Symbol,Extern}())
     PROGRAM[] = prog
+    all = copy(functions)
     try
         for f in functions
             f.text = nothing
             trace!(f)
         end
+        # the functions they call (registered while tracing), also theirs
+        k = 1
+        while k <= length(prog.functions)
+            g = prog.functions[k]
+            k += 1
+            any(h -> h.name == g.name, all) && continue
+            g.text = nothing
+            trace!(g)
+            push!(all, g)
+        end
     finally
         PROGRAM[] = outer
     end
+    # callees before callers (C++ declares a function before its use)
+    order, seen = LamFunction[], Set{Symbol}()
+    function visit(f)
+        f.name in seen && return
+        push!(seen, f.name)
+        for g in all
+            g !== f && occursin("@$(g.name)(", f.text) && visit(g)
+        end
+        push!(order, f)
+    end
+    foreach(visit, all)
     parts = [declaration(e) for e in values(prog.externs)]
-    append!(parts, [f.text for f in functions])
-    join(parts, "\n\n") * "\n", prog.externs
+    append!(parts, [f.text for f in order])
+    join(parts, "\n\n") * "\n", prog.externs, order
+end
+
+"""
+A call of the ulm.lam function f from another one (while it is traced):
+`func.call`.  The callee is part of the same module and follows the same
+conventions: its own part of the caller's workspace, its info passed on.
+Its run-time sizes are taken from the dimensions of the arguments; a Julia
+matrix is passed as the transpose it is in the IR, and a matrix result is
+taken back transposed (normalisation cancels the transposes).
+"""
+function call_lam(f::LamFunction, args)
+    length(args) == length(f.params) ||
+        throw(LamError("$(f.name) takes $(length(f.params)) arguments " *
+                       "($(join(first.(f.params), ", ")))"))
+    b = builder()
+    env = Dict{Symbol,Dim}()   # the callee's sizes in the caller's terms
+    function bind_dim(d, cd, what)
+        if d isa Symbol
+            haskey(env, d) && env[d] != cd &&
+                throw(LamError("$(f.name): $what: size :$d is $cd, but $(env[d]) elsewhere"))
+            env[d] = cd
+        elseif cd isa Int && cd != d
+            throw(LamError("$(f.name): $what: size $cd instead of $d"))
+        end
+    end
+    vals, types = String[], String[]
+    for (a, (n, t)) in zip(args, f.params)
+        if t isa MatType
+            (a isa LamValue && a.type isa MatType) ||
+                throw(LamError("$(f.name): $n must be a matrix or vector"))
+            bind_dim(t.rows, a.type.rows, n)
+            bind_dim(t.cols, a.type.cols, n)
+            at = abitype(t)
+            v = t.isvec ? a : transpose(a)
+            # (the callee's type of the parameter, its properties included)
+            want = MatType(v.type.rows, v.type.cols, at.props, :in, t.isvec)
+            mlir(v.type) == mlir(want) || (v = cast(v, want))
+            push!(vals, use(v))
+            push!(types, mlir(want))
+        elseif t isa FloatType
+            v = a isa Real ? constant!(b, Float64(a), Float) : a
+            (v isa LamValue && v.type isa FloatType) ||
+                throw(LamError("$(f.name): $n must be a number"))
+            push!(vals, use(v)); push!(types, "f64")
+        else
+            v = a isa Integer ? constant!(b, a, Index) : a
+            (v isa LamValue && v.type isa IndexType) ||
+                throw(LamError("$(f.name): $n must be an integer"))
+            push!(vals, use(v)); push!(types, "index")
+        end
+    end
+    trace!(f)
+    prog = PROGRAM[]
+    prog === nothing || any(g -> g === f, prog.functions) || push!(prog.functions, f)
+    caller = TRACING[]
+    sizes = map(f.sizes) do x
+        d = get(env, x, nothing)
+        d === nothing && throw(LamError("$(f.name): the size :$x is not given by an argument"))
+        if d isa Symbol
+            (caller !== nothing && d in caller.sizes) ||
+                throw(LamError("$(f.name): the size :$d is no size of the calling function"))
+            "%s.$d"
+        else
+            use(constant!(b, d, Index))
+        end
+    end
+    sub(d) = d isa Symbol ? env[d] : d
+    rts = [MatType(sub(rt.rows), sub(rt.cols), Symbol[], :in, rt.isvec) for rt in f.results]
+    irts = [rt.isvec ? rt : abitype(rt) for rt in rts]
+    name = fresh!(b)
+    nres = length(rts)
+    lhs = nres == 0 ? "" : nres == 1 ? "$name = " : "$name:$nres = "
+    emit!(b, lhs * "func.call @$(f.name)(" * join(vcat(sizes, vals), ", ") * ") : (" *
+             join(vcat(fill("index", length(sizes)), types), ", ") * ") -> (" *
+             join(mlir.(irts), ", ") * ")")
+    nres == 0 && return nothing
+    outs = map(enumerate(irts)) do (k, it)
+        v = LamValue(nres == 1 ? name : "$name#$(k-1)", it, region(b).id)
+        rts[k].isvec ? v : transpose(v)   # the Julia matrix
+    end
+    nres == 1 ? outs[1] : Tuple(outs)
 end

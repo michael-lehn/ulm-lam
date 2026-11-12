@@ -120,6 +120,11 @@ def render(fn: fe.Function, selected: str, infos: dict) -> str:
         r.names[a] = lab
         r.params.add(a)
     empties = set()
+    # parameters the function may overwrite (passed on to an inout callee
+    # without a copy)
+    inout = {m.group(1) for m in re.finditer(r"(%arg\d+): [^{,]*\{([^}]*)\}",
+                                             body[0])
+             if "ulm_lam.inout" in m.group(2)}
     for k, line in enumerate(body):
         d_ = _DEFINED.match(line)
         for m in re.finditer(r"(%[\w#]+)", line):
@@ -151,7 +156,8 @@ def render(fn: fe.Function, selected: str, infos: dict) -> str:
         if isinstance(t, fe.MatrixType):
             shape = f"{t.rows}" if t.cols == 1 else f"{t.rows}×{t.cols}"
             props = sorted(p for p in getattr(t, "props", ()) or ())
-            return shape + (" " + ",".join(props) if props else "")
+            return shape + (" " + ",".join(props) if props else "") + (
+                " inout" if getattr(t, "intent", "in") == "inout" else "")
         return "Float" if isinstance(t, fe.FloatType) else "Index"
     r.lines.append(f"{fn.name}(" + ", ".join(
         f"{n}: {tdesc(t)}" for n, t in fn.params) + ")")
@@ -227,20 +233,40 @@ def render(fn: fe.Function, selected: str, infos: dict) -> str:
             continue
         if line.startswith("scf.yield"):
             continue
-        m = re.match(r"^(?:(%[\w#]+) = )?func\.call @(\w+)\(([^)]*)\)", line)
+        m = re.match(r"^(?:(%[\w#]+) = )?(?:func\.)?call @(\w+)\(([^)]*)\)",
+                     line)
         if m:
+            # a ulm.lam function (defined in the module) or a callback
+            defined = f"func.func @{m.group(2)}(" in selected
+            note = "a ulm.lam function" if defined else "your Python function"
+            # an inout parameter of the callee gets a copy of a value the
+            # caller must not overwrite (a parameter of its own, or a value
+            # it still uses): bufferization inserts that copy
+            ops_ = [x.strip() for x in m.group(3).split(",") if x.strip()]
+            if defined:
+                sig = selected[selected.index(f"func.func @{m.group(2)}("):]
+                sig = sig[:sig.index("{\n")]
+                cargs = re.findall(r"%arg\d+: [^{,]*(?:\{([^}]*)\})?", sig)
+                for j, x in enumerate(ops_):
+                    if j < len(cargs) and "ulm_lam.inout" in cargs[j] and (
+                            (x in r.params and x not in inout)
+                            or r.lastuse.get(x, 0) > k):
+                        c_ = r.fresh("T")
+                        r.emit(d, "copy", f"{c_} ← {r.name(x)}",
+                               f"{m.group(2)} may overwrite it")
+                        r.names[x + "@copy"] = c_
+                        ops_[j] = x + "@copy"
             sizes = set(fn.sizes)
-            a = [r.name(x.strip()) for x in m.group(3).split(",")
-                 if x.strip()]
+            a = [r.names[x] if x.endswith("@copy") else r.name(x)
+                 for x in ops_]
             a = [x for x in a if x not in sizes]
             if m.group(1):
                 v = r.fresh("z")
                 r.names[m.group(1)] = v
                 r.emit(d, "call", f"{v} ← {m.group(2)}({', '.join(a)})",
-                       "your Python function")
+                       note)
             else:
-                r.emit(d, "call", f"{m.group(2)}({', '.join(a)})",
-                       "your Python function")
+                r.emit(d, "call", f"{m.group(2)}({', '.join(a)})", note)
             continue
         m = re.match(r"^(%[\w#]+) = bufferization\.materialize_in_destination "
                      r"(%[\w#]+) in (?:writable )?(%[\w#]+)", line)

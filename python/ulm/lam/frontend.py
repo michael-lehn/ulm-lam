@@ -861,6 +861,12 @@ def function(fn) -> Function:
 def module(functions) -> str:
     """The ulm_lam IR of a module with these functions (and everything they
     call)."""
+    return module_and_functions(functions)[0]
+
+
+def module_and_functions(functions):
+    """The ulm_lam IR of a module with these functions, and all functions
+    in it (the given ones and the ones they call), callees first."""
     prog = _Program()
     outer = _Program.current
     _Program.current = prog
@@ -894,4 +900,4 @@ def module(functions) -> str:
         visit(f)
     parts = [e.declaration() for e in prog.externs.values()]
     parts += [f._text for f in order]
-    return "\n\n".join(parts) + "\n"
+    return "\n\n".join(parts) + "\n", order

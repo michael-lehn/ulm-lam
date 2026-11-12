@@ -140,108 +140,111 @@ estimate_all(double *v1, double *v2, size_t v3, int8_t *v4, int64_t *v5)
     int64_t v7 = -64;
     int64_t v8 = 63;
     int64_t v9 = -1;
-    size_t v10 = 0;
-    int64_t v11 = v5[v10];
-    int64_t v12 = (int64_t)v10;
-    double *v13 = (double *)(v4 + v12);
-    int64_t v14 = (int64_t)v10;
-    double *v15 = (double *)(v4 + v14);
-    int64_t v16 = (int64_t)v10;
-    double *v17 = (double *)(v4 + v16);
-    int64_t v18 = (int64_t)v10;
-    double *v19 = (double *)(v4 + v18);
-    v5[v10] = v9;
-    int64_t v20 = gls(v13, v15, v17, v19, v4, v5);
-    int64_t v21;
-    if (v20 == v6) {
-	int64_t v22 = v5[v10];
-	uint64_t v23 = (uint64_t)v22;
-	uint64_t v24 = (uint64_t)v8;
-	int64_t v25 = (int64_t)(v23 + v24);
-	uint64_t v26 = (uint64_t)v25;
-	uint64_t v27 = (uint64_t)v7;
-	int64_t v28 = (int64_t)(v26 & v27);
-	uint64_t v29 = (uint64_t)v28;
-	uint64_t v30 = (uint64_t)17600;
-	int64_t v31 = (int64_t)(v29 + v30);
-	v5[v10] = v9;
-	postprocess(v10, v19, v4, v5);
-	int64_t v32 = v5[v10];
-	uint64_t v33 = (uint64_t)v32;
-	uint64_t v34 = (uint64_t)v8;
-	int64_t v35 = (int64_t)(v33 + v34);
+    size_t v10 = 1;
+    size_t v11 = 0;
+    int64_t v12 = v5[v11];
+    int64_t v13 = (int64_t)v11;
+    double *v14 = (double *)(v4 + v13);
+    int64_t v15 = (int64_t)v10;
+    double *v16 = (double *)(v4 + v15);
+    int64_t v17 = (int64_t)2;
+    double *v18 = (double *)(v4 + v17);
+    int64_t v19 = (int64_t)3;
+    double *v20 = (double *)(v4 + v19);
+    v5[v11] = v9;
+    int64_t v21 = gls(v14, v16, v18, v20, v4, v5);
+    int64_t v22;
+    if (v21 == v6) {
+	int64_t v23 = v5[v11];
+	uint64_t v24 = (uint64_t)v23;
+	uint64_t v25 = (uint64_t)v8;
+	int64_t v26 = (int64_t)(v24 + v25);
+	uint64_t v27 = (uint64_t)v26;
+	uint64_t v28 = (uint64_t)v7;
+	int64_t v29 = (int64_t)(v27 & v28);
+	uint64_t v30 = (uint64_t)v29;
+	uint64_t v31 = (uint64_t)17600;
+	int64_t v32 = (int64_t)(v30 + v31);
+	int64_t v33 = (int64_t)v10;
+	double *v34 = (double *)(v4 + v33);
+	v5[v11] = v9;
+	postprocess(v11, v34, v4, v5);
+	int64_t v35 = v5[v11];
 	uint64_t v36 = (uint64_t)v35;
-	uint64_t v37 = (uint64_t)v7;
-	int64_t v38 = (int64_t)(v36 & v37);
-	uint64_t v39 = (uint64_t)v31;
-	uint64_t v40 = (uint64_t)v38;
-	int64_t v41 = (int64_t)(v39 + v40);
-	v5[v10] = v11;
-	int64_t v42;
-	if (v11 == v9) {
-	    v5[v10] = v41;
-	    v42 = v6;
+	uint64_t v37 = (uint64_t)v8;
+	int64_t v38 = (int64_t)(v36 + v37);
+	uint64_t v39 = (uint64_t)v38;
+	uint64_t v40 = (uint64_t)v7;
+	int64_t v41 = (int64_t)(v39 & v40);
+	uint64_t v42 = (uint64_t)v32;
+	uint64_t v43 = (uint64_t)v41;
+	int64_t v44 = (int64_t)(v42 + v43);
+	v5[v11] = v12;
+	int64_t v45;
+	if (v12 == v9) {
+	    v5[v11] = v44;
+	    v45 = v6;
 	} else {
-	    int64_t v43;
-	    if (v11 > v6 & v11 < v41) {
-		v43 = -5;
+	    int64_t v46;
+	    if (v12 > v6 & v12 < v44) {
+		v46 = -5;
 	    } else {
-		bool v44 = v11 == v6;
-		int8_t *v45;
-		if (v44) {
-		    ptrdiff_t v46 = (ptrdiff_t)v41;
-		    size_t v47 = (size_t)v46;
-		    void *v48 = aligned_alloc(64, v47);
-		    v45 = (int8_t *)v48;
+		bool v47 = v12 == v6;
+		int8_t *v48;
+		if (v47) {
+		    ptrdiff_t v49 = (ptrdiff_t)v44;
+		    size_t v50 = (size_t)v49;
+		    void *v51 = aligned_alloc(64, v50);
+		    v48 = (int8_t *)v51;
 		} else {
-		    v45 = v4;
+		    v48 = v4;
 		}
-		int8_t *v49 = v45;
-		int64_t v50 = (int64_t)v10;
-		double *v51 = (double *)(v49 + v50);
-		int64_t v52 = (int64_t)16000;
-		double *v53 = (double *)(v49 + v52);
-		int64_t v54;
-		v54 = v6;
-		for (size_t i55 = v10; i55 < v3; i55 += 1) {
-		    int64_t v56 = v54;
-		    int64_t v57;
-		    if (v56 == v6) {
-			observe(i55, v51);
-			int64_t v58 = (int64_t)17600;
-			v5[v10] = v22;
-			bool v59 =
-			    (bool)(gls(v1, v2, v51, v53, v49 + v58, v5) != v6);
-			uint64_t v60 = (uint64_t)v59;
-			int64_t v61 = (int64_t)v60;
-			if (v61 == v6) {
-			    ptrdiff_t v62 = (ptrdiff_t)v31;
-			    size_t v63 = (size_t)v62;
-			    int64_t v64 = (int64_t)v63;
-			    int8_t *v65 = v49 + v64;
-			    v5[v10] = v32;
-			    postprocess(i55, v53, v65, v5);
+		int8_t *v52 = v48;
+		int64_t v53 = (int64_t)v11;
+		double *v54 = (double *)(v52 + v53);
+		int64_t v55 = (int64_t)16000;
+		double *v56 = (double *)(v52 + v55);
+		int64_t v57;
+		v57 = v6;
+		for (size_t i58 = v11; i58 < v3; i58 += v10) {
+		    int64_t v59 = v57;
+		    int64_t v60;
+		    if (v59 == v6) {
+			observe(i58, v54);
+			int64_t v61 = (int64_t)17600;
+			v5[v11] = v23;
+			bool v62 =
+			    (bool)(gls(v1, v2, v54, v56, v52 + v61, v5) != v6);
+			uint64_t v63 = (uint64_t)v62;
+			int64_t v64 = (int64_t)v63;
+			if (v64 == v6) {
+			    ptrdiff_t v65 = (ptrdiff_t)v32;
+			    size_t v66 = (size_t)v65;
+			    int64_t v67 = (int64_t)v66;
+			    int8_t *v68 = v52 + v67;
+			    v5[v11] = v35;
+			    postprocess(i58, v56, v68, v5);
 			}
-			v57 = v61;
+			v60 = v64;
 		    } else {
-			v57 = v56;
+			v60 = v59;
 		    }
-		    v54 = v57;
+		    v57 = v60;
 		}
-		int64_t v66 = v54;
-		if (v66 == v6) {
-		    v5[v10] = v11;
+		int64_t v69 = v57;
+		if (v69 == v6) {
+		    v5[v11] = v12;
 		}
-		if (v44) {
-		    free(v49);
+		if (v47) {
+		    free(v52);
 		}
-		v43 = v66;
+		v46 = v69;
 	    }
-	    v42 = v43;
+	    v45 = v46;
 	}
-	v21 = v42;
+	v22 = v45;
     } else {
-	v21 = v20;
+	v22 = v21;
     }
-    return v21;
+    return v22;
 }

@@ -91,6 +91,8 @@ mutable struct Renderer
     sym::Set{String}           # names of symmetric temporaries (no ᵀ shown)
     inits::Set{String}         # initial values of loops
     lastuse::Dict{String,Int}  # the last line that uses a value
+    selected::String           # the whole module (callees are defined in it)
+    inout::Set{String}         # parameters the function may overwrite
 end
 
 fresh!(r::Renderer, c) = (r.counter[c] = get(r.counter, c, 0) + 1; "$c$(r.counter[c])")
@@ -137,9 +139,12 @@ function accumulate_text(β, c, αc, prod)
     startswith(αc, "-") ? c * " − " * αc[2:end] * prod : c * " + " * αc * prod
 end
 
-function render_once(f::LamFunction, body, choice, flags, infos)
+function render_once(f::LamFunction, body, choice, flags, infos, selected="")
     r = Renderer(Dict(), Dict(), Dict(), String[], Set(), flags, choice, Dict(), Set(), Set(),
-                 Dict{String,Int}())
+                 Dict{String,Int}(), selected, Set{String}())
+    for m in eachmatch(r"(%arg\d+): [^{,]*\{([^}]*)\}", body[1])
+        occursin("ulm_lam.inout", m.captures[2]) && push!(r.inout, m.captures[1])
+    end
     for (k, line) in enumerate(body), m in eachmatch(r"(%[\w#]+)", line)
         d = defined(line)
         m.captures[1] == d && continue
@@ -159,7 +164,8 @@ function render_once(f::LamFunction, body, choice, flags, infos)
         push!(r.params, a)
     end
     sig = join(["$n::" * (t isa MatType ? (t.isvec ? "$(t.rows)" : "$(t.rows)×$(t.cols)") *
-                (isempty(t.props) ? "" : " " * join(t.props, ",")) : t isa FloatType ? "Float" : "Index")
+                (isempty(t.props) ? "" : " " * join(t.props, ",")) *
+                (t.intent == :inout ? " inout" : "") : t isa FloatType ? "Float" : "Index")
                 for (n, t) in f.params], ", ")
     push!(r.lines, "$(f.name)($sig)")
     ind = "  "
@@ -224,17 +230,39 @@ function render_once(f::LamFunction, body, choice, flags, infos)
             continue
         end
         startswith(line, "scf.yield") && continue
-        if (m = match(r"^(?:(%[\w#]+) = )?func\.call @(\w+)\(([^)]*)\)", line)) !== nothing
+        if (m = match(r"^(?:(%[\w#]+) = )?(?:func\.)?call @(\w+)\(([^)]*)\)", line)) !== nothing
+            # a ulm.lam function (defined in the module) or a callback
+            defined = occursin("func.func @$(m.captures[2])(", r.selected)
+            note = defined ? "a ulm.lam function" : "your Julia function"
+            # an inout parameter of the callee gets a copy of a value the
+            # caller must not overwrite (a parameter of its own, or a value
+            # it still uses): bufferization inserts that copy
+            ops_ = [strip(x) for x in split(m.captures[3], ",") if !isempty(strip(x))]
+            if defined
+                sig = r.selected[first(findfirst("func.func @$(m.captures[2])(", r.selected)):end]
+                sig = sig[1:first(findfirst("{\n", sig))]
+                cargs = [something(c.captures[1], "") for c in
+                         eachmatch(r"%arg\d+: [^{,]*(?:\{([^}]*)\})?", sig)]
+                for (j, x) in enumerate(ops_)
+                    if j <= length(cargs) && occursin("ulm_lam.inout", cargs[j]) &&
+                       ((x in r.params && !(x in r.inout)) || get(r.lastuse, x, 0) > k)
+                        c_ = fresh!(r, "T")
+                        emit!(r, d, "copy", "$c_ ← $(disp(r, x))", "$(m.captures[2]) may overwrite it")
+                        r.vals[x * "@copy"] = (c_, flag(r, x))
+                        ops_[j] = x * "@copy"
+                    end
+                end
+            end
             sizes = Set(string.(f.sizes))
-            args_ = [disp(r, strip(a)) for a in split(m.captures[3], ",") if !isempty(strip(a))]
+            args_ = [disp(r, a) for a in ops_]
             args_ = filter(a -> !(a in sizes), args_)
             if m.captures[1] !== nothing
                 v = fresh!(r, "z")
                 # a matrix from Julia is its transpose in the IR
                 r.vals[m.captures[1]] = (v, !occursin(r"-> tensor<[^>]*x1xf64>\s*$", line))
-                emit!(r, d, "call", "$v ← $(m.captures[2])($(join(args_, ", ")))", "your Julia function")
+                emit!(r, d, "call", "$v ← $(m.captures[2])($(join(args_, ", ")))", note)
             else
-                emit!(r, d, "call", "$(m.captures[2])($(join(args_, ", ")))", "your Julia function")
+                emit!(r, d, "call", "$(m.captures[2])($(join(args_, ", ")))", note)
             end
             continue
         end
@@ -415,7 +443,7 @@ function render(f::LamFunction, selected::String, infos::Dict{Int,String})
     n = length(vars) <= 12 ? length(vars) : 0
     for bits in 0:(2^n-1)
         flags = Dict(v => (j <= n && (bits >> (j - 1)) & 1 == 1) for (j, v) in enumerate(vars))
-        lines = render_once(f, body, choice, flags, infos)
+        lines = render_once(f, body, choice, flags, infos, selected)
         s = sum(l -> count(==('ᵀ'), l), lines)
         s < score && ((best, score) = (lines, s))
     end
