@@ -162,7 +162,7 @@ end
 
 ctype(t) = endswith(t, "*") || occursin('[', t) ? Ptr{Cvoid} :
            Dict("size_t" => Csize_t, "int64_t" => Int64, "double" => Cdouble,
-                "bool" => Bool)[t]
+                "float" => Cfloat, "bool" => Bool)[t]
 
 # ---------------------------------------------------------------------------
 # Library and functions
@@ -212,6 +212,7 @@ mutable struct Library
     callbacks::Dict{Symbol,Any}
     workspace::Workspace
     pending::Vector{Any}
+    eltype::DataType  # Float64 or Float32: the element type of all arrays
 end
 
 function Base.getproperty(lib::Library, s::Symbol)
@@ -248,12 +249,16 @@ Compile ulm.lam functions into a shared library.  backend=:cblas runs the
 same kernel calls on CBLAS/LAPACK (OpenBLAS by default).
 """
 function compile(functions::Vector{LamFunction}; name::AbstractString=string(functions[1].name),
-                 backend::Symbol=Symbol(get(ENV, "ULM_LAM_BACKEND", "julia")))
+                 backend::Symbol=Symbol(get(ENV, "ULM_LAM_BACKEND", "julia")),
+                 eltype::Type=Float64)
     backend in (:julia, :ulmblas, :cblas) ||
         throw(LamError("backend must be :julia, :ulmblas or :cblas"))
+    eltype in (Float64, Float32) || throw(LamError("eltype must be Float64 or Float32"))
     work = joinpath(ROOT, "build", "julia", name)
     mkpath(work)
     text, externs = lam_module(functions)
+    # Float32: the same program on f32 (all kernels are generic in it)
+    eltype == Float32 && (text = replace(text, "f64" => "f32"))  # (f64 occurs only as a type)
     flags = cxx_flags(backend)
     key = bytes2hex(sha256(text * "\n" * string(newest(backend)) * "\n" *
                            get(ENV, "CXX", "c++") * " " * string(backend) * " " * join(flags, " ")))
@@ -293,7 +298,7 @@ function compile(functions::Vector{LamFunction}; name::AbstractString=string(fun
     end
     handle = Libdl.dlopen(lib)
     L = Library(lib, src, handle, Dict{Symbol,CompiledFunction}(), externs, decls,
-                Dict{Symbol,Any}(), Workspace(), Any[])
+                Dict{Symbol,Any}(), Workspace(), Any[], eltype)
     codes = info_codes(src)
     byname = Dict(string(f.name) => f for f in functions)
     for (fname, rows) in ifaces
@@ -359,7 +364,8 @@ function arguments(f::CompiledFunction, args, query::Bool)
                 continue
             end
             r, c = resolve_dim(rt.rows, env), resolve_dim(rt.cols, env)
-            m = rt.isvec ? Vector{Float64}(undef, r) : Matrix{Float64}(undef, r, c)
+            T = f.lib.eltype
+            m = rt.isvec ? Vector{T}(undef, r) : Matrix{T}(undef, r, c)
             push!(outs, m)
             push!(cargs, Ptr{Cvoid}(pointer(m)))
             continue
@@ -373,16 +379,16 @@ function arguments(f::CompiledFunction, args, query::Bool)
                 continue
             end
             if intent == "inout"
-                a isa Array{Float64} ||
-                    throw(LamError("$(f.name): $pname is InOut: it must be an Array{Float64} (it is written)"))
-            elseif !(a isa Array{Float64})
-                a = Array{Float64}(a)  # converted (a copy) for reading
+                a isa Array{f.lib.eltype} ||
+                    throw(LamError("$(f.name): $pname is InOut: it must be an Array{$(f.lib.eltype)} (it is written)"))
+            elseif !(a isa Array{f.lib.eltype})
+                a = Array{f.lib.eltype}(a)  # converted (a copy) for reading
             end
             push!(keep, a)
             push!(cargs, Ptr{Cvoid}(pointer(a)))
         elseif pt isa FloatType
             a isa Real || throw(LamError("$(f.name): $pname must be a number"))
-            push!(cargs, Cdouble(a))
+            push!(cargs, f.lib.eltype(a))
         else
             (a isa Integer && a >= 0) ||
                 throw(LamError("$(f.name): $pname must be a non-negative integer"))
@@ -449,10 +455,10 @@ Base.show(io::IO, f::CompiledFunction) = print(io, "compiled ", f.fn)
 
 """A row-major buffer of the generated code as a Julia array of the logical
 shape: a vector, or the lazy transpose of the column-major view."""
-function view_of(p::Ptr{Cvoid}, t::MatType, env)
+function view_of(p::Ptr{Cvoid}, t::MatType, env, T::DataType=Float64)
     r, c = resolve_dim(t.rows, env), resolve_dim(t.cols, env)
-    c == 1 && return unsafe_wrap(Array, Ptr{Float64}(p), r)
-    transpose(unsafe_wrap(Array, Ptr{Float64}(p), (c, r)))
+    c == 1 && return unsafe_wrap(Array, Ptr{T}(p), r)
+    transpose(unsafe_wrap(Array, Ptr{T}(p), (c, r)))
 end
 
 """
@@ -477,15 +483,15 @@ function bind!(lib::Library; impls...)
                 args = Any[]
                 for (k, p) in enumerate(ext.params)
                     a = rest[k]
-                    push!(args, p isa MatType ? view_of(a, p, env) : p isa IndexType ? Int(a) : a)
+                    push!(args, p isa MatType ? view_of(a, p, env, L.eltype) : p isa IndexType ? Int(a) : a)
                 end
                 r = fn(args...)
                 if ext.result !== nothing
                     # a matrix result is written column-major (its IR type is
                     # the transpose): contiguous, no transposing copy
                     rt = ext.result
-                    dst = rt.isvec ? view_of(rest[np+1], rt, env) :
-                          unsafe_wrap(Array, Ptr{Float64}(rest[np+1]),
+                    dst = rt.isvec ? view_of(rest[np+1], rt, env, L.eltype) :
+                          unsafe_wrap(Array, Ptr{L.eltype}(rest[np+1]),
                                       (resolve_dim(rt.rows, env), resolve_dim(rt.cols, env)))
                     size(dst) == size(r) ||
                         throw(LamError("$name returned $(size(r)) instead of $(size(dst))"))
@@ -510,27 +516,51 @@ end
 
 # -- calling a @lam function directly -----------------------------------------
 
-const JIT = IdDict{LamFunction,Library}()
+const JIT = IdDict{LamFunction,Dict{DataType,Library}}()
+const BINDINGS = IdDict{LamFunction,Dict{Symbol,Any}}()
 
 """
-    library(f) -> Library
+    library(f, T=Float64) -> Library
 
-The library of the ulm.lam function f, compiled at its first call (with the
-backend from ULM_LAM_BACKEND, default :julia) and kept.
+The library of the ulm.lam function f for element type T (Float64 or
+Float32), compiled at its first call (with the backend from
+ULM_LAM_BACKEND, default :julia) and kept.
 """
-library(f::LamFunction) = get!(() -> compile(f), JIT, f)
+function library(f::LamFunction, T::Type=Float64)
+    libs = get!(() -> Dict{DataType,Library}(), JIT, f)
+    get!(libs, T) do
+        lib = compile(f; name=T == Float64 ? string(f.name) : "$(f.name)_f32", eltype=T)
+        b = get(BINDINGS, f, nothing)
+        b === nothing || bind!(lib; b...)
+        lib
+    end
+end
+
+# Float32 if every array argument is Float32 (as Julia's BLAS would compute),
+# otherwise Float64 (arguments converted)
+eltype_of(args) = (arrs = filter(a -> a isa AbstractArray, collect(args));
+                   !isempty(arrs) && all(a -> eltype(a) == Float32, arrs) ? Float32 : Float64)
 
 """
     f(args...; work=nothing)
 
-Call the ulm.lam function f with Julia arrays: compiled at the first call.
+Call the ulm.lam function f with Julia arrays: compiled at the first call,
+for Float64, or for Float32 if all arrays are Float32.
 """
 (f::LamFunction)(args...; work::Union{Workspace,Nothing}=nothing) =
-    getproperty(library(f), f.name)(args...; work=work)
+    getproperty(library(f, eltype_of(args)), f.name)(args...; work=work)
 
 """
     bind!(f; name = g, ...)
 
-Implement the external functions that the ulm.lam function f calls.
+Implement the external functions that the ulm.lam function f calls (for
+every element type it is compiled for).
 """
-bind!(f::LamFunction; impls...) = bind!(library(f); impls...)
+function bind!(f::LamFunction; impls...)
+    merge!(get!(() -> Dict{Symbol,Any}(), BINDINGS, f), Dict{Symbol,Any}(impls))
+    library(f)  # compile it now: the bindings are checked
+    for lib in values(JIT[f])
+        bind!(lib; impls...)
+    end
+    nothing
+end

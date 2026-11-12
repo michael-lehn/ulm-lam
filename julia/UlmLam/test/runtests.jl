@@ -169,3 +169,4 @@ end
 
 include("vectorspace.jl")
 include("robustness.jl")
+include("float32.jl")

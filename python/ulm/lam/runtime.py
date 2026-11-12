@@ -226,10 +226,15 @@ def _toolchain(backend: str) -> str:
 
 def compile(functions, name: str | None = None, workdir=None,
             externs: dict | None = None,
-            backend: str | None = None) -> "Library":
+            backend: str | None = None,
+            dtype: str = "float64") -> "Library":
     """Compile ulm.lam functions (and what they call) into a library.
-    backend: "ulmblas" (default, or ULM_LAM_BACKEND) or "cblas"."""
+    backend: "ulmblas" (default, or ULM_LAM_BACKEND) or "cblas".
+    dtype: "float64" (default) or "float32", the element type of all
+    matrices (the same kernels on float)."""
     backend = _backend(backend)
+    if dtype not in _ELT:
+        raise fe.LamError('dtype must be "float64" or "float32"')
     if isinstance(functions, fe.Function):
         functions = [functions]
     functions = list(functions)
@@ -238,6 +243,8 @@ def compile(functions, name: str | None = None, workdir=None,
     work.mkdir(parents=True, exist_ok=True)
     mlir = work / f"{name}.mlir"
     text = fe.module(functions)
+    if dtype == "float32":  # (f64 occurs in the IR only as a type)
+        text = text.replace("f64", "f32")
     ext = ".dylib" if sys.platform == "darwin" else ".so"
     # The library is named after its program and the compiler version
     # (the newest part of the compiler), so that
@@ -286,7 +293,7 @@ def compile(functions, name: str | None = None, workdir=None,
         if f.name not in prog_fns:
             prog_fns[f.name] = f
     library = Library(lib, ifaces, decls, prog_fns, _externs_of(functions),
-                      work / f"{name}.cpp")
+                      work / f"{name}.cpp", _ELT[dtype])
     if externs:
         library.bind(**externs)
     return library
@@ -376,13 +383,20 @@ def _resolve(t: fe.MatrixType, env: dict) -> fe.MatrixType:
 class _Arg:
     """A matrix argument as a C pointer (keeps its buffer alive)."""
 
-    def __init__(self, x, rows: int, cols: int, writable: bool, what: str):
+    def __init__(self, x, rows: int, cols: int, writable: bool, what: str,
+                 elt=None):
+        elt = elt or _ELT["float64"]
         n = rows * cols
         self.keep = x
         if _np is not None and isinstance(x, _np.ndarray):
-            if x.dtype != _np.float64 or x.size != n:
-                raise fe.LamError(f"{what}: expected {rows}x{cols} float64, "
-                                   f"got {x.shape} {x.dtype}")
+            if x.size != n:
+                raise fe.LamError(f"{what}: expected {rows}x{cols}, "
+                                   f"got {x.shape}")
+            if x.dtype != elt.np():
+                if writable:
+                    raise fe.LamError(f"{what}: an inout matrix must be "
+                                       f"{elt.name} (it is written)")
+                x = x.astype(elt.np())  # converted (a copy) for reading
             if not x.flags["C_CONTIGUOUS"]:
                 if writable:
                     raise fe.LamError(f"{what}: an inout matrix must be "
@@ -395,27 +409,43 @@ class _Arg:
             if writable:
                 raise fe.LamError(f"{what}: an inout matrix must be a "
                                    "writable buffer, not a list")
-            x = array("d", _flatten(x))
+            x = array(elt.code, _flatten(x))
         mv = memoryview(x)
-        if mv.nbytes != 8 * n or mv.format not in ("d", "<d", "=d"):
-            raise fe.LamError(f"{what}: expected {n} doubles ({rows}x{cols}),"
-                               f" got {mv.nbytes} bytes of format "
-                               f"{mv.format!r}")
+        if mv.nbytes != elt.size * n or mv.format not in (
+                elt.code, "<" + elt.code, "=" + elt.code):
+            raise fe.LamError(f"{what}: expected {n} values of type "
+                               f"{elt.name} ({rows}x{cols}), got "
+                               f"{mv.nbytes} bytes of format {mv.format!r}")
         if mv.readonly:
             if writable:
                 raise fe.LamError(f"{what}: an inout matrix must be "
                                    "writable")
-            buf = (ctypes.c_double * n).from_buffer_copy(mv)
+            buf = (elt.ctype * n).from_buffer_copy(mv)
         else:
-            buf = (ctypes.c_double * n).from_buffer(x)
+            buf = (elt.ctype * n).from_buffer(x)
         self.keep = (x, buf)
         self.ptr = ctypes.addressof(buf)
 
 
-def _new_matrix(rows: int, cols: int):
+class _Elt:
+    """An element type: array typecode, ctypes type, size, NumPy dtype."""
+
+    def __init__(self, name, code, ctype, size):
+        self.name, self.code, self.ctype, self.size = name, code, ctype, size
+
+    def np(self):
+        return getattr(_np, self.name)
+
+
+_ELT = {"float64": _Elt("float64", "d", ctypes.c_double, 8),
+        "float32": _Elt("float32", "f", ctypes.c_float, 4)}
+
+
+def _new_matrix(rows: int, cols: int, elt=None):
+    elt = elt or _ELT["float64"]
     if _np is not None:
-        return _np.empty((rows, cols))
-    return array("d", [0.0]) * (rows * cols)
+        return _np.empty((rows, cols), dtype=elt.np())
+    return array(elt.code, [0.0]) * (rows * cols)
 
 
 def _address(m) -> int:
@@ -425,13 +455,13 @@ def _address(m) -> int:
     return m.buffer_info()[0]
 
 
-def _view(ptr: int, rows: int, cols: int):
+def _view(ptr: int, rows: int, cols: int, elt=None):
     """The matrix at `ptr` (shared memory)."""
+    elt = elt or _ELT["float64"]
+    a = (elt.ctype * (rows * cols)).from_address(ptr)
     if _np is not None:
-        a = (ctypes.c_double * (rows * cols)).from_address(ptr)
-        return _np.frombuffer(a, dtype=_np.float64).reshape(rows, cols)
-    a = (ctypes.c_double * (rows * cols)).from_address(ptr)
-    return memoryview(a).cast("B").cast("d", [rows, cols])
+        return _np.frombuffer(a, dtype=elt.np()).reshape(rows, cols)
+    return memoryview(a).cast("B").cast(elt.code, [rows, cols])
 
 
 # ---------------------------------------------------------------------------
@@ -443,7 +473,8 @@ def _ctype(t: str):
     if t.endswith("*") or "[" in t:
         return ctypes.c_void_p
     return {"size_t": ctypes.c_size_t, "int64_t": ctypes.c_int64,
-            "double": ctypes.c_double, "bool": ctypes.c_bool}[t]
+            "double": ctypes.c_double, "float": ctypes.c_float,
+            "bool": ctypes.c_bool}[t]
 
 
 def _function_source(cpp: str, name: str) -> str:
@@ -475,8 +506,10 @@ class Library:
     lib.f.cpp          the generated C++ of function f
     """
 
-    def __init__(self, path, ifaces, decls, functions, externs, cpp):
+    def __init__(self, path, ifaces, decls, functions, externs, cpp,
+                 elt=None):
         self.path = path
+        self.elt = elt or _ELT["float64"]  # the element type of all matrices
         self.cpp = cpp
         self.source = Path(cpp).read_text()
         self._dll = ctypes.CDLL(str(path))
@@ -534,7 +567,7 @@ class Library:
                     a = cargs[k]
                     if isinstance(p, fe.MatrixType):
                         p = _resolve(p, env)
-                        args.append(_view(a, p.rows, p.cols))
+                        args.append(_view(a, p.rows, p.cols, lib.elt))
                     else:
                         args.append(a)
                 if ext.workspace:  # a Python callback needs no workspace
@@ -545,8 +578,8 @@ class Library:
                 r = fn(*args)
                 if out:
                     t = _resolve(ext.result, env)
-                    dst = _view(cargs[nparams], t.rows, t.cols)
-                    _copy_into(dst, r, t, name)
+                    dst = _view(cargs[nparams], t.rows, t.cols, lib.elt)
+                    _copy_into(dst, r, t, name, lib.elt)
             except BaseException as e:  # re-raised after the call
                 # (a callback runs on the thread of the call)
                 lib._thread_state().pending.append(e)
@@ -558,18 +591,19 @@ class Library:
         self._callbacks[name] = cb
 
 
-def _copy_into(dst, r, t: fe.MatrixType, name: str) -> None:
+def _copy_into(dst, r, t: fe.MatrixType, name: str, elt=None) -> None:
+    elt = elt or _ELT["float64"]
     n = t.rows * t.cols
     if _np is not None and isinstance(dst, _np.ndarray):
-        src = _np.asarray(r, dtype=_np.float64)
+        src = _np.asarray(r, dtype=elt.np())
         if src.size != n:
             raise fe.LamError(f"{name} returned {src.size} values instead "
                                f"of {t}")
         dst[...] = src.reshape(t.rows, t.cols)
         return
-    flat = memoryview(dst).cast("B").cast("d")
+    flat = memoryview(dst).cast("B").cast(elt.code)
     vals = list(_flatten(r)) if isinstance(r, (list, tuple)) else \
-        memoryview(r).cast("B").cast("d").tolist()
+        memoryview(r).cast("B").cast(elt.code).tolist()
     if len(vals) != n:
         raise fe.LamError(f"{name} returned {len(vals)} values instead of "
                            f"{t}")
@@ -711,7 +745,7 @@ class CompiledFunction:
                 continue
             if intent == "out":
                 rt = results.pop(0)
-                m = _new_matrix(rt.rows, rt.cols)
+                m = _new_matrix(rt.rows, rt.cols, self.lib.elt)
                 outs.append(m)
                 cargs.append(None if query else _address(m))
                 continue
@@ -724,7 +758,7 @@ class CompiledFunction:
                     cargs.append(None)
                     continue
                 arg = _Arg(a, pt.rows, pt.cols, intent == "inout",
-                           f"{self.name}: {pname}")
+                           f"{self.name}: {pname}", self.lib.elt)
                 keep.append(arg)
                 cargs.append(arg.ptr)
             elif isinstance(pt, fe.FloatType):

@@ -2440,6 +2440,21 @@ The Pluto notebook \file{notebook/ulm-lam.jl} demonstrates all of this
 (GLS, GP regression against AbstractGPs.jl, the Kalman filter, linear
 attention).
 
+\paragraph{Float32.}
+The kernels and their lowerings are generic in the element type, so a
+program on \code{f32} tensors goes through the same pipeline into C++ on
+\code{float} (\code{sgemm}, \code{spotrf}, \ldots).
+A \code{@lam} function called with \code{Float32} arrays is compiled for
+\code{Float32} (a second library next to the \code{Float64} one, as Julia
+specialises on argument types); with mixed arrays it computes in
+\code{Float64}.
+From Python, \code{lam.compile(f, dtype="float32")}.
+The training loop of \cref{sec:torch} runs $1.9\times$ faster in
+\code{Float32} than in \code{Float64} ($B = 256$, $p = 1024$,
+$k = 256$), with half the memory.
+\file{julia/UlmLam/test/float32.jl} checks it on all three backends,
+\file{python/tests/test\_float32.py} from Python.
+
 \paragraph{Vector spaces.}
 \file{julia/UlmLam/test/vectorspace.jl} checks 137 expressions on
 $\mathbb{R}^n$ and $\mathbb{R}^{m\times n}$ against Julia: sums,
@@ -2856,8 +2871,8 @@ compiled by ulm.lam without losing speed: ulm.lam could implement such a
 framework.
 Caveats: the gradient formulas are written by hand (ulm.lam does not
 differentiate; differentiating its IR symbolically is a natural
-extension); the comparison is in float64, while ML mostly uses float32,
-which ulm.lam does not support end to end yet; on ulmBLAS, whose
+extension); the comparison is in float64, while ML mostly uses float32 (which
+ulm.lam supports, \cref{sec:julia}); on ulmBLAS, whose
 \code{gemm} runs on one thread so far (and without OpenMP here), ulm.lam
 is $2$--$2.6\times$ slower; and \code{torch.compile} failed on this
 machine (PyTorch's headers do not compile with this Apple clang:
@@ -3029,6 +3044,9 @@ Gram structure of the GP covariance (a third fewer FLOPs), Linnea makes
 $FPF\T$ symmetric through a Cholesky factorisation of $P$ (without a
 factorisation, ulm.lam's \code{gemmtr} brings it to $3n^3$), and uses
 \code{ger} for a rank-1 product.
+ulm.lam now has Linnea's variant of $FPF\T$ too, but uses it only where
+it is faster, which on the measured machine is $n \gtrsim 1200$
+(\cref{sec:status}, M4): by FLOPs alone it would always win.
 
 \emph{Memory for temporaries} is where the two differ most.
 Linnea's code generator (\file{code\_generation/memory/memory.py}) maps
@@ -3093,6 +3111,24 @@ and arguments that are silently destroyed.
         ($FPF\T$ with $P$ symmetric) is a \code{gemmtr}: one triangle,
         half the flops, passed on like a \code{syrk} result (the Kalman
         filter of \cref{sec:kalmanfilter} is 17\,\% faster with it).
+        With $P$ spd, $FPF\T$ can also be $W W\T$ with $W = FL$ and
+        $P = LL\T$ (Linnea's choice: potrf, \code{trmm} on a copy of $F$,
+        \code{syrk}; $n^3/3 + 2n^3$ instead of $3n^3$ flops for square
+        $F$).
+        Flops alone mislead here: potrf runs at a fraction of the rate of
+        gemm for small $n$ (on OpenBLAS with four threads on an Apple M5,
+        at $n = 1000$, 51 against 183\,GFLOP/s), and the Cholesky variant
+        of $FPF\T$ takes 1.3, 1.04, 0.83 and 0.79 times as long as
+        gemm/gemmtr for $n = 500$, 1000, 2000 and 4000.
+        Modelling potrf's efficiency as $n/(n + n_0)$ with $n_0 = 2400$
+        fits these measurements and makes the Cholesky variant the cheaper
+        one when $n + n_0 < 3m$ ($A$ $m\times n$ in $ASA\T$).
+        Kernel selection uses that condition, at run time when the sizes
+        are only known then (an \code{scf.if} with the gemm/gemmtr plan in
+        the other branch); the Kalman filter with $P$ asserted spd is as
+        fast as before for $n = 1000$ and 12\,\% faster for $n = 3000$.
+        The constant belongs to a measured cost model, which is future
+        work.
         Missing:
         the catalogue backend, so that new kernels are added as records,
         and a fallback plan where a factorisation fails
@@ -3118,9 +3154,9 @@ and arguments that are silently destroyed.
         check the whole pipeline numerically).
   \item \emph{Kernels}: \code{symm} for a symmetric first factor of a
         chain ($FP$ with $P$ symmetric), \code{ger} for rank-1 products,
-        \code{trmm} for
-        triangular factors that are computed (factors of a factorisation)
-        and not only parameters.
+        and a measured cost model (the efficiency of each kernel as a
+        function of its sizes, measured once per machine and BLAS) in place
+        of flop counts and the constant of the Cholesky rule for $FPF\T$.
   \item \emph{Reactant.jl and Enzyme-JAX}: their \code{enzymexla}
         dialect has BLAS and LAPACK operations, and their ``raising''
         recognises linear algebra in lower-level code.
@@ -3141,8 +3177,9 @@ and arguments that are silently destroyed.
         linear algebra in the FX graphs (matrix chains, \code{inv},
         \code{solve}, \code{cholesky}, also in the backward graph of
         autograd) by functions generated by ulm.lam, with the expressions
-        of \cite{tfpt} as the showcase; and, separately, float32 and a GPU
-        backend (cuBLAS, cuSOLVER), where most PyTorch users compute.
+        of \cite{tfpt} as the showcase; and, separately, a GPU backend
+        (cuBLAS, cuSOLVER), where most PyTorch users compute (float32 is
+        done).
   \item \emph{Mojo} (an idea, to be checked first): Mojo is a
         Python-like language on MLIR whose strength is fast kernels
         (GEMM and others), but which, as far as known here, does no

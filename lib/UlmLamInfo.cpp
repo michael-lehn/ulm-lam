@@ -375,6 +375,30 @@ struct UlmLamInfo : PassWrapper<UlmLamInfo, OperationPass<ModuleOp>>
 	});
     }
 
+    /// A value of type `t` defined before `after` in `blk` or in an
+    /// enclosing block (before the op that contains it), or null.
+    static Value
+    earlierOfType(Block &blk, Operation *after, Type t)
+    {
+	Block *b = &blk;
+	Operation *pos = after;
+	while (b) {
+	    for (Operation *op = pos; op; op = op->getPrevNode())
+		for (Value r : op->getResults())
+		    if (r.getType() == t)
+			return r;
+	    for (BlockArgument a : b->getArguments())
+		if (a.getType() == t)
+		    return a;
+	    Operation *parent = b->getParentOp();
+	    if (!parent || isa<func::FuncOp>(parent))
+		break;
+	    pos = parent->getPrevNode();
+	    b = parent->getBlock();
+	}
+	return {};
+    }
+
     /// The ops of `blk` after `after` (all ops if null) run only if `code`
     /// is 0: they move into an scf.if whose results are the status and the
     /// values the terminator needs from them.
@@ -386,11 +410,40 @@ struct UlmLamInfo : PassWrapper<UlmLamInfo, OperationPass<ModuleOp>>
 	for (Operation *op = after ? after->getNextNode() : &blk.front();
 	     op != term; op = op->getNextNode())
 	    rest.push_back(op);
-	// releasing memory at the end runs also after a failure
-	while (!rest.empty() && isRelease(rest.back()))
+	// releasing memory at the end runs also after a failure, unless it
+	// releases what the guarded ops allocate (then it is guarded too)
+	SmallVector<Operation *> releases;
+	while (!rest.empty() && isRelease(rest.back())) {
+	    releases.push_back(rest.back());
 	    rest.pop_back();
+	}
 	if (rest.empty())
 	    return code;
+	{
+	    llvm::SmallPtrSet<Operation *, 16> body(rest.begin(), rest.end());
+	    auto inBody = [&](Value v) {
+		for (Operation *d = v.getDefiningOp(); d; d = d->getParentOp())
+		    if (body.contains(d))
+			return true;
+		return false;
+	    };
+	    SmallVector<Operation *> keep;
+	    for (Operation *r : llvm::reverse(releases)) {
+		bool uses = false;
+		r->walk([&](Operation *o) {
+		    for (Value v : o->getOperands())
+			uses |= inBody(v);
+		});
+		if (uses)
+		    rest.push_back(r);
+		else
+		    keep.push_back(r);
+	    }
+	    // (the kept releases stay after the guarded ops)
+	    for (Operation *r : keep)
+		if (!rest.empty() && rest.back()->isBeforeInBlock(r))
+		    continue;
+	}
 	Operation *anchor = rest.back()->getNextNode();
 	llvm::SmallPtrSet<Operation *, 16> moved(rest.begin(), rest.end());
 	// values of the moved ops that the terminator uses, and what it gets
@@ -402,14 +455,22 @@ struct UlmLamInfo : PassWrapper<UlmLamInfo, OperationPass<ModuleOp>>
 	    if (!def || !moved.contains(def))
 		continue;
 	    auto loop = dyn_cast<scf::ForOp>(blk.getParentOp());
-	    if (!isa<scf::YieldOp>(term) || !loop)
+	    // after a failed check: the value from before the iteration (a
+	    // loop), or any value of the type defined before the check (a
+	    // branch: its content is not used, the function returns the code)
+	    Value alt;
+	    if (isa<scf::YieldOp>(term) && loop)
+		alt = loop.getRegionIterArgs()[o.getOperandNumber()];
+	    else if (isa<scf::YieldOp>(term))
+		alt = earlierOfType(blk, after, o.get().getType());
+	    if (!alt)
 		return term->emitError("ulm-lam-info: cannot guard a block "
 		                       "whose result is computed after a "
 		                       "check"),
 		       failure();
 	    idx.push_back(o.getOperandNumber());
 	    inner.push_back(o.get());
-	    otherwise.push_back(loop.getRegionIterArgs()[o.getOperandNumber()]);
+	    otherwise.push_back(alt);
 	}
 	OpBuilder b(anchor);
 	Location loc = term->getLoc();

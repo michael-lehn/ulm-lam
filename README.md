@@ -26,7 +26,9 @@ header-only C++ library [ulmBLAS](https://github.com/michael-lehn/ulmBLAS),
 or any CBLAS (C interface to the BLAS) and LAPACK, such as MKL (Intel Math
 Kernel Library) or Apple's Accelerate.
 
-An early research prototype: real double precision, dense matrices.
+An early research prototype: dense real matrices, in double or single
+precision (from Julia a function called with `Float32` arrays is compiled
+for `Float32`; from Python `lam.compile(f, dtype="float32")`).
 
 ## Julia
 

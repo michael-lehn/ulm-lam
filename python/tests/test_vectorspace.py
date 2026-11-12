@@ -55,6 +55,8 @@ EXPRS = [
     "G.T @ x + G.T @ y", "A @ G + H", "A @ (G + H)", "(A + B) @ G",
     "G @ G.T + A", "inv(S) @ G", "inv(S) @ (G + H)", "G.T @ (inv(S) @ G)",
     "(G - H).T @ (x - y)",
+    # a run-time scalar defined after the product it scales
+    "a * (A @ x) + B @ x - inv(A) @ x / a", "inv(S) @ x / a + y",
 ]
 NAMES = ("x", "y", "z", "A", "B", "C", "G", "H", "S", "a", "b", "eye")
 

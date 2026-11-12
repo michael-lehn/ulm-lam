@@ -1406,10 +1406,10 @@ class Selector
 	    bool fresh =
 	        beta == 0 && (!dest || dest.getDefiningOp<tensor::EmptyOp>());
 	    bool update = beta != 0 && dest && symmetricAcc(dest);
-	    if (top && c.symmetric && !inBranch && l.kind == Leaf::Mat &&
-	        r.kind == Leaf::Mat && l.stored == Leaf::Full &&
-	        r.stored == Leaf::Full && !isVector(r.cols()) &&
-	        (fresh || update)) {
+	    if (top && c.symmetric && (!inBranch || noSandwich) &&
+	        l.kind == Leaf::Mat && r.kind == Leaf::Mat &&
+	        l.stored == Leaf::Full && r.stored == Leaf::Full &&
+	        !isVector(r.cols()) && (fresh || update)) {
 		Type elt = elementType(l.v);
 		if (!dest)
 		    dest = empty(l, r, elt, loc);
@@ -1585,6 +1585,144 @@ class Selector
 	return cst(0);
     }
 
+    // in the other branch of choleskySandwich (its result is passed on as
+    // one triangle, so gemmtr is allowed there)
+    bool noSandwich = false;
+
+    /// A S A^T with S spd (F P F^T in a Kalman filter): S = L L^T (potrf),
+    /// W = A L (a copy of A, trmm in place), C = alpha W W^T + beta C
+    /// (syrk, one triangle): n^3/3 + m n^2 + m^2 n flops instead of
+    /// 2 m n^2 + m^2 n (gemm, gemmtr), for S n x n and A m x n.  potrf
+    /// runs at a lower rate than gemm for small n: its efficiency is
+    /// modelled as n / (n + n0), which makes the Cholesky path cheaper when
+    /// n + n0 < 3 m (n0 = 2400 fits OpenBLAS on an Apple M5: F P F^T with
+    /// n = 500, 1000, 2000, 4000 takes 1.3, 1.04, 0.83, 0.79 times as long;
+    /// a measured cost model is future work).  Decided when the code is
+    /// generated if the sizes are known, otherwise at run time (scf.if, the
+    /// usual plan in the other branch).
+    std::optional<FailureOr<Value>>
+    choleskySandwich(Chain &c, MulOp mul, Value dest, double alpha, double beta)
+    {
+	if (c.leaves.size() != 3 || !c.symmetric)
+	    return std::nullopt;
+	const Leaf &a = c.leaves[0], &s = c.leaves[1], &at = c.leaves[2];
+	if (a.kind != Leaf::Mat || s.kind != Leaf::Mat ||
+	    at.kind != Leaf::Mat || a.v != at.v || a.trans == at.trans ||
+	    s.stored != Leaf::Full || a.stored != Leaf::Full)
+	    return std::nullopt;
+	auto st = cast<RankedTensorType>(s.v.getType());
+	if (!bitEnumContainsAll(closure(propertiesOf(st), st.getShape()),
+	                        Properties::spd))
+	    return std::nullopt;
+	bool fresh =
+	    beta == 0 && (!dest || dest.getDefiningOp<tensor::EmptyOp>());
+	bool update = beta != 0 && dest && symmetricAcc(dest);
+	if (!fresh && !update)
+	    return std::nullopt;
+	auto aty = cast<RankedTensorType>(a.v.getType());
+	int64_t n = st.getDimSize(0), m = aty.getDimSize(a.trans ? 1 : 0);
+	bool known = !ShapedType::isDynamic(n) && !ShapedType::isDynamic(m);
+	constexpr int64_t n0 = 2400;
+	if (known && !(n + n0 < 3 * m))
+	    return std::nullopt;
+	Location loc = mul.getLoc();
+	if (!dest)
+	    b.setInsertionPoint(mul);
+	Type elt = elementType(s.v);
+	auto t = [](bool x) { return x ? lk::Trans::trans : lk::Trans::none; };
+	auto chol = [&](Value d) -> Value {
+	    // factorised in a copy (S may be a loop's state, or used after)
+	    Value sc = empty(s, s, elt, loc);
+	    sc = lk::GecopyOp::create(b, loc, TypeRange{sc.getType()},
+	                              lk::Trans::none, s.v, sc)
+	             ->getResult(0);
+	    auto potrf = lk::PotrfOp::create(
+	        b, loc, TypeRange{sc.getType(), b.getI64Type()},
+	        lk::Uplo::lower, sc);
+	    Value l = potrf->getResult(0);
+	    Value w = empty(a, s, elt, loc);
+	    w = lk::GecopyOp::create(b, loc, TypeRange{w.getType()}, t(a.trans),
+	                             a.v, w)
+	            ->getResult(0);
+	    w = lk::TrmmOp::create(b, loc, TypeRange{w.getType()},
+	                           lk::Side::right, lk::Uplo::lower,
+	                           lk::Trans::none, lk::Diag::non_unit,
+	                           constant(elt, 1.0, loc), l, w)
+	            ->getResult(0);
+	    if (!d) {
+		Leaf wl;
+		wl.v = w;
+		Leaf wt = wl;
+		wt.trans = true;
+		d = empty(wl, wt, elt, loc);
+	    }
+	    Value r = lk::SyrkOp::create(b, loc, TypeRange{d.getType()},
+	                                 lk::Uplo::lower, lk::Trans::none,
+	                                 constant(elt, alpha * c.alpha, loc), w,
+	                                 constant(elt, beta, loc), d)
+	                  ->getResult(0);
+	    lowerOnly.insert(r);
+	    return r;
+	};
+	if (known)
+	    return FailureOr<Value>(chol(dest));
+	// the sizes are known at run time only: n < 3 m decides
+	Value nv = dimValue(b, loc, s.v, 0);
+	Value mv = dimValue(b, loc, a.v, a.trans ? 1 : 0);
+	Value three = arith::ConstantIndexOp::create(b, loc, 3);
+	Value cond = arith::CmpIOp::create(
+	    b, loc, arith::CmpIPredicate::ult,
+	    arith::AddIOp::create(b, loc, nv,
+	                          arith::ConstantIndexOp::create(b, loc, n0)),
+	    arith::MulIOp::create(b, loc, mv, three));
+	// one buffer for both branches (each computes into it in place): a
+	// given destination is copied into it first
+	Value d;
+	if (dest) {
+	    Leaf dl;
+	    dl.v = dest;
+	    Value e = empty(dl, dl, elt, loc);
+	    d = lk::GecopyOp::create(b, loc, TypeRange{e.getType()},
+	                             lk::Trans::none, dest, e)
+	            ->getResult(0);
+	    // the copy has the properties of dest (symmetric: gemmtr may
+	    // accumulate onto it)
+	    if (d.getType() != dest.getType())
+		d = AssumeOp::create(b, loc, dest.getType(), d, false);
+	} else {
+	    d = *newDest(mul);
+	}
+	Type resTy = d.getType();
+	auto ifOp = scf::IfOp::create(b, loc, TypeRange{resTy}, cond,
+	                              /*withElse=*/true);
+	bool saved = inBranch;
+	inBranch = true;
+	{
+	    OpBuilder::InsertionGuard g(b);
+	    b.setInsertionPointToStart(ifOp.thenBlock());
+	    Value r = chol(d);
+	    if (r.getType() != resTy)
+		r = AssumeOp::create(b, loc, resTy, r, false);
+	    scf::YieldOp::create(b, loc, r);
+	    b.setInsertionPointToStart(ifOp.elseBlock());
+	    noSandwich = true;
+	    FailureOr<Value> o = chain(mul, d, alpha, dest ? beta : 0.0);
+	    noSandwich = false;
+	    if (failed(o)) {
+		inBranch = saved;
+		return o;
+	    }
+	    Value ov = *o;
+	    if (ov.getType() != resTy)
+		ov = AssumeOp::create(b, loc, resTy, ov, false);
+	    scf::YieldOp::create(b, loc, ov);
+	}
+	inBranch = saved;
+	b.setInsertionPointAfter(ifOp);
+	lowerOnly.insert(ifOp.getResult(0));
+	return FailureOr<Value>(ifOp.getResult(0));
+    }
+
     /// beta * dest + alpha * (product), dest null: a new value.
     FailureOr<Value>
     chain(MulOp mul, Value dest, double alpha, double beta,
@@ -1601,6 +1739,9 @@ class Selector
 	    if (failed(leavesOf(f, mul, c.leaves, c.alpha)))
 		return failure();
 	dynScales.append(extraScales.begin(), extraScales.end());
+	if (dynScales.empty() && !inBranch && !noSandwich)
+	    if (auto r = choleskySandwich(c, mul, dest, alpha, beta))
+		return *r;
 	if (!dynScales.empty() && !scalingProduct) {
 	    SmallVector<std::pair<Value, bool>> scales = std::move(dynScales);
 	    // a single plan whose last kernel is a gemm (gemv): the scalar is
@@ -1636,6 +1777,17 @@ class Selector
 		b.restoreInsertionPoint(ip);
 	    if (failed(r))
 		return failure();
+	    // (a scalar defined after the product, e.g. 1/a in A^-1 x / a:
+	    // the scaling goes after it)
+	    for (auto &sc : scales) {
+		Operation *d = sc.first.getDefiningOp();
+		Block *blk = b.getInsertionBlock();
+		if (!d || d->getBlock() != blk)
+		    continue;
+		auto ipt = b.getInsertionPoint();
+		if (ipt != blk->end() && !d->isBeforeInBlock(&*ipt))
+		    b.setInsertionPointAfter(d);
+	    }
 	    Value x = scaleBy(scalarOf(scales, mul.getLoc()), *r, mul.getLoc());
 	    if (!dest)
 		return x;

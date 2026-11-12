@@ -37,6 +37,8 @@ using UlmLam, LinearAlgebra, Random, Test
      "(a + b) * G", "G + H - G", "0 * G", "1 * G", "G' + H'", "(G + H)'", "G' - H'", "2 * G'",
      "(G + H)' * x", "G' * x + G' * y", "A * G + H", "A * (G + H)", "(A + B) * G", "G * G' + A",
      "S \\ G", "S \\ (G + H)", "G' * (S \\ G)", "G' * x", "(G - H)' * (x - y)",
+     # a run-time scalar defined after the product it scales
+     "a * (A * x) + B * x - inv(A) * x / a", "inv(S) * x / a + y",
     ]
     types = Dict("x" => :(Vec(:n)), "y" => :(Vec(:n)), "z" => :(Vec(:n)),
                  "A" => :(Mat(:n, :n)), "B" => :(Mat(:n, :n)), "C" => :(Mat(:n, :n)),
