@@ -10,6 +10,8 @@
 #     julia --project=julia/UlmLam julia/examples/gp.jl
 
 using UlmLam, LinearAlgebra, Random
+# the OpenBLAS of backend=:cblas with as many threads as Julia's BLAS
+ENV["OPENBLAS_NUM_THREADS"] = string(BLAS.get_num_threads())
 
 @lam function gp(K::Mat(:n, :n, :symmetric), s2::Float, Ks::Mat(:n, :m),
                  Kss::Mat(:m, :m, :symmetric), y::Vec(:n))

@@ -37,20 +37,25 @@ dynamic:        ## GLS with sizes as run-time parameters: one library, several s
 gp:             ## Gaussian process regression on public data (downloaded once)
 	python3 python/examples/gp.py
 
-showcases:      ## ridge regression, linear attention, Kalman filter (Python, against NumPy)
+showcases:      ## ridge, linear attention, Kalman filter, Bayesian regression (Python vs NumPy)
 	python3 python/examples/ridge.py
 	python3 python/examples/attention.py
 	python3 python/examples/kalman_filter.py
+	python3 python/examples/bayes.py
 
 python:         ## the Python frontend: unit tests and the Kalman examples
 	python3 -m unittest discover -s python/tests
 	python3 python/examples/kalman.py
 	python3 python/examples/adaptive_kalman.py
 
-julia:          ## the Julia frontend (julia/UlmLam): tests, Kalman and GP examples
+julia:          ## the Julia frontend (julia/UlmLam): tests and the showcases in Julia
 	julia --project=julia/UlmLam julia/UlmLam/test/runtests.jl
 	julia --project=julia/UlmLam julia/examples/kalman.jl
 	julia --project=julia/UlmLam julia/examples/gp.jl
+	julia --project=julia/UlmLam julia/examples/ridge.jl
+	julia --project=julia/UlmLam julia/examples/attention.jl
+	julia --project=julia/UlmLam julia/examples/kalman_filter.jl
+	julia --project=julia/UlmLam julia/examples/bayes.jl
 
 doc:            ## build doc/ulm-lam.pdf with LuaLaTeX
 	cd doc && latexmk

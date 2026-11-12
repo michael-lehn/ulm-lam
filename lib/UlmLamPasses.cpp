@@ -325,7 +325,7 @@ class Selector
     {
 	SmallVector<Operation *> ops;
 	func.walk([&](Operation *op) {
-	    if (isa<MulOp, AddOp>(op))
+	    if (isa<MulOp, AddOp>(op) || dynamicScale(op))
 		ops.push_back(op);
 	});
 	for (Operation *op : ops)
@@ -340,6 +340,11 @@ class Selector
 	                      [](Operation *u) { return isa<InverseOp>(u); })))
 		continue;
 	    b.setInsertionPoint(op);
+	    if (auto sc = dyn_cast<ScaleOp>(op)) {
+		// (gescal scales both triangles: one stored triangle stays so)
+		replace(op, scaleBy(sc.getAlpha(), sc.getOperand(), op->getLoc()));
+		continue;
+	    }
 	    FailureOr<Value> r = isa<AddOp>(op)
 	                             ? selectAdd(cast<AddOp>(op))
 	                             : selectProduct(cast<MulOp>(op));
@@ -450,14 +455,43 @@ class Selector
 	return k;
     }
 
+    /// s * X with s known only at run time, used as a value (in a sum, a
+    /// result, a loop): selected as gescal(s, X).  Inside products the
+    /// scale is collected by leavesOf; s * I in a sum is adddiag.
+    static bool
+    dynamicScale(Operation *op)
+    {
+	auto sc = dyn_cast<ScaleOp>(op);
+	if (!sc || matchPattern(sc.getAlpha(), m_Constant()))
+	    return false;
+	Value v = sc.getOperand();
+	while (true) {
+	    if (auto s2 = v.getDefiningOp<ScaleOp>())
+		v = s2.getOperand();
+	    else if (auto as = v.getDefiningOp<AssumeOp>())
+		v = as.getOperand();
+	    else
+		break;
+	}
+	if (v.getDefiningOp<IdentityOp>())
+	    return false;
+	return llvm::any_of(op->getUsers(), [](Operation *u) {
+	    return !isa<MulOp, ScaleOp, TransposeOp, InverseOp>(u);
+	});
+    }
+
     static bool
     feedsSum(Operation *op)
     {
 	if (!isa<MulOp>(op) || !op->hasOneUse())
 	    return false;
 	Operation *user = *op->getUsers().begin();
-	if (isa<ScaleOp>(user) && user->hasOneUse())
+	if (auto sc = dyn_cast<ScaleOp>(user); sc && user->hasOneUse()) {
+	    // (a run-time scale: the product by itself, then gescal)
+	    if (!matchPattern(sc.getAlpha(), m_Constant()))
+		return false;
 	    user = *user->getUsers().begin();
+	}
 	return isa<AddOp>(user);
     }
 
@@ -500,6 +534,38 @@ class Selector
 
     /// Kernel results of which only the lower triangle is computed (syrk).
     llvm::SmallPtrSet<Value, 4> lowerOnly;
+
+    /// Scalars known at run time that scale factors of the product being
+    /// collected (leavesOf), and whether they are inverted.
+    SmallVector<std::pair<Value, bool>> dynScales;
+    bool scalingProduct = false;
+
+    /// The product of the scalars (arith ops at the insertion point).
+    Value
+    scalarOf(ArrayRef<std::pair<Value, bool>> scales, Location loc)
+    {
+	Value s;
+	for (auto [v, inverted] : scales) {
+	    if (inverted) {
+		Value one = arith::ConstantOp::create(
+		    b, loc, v.getType(), b.getFloatAttr(v.getType(), 1.0));
+		v = arith::DivFOp::create(b, loc, one, v);
+	    }
+	    s = s ? arith::MulFOp::create(b, loc, s, v).getResult() : v;
+	}
+	return s;
+    }
+
+    /// alpha * x in place, alpha a run-time value (one triangle stays so).
+    Value
+    scaleBy(Value alpha, Value x, Location loc)
+    {
+	Value r = lk::GescalOp::create(b, loc, TypeRange{x.getType()}, alpha, x)
+	              ->getResult(0);
+	if (lowerOnly.contains(x))
+	    lowerOnly.insert(r);
+	return r;
+    }
 
     /// Completed (full) versions of matrices stored as one triangle.
     llvm::DenseMap<Value, Value> completed;
@@ -688,10 +754,13 @@ class Selector
 		// a constant factor moves out of the product: (a A)^T = a A^T,
 		// (a A)^-1 = a^-1 A^-1
 		FloatAttr c;
-		if (!matchPattern(sc.getAlpha(), m_Constant(&c)))
-		    return user->emitError(
-		        "ulm-lam-select-kernels: a factor scaled by a "
-		        "non-constant scalar (not supported yet)");
+		if (!matchPattern(sc.getAlpha(), m_Constant(&c))) {
+		    // a scalar known at run time: the product is scaled
+		    // afterwards (gescal; 1/s inside an inverse)
+		    dynScales.push_back({sc.getAlpha(), inv});
+		    v = sc.getOperand();
+		    continue;
+		}
 		double a = c.getValueAsDouble();
 		if (inv && a == 0)
 		    return user->emitError("ulm-lam-select-kernels: inverse of "
@@ -1286,9 +1355,28 @@ class Selector
     chain(MulOp mul, Value dest, double alpha, double beta)
     {
 	Chain c;
+	dynScales.clear();
 	for (Value f : mul.getFactors())
 	    if (failed(leavesOf(f, mul, c.leaves, c.alpha)))
 		return failure();
+	if (!dynScales.empty() && !scalingProduct) {
+	    // s * product: the product without s, then scaled, then added
+	    SmallVector<std::pair<Value, bool>> scales = std::move(dynScales);
+	    // (the product is emitted at its own position; scale and sum at
+	    // the caller's, where the accumulator is defined)
+	    OpBuilder::InsertPoint ip = b.saveInsertionPoint();
+	    scalingProduct = true;
+	    FailureOr<Value> r = chain(mul, Value(), alpha, 0.0);
+	    scalingProduct = false;
+	    if (dest)
+		b.restoreInsertionPoint(ip);
+	    if (failed(r))
+		return failure();
+	    Value x = scaleBy(scalarOf(scales, mul.getLoc()), *r, mul.getLoc());
+	    if (!dest)
+		return x;
+	    return accumulate(x, dest, 1.0, beta, mul.getLoc());
+	}
 	SmallVector<Plan> plans = plansOf(c, mul);
 	int k = c.leaves.size();
 	if (plans.empty())
@@ -1359,15 +1447,16 @@ class Selector
 	    costs.push_back(costValue(c, 0, k - 1, loc));
 	}
 	Type resultTy = mul.getType();
-	// (a new destination in each branch: eliminate-empty-tensors replaces
-	// each by the caller's buffer where the product is a result)
+	// All plans compute into the same destination (a new one, or the
+	// accumulator), so that the branches yield one buffer: otherwise
+	// bufferization gives each branch its own allocation and the scf.if
+	// result an ownership known only at run time.
+	Value shared = dest ? Value() : *newDest(mul);
 	auto emitPlan = [&](size_t p) -> Value {
 	    c.choice = plans[p];
-	    Choice top = c.choice[0][k - 1];
-	    Value d = dest;
-	    if (!d && (top.kind == Choice::Gemm || top.kind == Choice::Gram))
-		d = *newDest(mul);
-	    Value r = emit(c, 0, k - 1, d, alpha * c.alpha, beta, loc);
+	    Value r = shared
+	                  ? emitInto(c, 0, k - 1, shared, alpha * c.alpha, loc)
+	                  : emit(c, 0, k - 1, dest, alpha * c.alpha, beta, loc);
 	    if (r.getType() != resultTy)
 		r = AssumeOp::create(b, loc, resultTy, r, false);
 	    return r;
@@ -1631,6 +1720,9 @@ class Selector
 	    beta = 1.0;
 	    consumed.insert(mul);
 	}
+	// (a product without accumulator is emitted at its own position; the
+	// scalars of the identity terms may be defined after it)
+	b.setInsertionPoint(add);
 	if (!identities.empty() && !acc)
 	    return add.emitError("ulm-lam-select-kernels: a sum of identities "
 	                         "only (not supported yet)"),

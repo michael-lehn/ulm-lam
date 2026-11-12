@@ -292,6 +292,8 @@ class Value:
         return _op("ulm_lam.mul", [self, other], MatrixType(a.rows, b.cols))
 
     def __add__(self, other) -> "Value":
+        if isinstance(self.type, FloatType):
+            return _scalar_op("addf", self, other)
         other = _as_value(other)
         a, b = self._matrix("+"), other._matrix("+")
         if (a.rows, a.cols) != (b.rows, b.cols):
@@ -299,17 +301,40 @@ class Value:
         return _op("ulm_lam.add", [self, other], MatrixType(a.rows, a.cols))
 
     def __sub__(self, other) -> "Value":
+        if isinstance(self.type, FloatType):
+            return _scalar_op("subf", self, other)
         return self + (-1.0) * _as_value(other)
 
     def __neg__(self) -> "Value":
+        if isinstance(self.type, FloatType):
+            return _scalar_op("subf", 0.0, self)
         return (-1.0) * self
 
+    # scalar arithmetic of Float values (1 / beta, alpha / beta, ...)
+    def __radd__(self, other) -> "Value":
+        return _scalar_op("addf", other, self)
+
+    def __rsub__(self, other) -> "Value":
+        return _scalar_op("subf", other, self)
+
+    def __truediv__(self, other) -> "Value":
+        if isinstance(self.type, MatrixType):  # A / s
+            if isinstance(other, (int, float)):
+                return _scale(1.0 / other, self)
+            return _scale_by(_scalar_op("divf", 1.0, other), self)
+        return _scalar_op("divf", self, other)
+
+    def __rtruediv__(self, other) -> "Value":
+        return _scalar_op("divf", other, self)
+
     def __mul__(self, alpha) -> "Value":
-        if isinstance(self.type, FloatType):  # s * M, s a Float parameter
+        if isinstance(self.type, FloatType):  # s * M, s a Float value
             if isinstance(alpha, Value) and isinstance(alpha.type,
                                                        MatrixType):
                 return _scale_by(self, alpha)
-            raise LamError("a Float parameter scales matrices only")
+            return _scalar_op("mulf", self, alpha)
+        if isinstance(alpha, Value) and isinstance(alpha.type, FloatType):
+            return _scale_by(alpha, self)
         if isinstance(alpha, (int, float)):
             return _scale(float(alpha), self)
         if isinstance(alpha, Value) and isinstance(alpha.type, FloatType):
@@ -346,6 +371,21 @@ def _scale(alpha: float, x: Value) -> Value:
     v = Value(b.fresh(), r, b.region.id)
     b.emit(f"{v.name} = ulm_lam.scale {c.name}, {x._use()} : f64, {t.mlir()} "
            f"-> {r.mlir()}")
+    return v
+
+
+def _scalar_op(op: str, x, y) -> Value:
+    """x op y for Float values and numbers (arith.addf, subf, mulf, divf)."""
+    b = _builder()
+    vals = []
+    for a in (x, y):
+        if isinstance(a, (int, float)):
+            a = b.constant(float(a), Float)
+        if not (isinstance(a, Value) and isinstance(a.type, FloatType)):
+            raise LamError(f"{op}: scalars only, got {a}")
+        vals.append(a)
+    v = Value(b.fresh(), Float, b.region.id)
+    b.emit(f"{v.name} = arith.{op} {vals[0]._use()}, {vals[1]._use()} : f64")
     return v
 
 

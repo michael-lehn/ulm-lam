@@ -56,12 +56,18 @@ end
     (Ks' * inv(Kn) * y, Kss - Ks' * inv(Kn) * Ks)
 end
 
+@lam function blr(Phi::Mat(:n, :p), t::Vec(:n), Phis::Mat(:m, :p), alpha::Float, beta::Float)
+    A = assume(alpha * I + beta * (Phi' * Phi), :spd)
+    w = beta * inv(A) * Phi' * t
+    (Phis * w, Phis * inv(A) * Phis' + (1 / beta) * I)
+end
+
 @lam function overwrite(M::InOut(Mat(:n, :n, :spd)), b::Vec(:n))
     M \ b
 end
 
 const ALL = [gls, gls_static, left_spd, left_lu, right_lu, chain, two, estimate,
-             accumulate, gp, overwrite]
+             accumulate, gp, blr, overwrite]
 
 for backend in (:ulmblas, :cblas)
     lib = UlmLam.compile(ALL; name="jltest_$backend", backend=backend)
@@ -121,6 +127,13 @@ for backend in (:ulmblas, :cblas)
             @test rel(cov, Kss - Ks' * (Kn \ Ks)) < 1e-10
             err = try lib.gp(K, -5.0, Ks, Kss, y); nothing catch e; e end
             @test err isa InfoError && occursin("computed from", err.meaning)
+        end
+        @testset "run-time scalars on products" begin
+            Phi, Phis, t = randn(50, 8), randn(6, 8), randn(50)
+            A = 2.0I + 25.0 * Phi' * Phi
+            mean, cov = lib.blr(Phi, t, Phis, 2.0, 25.0)
+            @test rel(mean, Phis * (25.0 * (A \ (Phi' * t)))) < 1e-12
+            @test rel(cov, Phis * (A \ Phis') + I / 25.0) < 1e-12
         end
         @testset "InOut and workspace" begin
             M, b = spd(20), randn(20)

@@ -798,6 +798,35 @@ class Identity(unittest.TestCase):
         self.assertLess(np.abs(got - ref).max() / np.abs(ref).max(), 1e-13)
         self.assertIn("sylrk", self.lib.gram.cpp)
 
+    def test_runtime_scalars_on_products(self):
+        """Bayesian linear regression: beta * (Phi^T Phi), beta * A^-1 ...,
+        1 / beta * I; scalar arithmetic of Float parameters."""
+        @lam.function
+        def blr(Phi: Matrix("n", "p"), t: Vector("n"), Phis: Matrix("m", "p"),
+                alpha: Float, beta: Float):
+            A = lam.assume(alpha * lam.eye("p") + beta * (Phi.T @ Phi), "spd")
+            w = beta * A.inv @ Phi.T @ t
+            return Phis @ w, Phis @ A.inv @ Phis.T + (1 / beta) * lam.eye("m")
+
+        @lam.function
+        def scaled(A: Matrix("n", "n"), B: Matrix("n", "n"), s: Float):
+            return (s - 1) * A @ B + s * A + B / s
+
+        lib = lam.compile([blr, scaled], name="scalars")
+        rng = self.rng
+        n, p, m = 50, 8, 6
+        Phi, Phis, t = (rng.normal(size=(n, p)), rng.normal(size=(m, p)),
+                        rng.normal(size=n))
+        A = 2.0 * np.eye(p) + 25.0 * Phi.T @ Phi
+        w = 25.0 * np.linalg.solve(A, Phi.T @ t)
+        mean, cov = lib.blr(Phi, t, Phis, 2.0, 25.0)
+        self.assertLess(np.abs(mean[:, 0] - Phis @ w).max(), 1e-12)
+        ref = Phis @ np.linalg.solve(A, Phis.T) + np.eye(m) / 25.0
+        self.assertLess(np.abs(cov - ref).max(), 1e-12)
+        X, Y = rng.normal(size=(5, 5)), rng.normal(size=(5, 5))
+        ref = 2.5 * X @ Y + 3.5 * X + Y / 3.5
+        self.assertLess(np.abs(lib.scaled(X, Y, 3.5) - ref).max(), 1e-12)
+
     def test_float_argument(self):
         with self.assertRaises(LamError):
             self.lib.terms(np.eye(self.n), np.eye(self.n), "x")

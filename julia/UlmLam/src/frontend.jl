@@ -220,6 +220,7 @@ function Base.inv(a::LamValue)
 end
 
 function Base.:*(a::LamValue, b::LamValue)
+    a.type isa FloatType && b.type isa FloatType && return scalar_op("mulf", a, b)
     a.type isa FloatType && return scale_by(a, b)
     b.type isa FloatType && return scale_by(b, a)
     ta, tb = mat(a, "*"), mat(b, "*")
@@ -228,19 +229,47 @@ function Base.:*(a::LamValue, b::LamValue)
                        "$(tb.rows) rows"))
     op!("ulm_lam.mul", [a, b], newtype(ta.rows, tb.cols))
 end
-Base.:*(alpha::Real, a::LamValue) = scale(Float64(alpha), a)
-Base.:*(a::LamValue, alpha::Real) = scale(Float64(alpha), a)
+Base.:*(alpha::Real, a::LamValue) =
+    a.type isa FloatType ? scalar_op("mulf", alpha, a) : scale(Float64(alpha), a)
+Base.:*(a::LamValue, alpha::Real) = alpha * a
+
+# scalar arithmetic of Float values (1 / beta, alpha / beta, ...)
+Base.:/(a::LamValue, b::LamValue) =
+    a.type isa FloatType && b.type isa FloatType ? scalar_op("divf", a, b) : a * inv(b)
+Base.:/(a::Real, b::LamValue) = scalar_op("divf", a, b)
+Base.:/(a::LamValue, b::Real) =
+    a.type isa FloatType ? scalar_op("divf", a, b) : (1.0 / b) * a
+Base.:+(a::Real, b::LamValue) = scalar_op("addf", a, b)
+Base.:+(a::LamValue, b::Real) = scalar_op("addf", a, b)
+Base.:-(a::Real, b::LamValue) = scalar_op("subf", a, b)
+Base.:-(a::LamValue, b::Real) = scalar_op("subf", a, b)
+
+"""x op y for Float values and numbers (arith.addf, subf, mulf, divf)."""
+function scalar_op(op, x, y)
+    b = builder()
+    vals = map((x, y)) do a
+        a isa Real && (a = constant!(b, Float64(a), Float))
+        (a isa LamValue && a.type isa FloatType) ||
+            throw(LamError("$op: scalars only, got $a"))
+        a
+    end
+    v = LamValue(fresh!(b), Float, region(b).id)
+    emit!(b, "$(v.name) = arith.$op $(use(vals[1])), $(use(vals[2])) : f64")
+    v
+end
 Base.:\(a::LamValue, b::LamValue) = inv(a) * b
-Base.:/(b::LamValue, a::LamValue) = b * inv(a)
+
 
 function Base.:+(a::LamValue, b::LamValue)
+    a.type isa FloatType && return scalar_op("addf", a, b)
     ta, tb = mat(a, "+"), mat(b, "+")
     (ta.rows, ta.cols) == (tb.rows, tb.cols) ||
         throw(LamError("sum of $ta and $tb: different shapes"))
     op!("ulm_lam.add", [a, b], newtype(ta.rows, ta.cols))
 end
-Base.:-(a::LamValue, b::LamValue) = a + (-1.0) * b
-Base.:-(a::LamValue) = (-1.0) * a
+Base.:-(a::LamValue, b::LamValue) =
+    a.type isa FloatType ? scalar_op("subf", a, b) : a + (-1.0) * b
+Base.:-(a::LamValue) = a.type isa FloatType ? scalar_op("subf", 0.0, a) : (-1.0) * a
 
 function scale(alpha::Float64, x::LamValue)
     t = mat(x, "scaling")

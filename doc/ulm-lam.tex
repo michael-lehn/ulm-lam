@@ -1244,7 +1244,7 @@ The kernel sequence is identical, so the time of the generated code on
 MKL compared with the hand-written MKL version measures the mapping, and
 the same code on ulmBLAS compared with it on MKL measures ulmBLAS
 (\cref{sec:gpcluster}).
-All 42 Python tests pass with both backends.
+All 43 Python tests pass with both backends.
 
 \paragraph{The ulm.lam ABI.}
 \begin{itemize}
@@ -2269,7 +2269,7 @@ faster than the formula written literally.
 Before the operator was formed by kernel selection (with the per-step
 solves), ulm.lam took 482\,ms here and lost against the hand-written
 version.
-\file{python/tests/test_lam.py} (42 tests, \code{make python}) checks
+\file{python/tests/test_lam.py} (43 tests, \code{make python}) checks
 GLS with lists, buffers and NumPy arrays, \code{inout} parameters, loops
 with carried matrices and callbacks, the operator chosen by the trip
 count, functions calling functions, two results, NumPy layouts, one
@@ -2377,7 +2377,7 @@ Callbacks of external functions get vectors as \code{Vector} and matrices
 as lazy transposes of the row-major buffers, without copies.
 
 \paragraph{Results.}
-\file{julia/UlmLam/test/runtests.jl} (44 tests) runs GLS with fixed and
+\file{julia/UlmLam/test/runtests.jl} (48 tests) runs GLS with fixed and
 run-time sizes, solves from the left and from the right (Cholesky and
 LU), a chain chosen at run time, two results, a loop with callbacks, a
 loop-carried matrix, GP with \code{s2 * I} and a wrong assumption
@@ -2564,7 +2564,7 @@ $O(n^3)$ factorisation, and a fast \code{potrf}, the point.
 % =====================================================================
 \section{More showcases}\label{sec:showcases}
 % =====================================================================
-Three more programs, each written as the formula and compared with NumPy
+Four more programs, each written as the formula and compared with NumPy
 (OpenBLAS) on the Apple M5 (\code{make showcases}).
 
 \paragraph{Ridge regression} (\file{python/examples/ridge.py}):
@@ -2672,6 +2672,82 @@ $n$ & $m$ & steps & ulm.lam & NumPy as written & NumPy by hand \\
 \bottomrule
 \end{tabular}
 \end{center}
+
+\paragraph{Bayesian linear regression} (\file{python/examples/bayes.py}):
+with the prior $w \sim N(0, \alpha\inv I)$ and the noise precision
+$\beta$ (Bishop, Sec.~3.3),
+\begin{lstlisting}[style=py]
+@lam.function
+def blr(Phi: Matrix("n", "p"), t: Vector("n"), Phis: Matrix("m", "p"),
+        alpha: Float, beta: Float):
+    A = lam.assume(alpha * lam.eye("p") + beta * (Phi.T @ Phi), "spd")
+    w = beta * A.inv @ Phi.T @ t
+    return Phis @ w, Phis @ A.inv @ Phis.T + (1 / beta) * lam.eye("m")
+\end{lstlisting}
+$\alpha$ and $\beta$ are scalars known at run time, which scale products
+here and enter arithmetic ($1/\beta$).
+Kernel selection collects such factors of a product, computes the product
+without them and scales the result (\code{gescal}); scaling commutes with
+the product, so $\beta$ is applied to the predictive mean ($m$ values),
+not to the weights.
+A run-time scale of a matrix in a sum is a \code{gescal}, of the identity
+an \code{adddiag}; a symmetric matrix stored as one triangle stays so.
+The generated sequence: $\Phi\T\Phi$ by \code{syrk}, scaled by $\beta$,
+$\alpha$ added to the diagonal, Cholesky of the triangle; the mean by
+\code{gemv}, two \code{trsv} and \code{gemv}; the covariance as $V\T V$
+with $V = L\inv\Phi_*\T$ (\code{trsm}, \code{syrk}) and $1/\beta$ added to
+its diagonal.
+On the bike-sharing data with random Fourier features, the predictive
+mean and the full covariance of 1379 test hours (seconds):
+
+\begin{center}
+\begin{tabular}{rrrrrr}
+\toprule
+$p$ & RMSE & in 2 sd & ulm.lam & NumPy as written & SciPy by hand \\
+\midrule
+500 & 0.404 & 89\,\% & 0.030 & 0.138 & 0.028 \\
+1000 & 0.314 & 95\,\% & 0.093 & 0.334 & 0.089 \\
+2000 & 0.286 & 97\,\% & 0.336 & 1.135 & 0.333 \\
+4000 & 0.259 & 98\,\% & 1.377 & 4.652 & 1.444 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+As fast as the version written by hand, $3.4$--$4.6\times$ faster than
+the formula with \code{inv}; ``in 2 sd'' is the share of test hours whose
+value lies within two predictive standard deviations.
+
+\paragraph{The same in Julia} (\file{julia/examples/ridge.jl},
+\file{attention.jl}, \file{kalman_filter.jl}, \file{bayes.jl}, \code{make julia}), against
+what a Julia programmer writes (Julia 1.13 with its OpenBLAS on 4
+threads; ulm.lam on ulmBLAS, for attention also on OpenBLAS with 4
+threads; seconds, the largest sizes):
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+& ulm.lam & Julia as written & Julia by hand \\
+\midrule
+ridge regression, $p = 4000$ & 1.268 & 2.438 & 1.750 \\
+Bayesian linear regression, $p = 4000$ & 1.545 & 2.787 & 1.989 \\
+Kalman filter, $n = 2000$, 20 steps & 2.655 & 4.811 & 4.465 \\
+linear attention, $N = 16384$ (ulmBLAS / OpenBLAS) & 0.0117 / 0.0032 & 0.714 & 0.0021 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+Ridge regression, Bayesian regression and the Kalman filter are
+$1.3$--$1.7\times$ faster than the versions written by hand (why Julia's are slower than NumPy's
+relative to ulm.lam has not been analysed here).
+For attention, ``as written'' is \code{(Q * K') * V}; Julia's \code{*}
+with three arguments, \code{Q * K' * V}, already chooses the order of a
+chain of three matrices (0.0022\,s), as ulm.lam does.
+There ulm.lam on OpenBLAS is as fast as Julia within the spread of these
+millisecond timings, and on ulmBLAS it is slower: its \code{gemm} runs on
+one thread so far, a hint for ulmBLAS rather than for the mapping.
 
 \noindent
 The program needed three general improvements of the compiler.
@@ -2841,9 +2917,10 @@ catalogue) Linnea is clearly ahead; in what a compiler needs to be used
         and ulmBLAS aims at being a BLAS for Julia as well.
   \item \emph{More showcases}: ridge regression, linear attention and the
         Kalman filter are done (\cref{sec:showcases}).
-        Next: Bayesian linear regression, which needs run-time scalars on
-        products ($\beta\Phi\T\Phi$), and \code{gemmtr} for the symmetric
-        products of the Kalman filter.
+        Bayesian linear regression too, with run-time scalars on products
+        and scalar arithmetic.
+        Next: \code{gemmtr} for the symmetric products of the Kalman
+        filter.
   \item \emph{PyTorch}: PyTorch maps every operation by itself onto
         BLAS/LAPACK or cuBLAS/cuSOLVER, and \code{torch.compile} fuses
         elementwise operations but does no linear algebra mapping

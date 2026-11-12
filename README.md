@@ -162,8 +162,10 @@ What is checked (`make`):
   `inv`), linear attention (the order of Q K^T V chosen at run time: up to
   160x faster than NumPy as written) and the Kalman filter with predict and
   update (1.1-1.2x faster than NumPy written by an expert, 1.7-2.5x faster
-  than as written).
-- `make python`: the Python frontend: 42 unit tests (among them symmetric
+  than as written) and Bayesian linear regression (run-time scalars alpha,
+  beta on products; as fast as SciPy by hand, 3.4-4.6x faster than with
+  `inv`).  The same in Julia: `make julia`.
+- `make python`: the Python frontend: 43 unit tests (among them symmetric
   matrices stored as one triangle, with NaN in the other one) and the two
   Kalman examples against NumPy.
 
