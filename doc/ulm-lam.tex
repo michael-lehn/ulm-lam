@@ -2967,7 +2967,7 @@ halve the second product.
 \end{itemize}
 
 % =====================================================================
-\section{Status and plan}\label{sec:status}
+\section{Status}\label{sec:status}
 % =====================================================================
 
 \paragraph{Done.}
@@ -3084,136 +3084,189 @@ throw-away inputs; for a library routine, and for code in loops, it is
 what FLENS-LAPACK had to avoid by hand: temporaries inside nested calls,
 and arguments that are silently destroyed.
 
-\paragraph{Plan.}
+\paragraph{Where it stands.}
 \begin{enumerate}[label=M\arabic*]
   \item \emph{Largely done.} Dialects, verifiers, property closure and
-        inference.
-        \code{ulm-lam-opt} (\file{tools/ulm-lam-opt.cpp}, mlir-opt with
-        the ulm.lam dialects and passes, linked against the plugin) and
+        inference; \code{ulm-lam-opt} (\file{tools/ulm-lam-opt.cpp}) and
         \code{lit}/\code{FileCheck} tests of the passes in \file{test/}
-        (\code{make check}, driven by GNU Make, \code{lit} from PyPI).
-  \item \emph{Largely done.} \code{ulm-lam-normalize} flattens products
-        and sums, pushes transposes to the leaves ($(AB)\T = B\T A\T$,
-        also for sums and scales), folds double transposes and inverses
-        and scales of scales, and drops identity factors; kernel
-        selection inverts products factor by factor and collects the
-        scales of a product into the $\alpha$ of its last kernel.
-        Open: inverses pushed to the leaves already in the normal form,
-        so that other passes see them.
-  \item \emph{Done for what kernel selection emits.} \code{ulm_lamk} with DPS,
-        bufferization and the ulmBLAS and CBLAS lowerings, \code{trmm}
-        included.
-  \item \emph{Partly done.} \code{strategy=gmc} with gemm, gemv, solves,
-        factorisations and $Z\T Z$.
-        \code{syrk} and \code{symm}/\code{symv} with triangles tracked
-        (\cref{sec:storage}).
-        A triangular factor of a product is a \code{trmm} (the other
-        factor copied, then multiplied in place: half the flops of
-        \code{gemm}).
-        The last product of a symmetric chain that is not $Z\T Z$
-        ($FPF\T$ with $P$ symmetric) is a \code{gemmtr}: one triangle,
-        half the flops, passed on like a \code{syrk} result (the Kalman
-        filter of \cref{sec:kalmanfilter} is 17\,\% faster with it).
-        With $P$ spd, $FPF\T$ can also be $W W\T$ with $W = FL$ and
-        $P = LL\T$ (Linnea's choice: potrf, \code{trmm} on a copy of $F$,
-        \code{syrk}; $n^3/3 + 2n^3$ instead of $3n^3$ flops for square
-        $F$).
-        Flops alone mislead here: potrf runs at a fraction of the rate of
-        gemm for small $n$ (on OpenBLAS with four threads on an Apple M5,
-        at $n = 1000$, 51 against 183\,GFLOP/s), and the Cholesky variant
-        of $FPF\T$ takes 1.3, 1.04, 0.83 and 0.79 times as long as
-        gemm/gemmtr for $n = 500$, 1000, 2000 and 4000.
+        (\code{make check}).
+  \item \emph{Largely done.} \code{ulm-lam-normalize}: products and sums
+        flattened, transposes pushed to the leaves (also through sums and
+        scales), double transposes, double inverses and scales of scales
+        folded, identity factors dropped.
+  \item \emph{Done for what kernel selection emits.} \code{ulm_lamk} in
+        destination-passing style, bufferization, the workspace and
+        \code{info}, and two lowerings (ulmBLAS, CBLAS/LAPACK).
+  \item \emph{Partly done.} \code{strategy=gmc}: gemm, gemv, solves,
+        Cholesky, LU and triangular factorisations, $Z\T Z$ by
+        \code{syrk}, \code{symm}/\code{symv} with stored triangles
+        tracked (\cref{sec:storage}), \code{trmm} for triangular factors,
+        \code{gemmtr} for the last product of a symmetric chain, and
+        $ASA\T$ with $S$ spd as $(AL)(AL)\T$ where that is faster.
+        The last rule showed that FLOPs mislead: potrf runs at a fraction
+        of the rate of gemm for small $n$ (51 against 183\,GFLOP/s at
+        $n = 1000$, OpenBLAS with four threads on an Apple M5), and the
+        Cholesky variant of $FPF\T$ takes 1.3, 1.04, 0.83 and 0.79 times
+        as long as gemm/gemmtr for $n = 500$, 1000, 2000 and 4000.
         Modelling potrf's efficiency as $n/(n + n_0)$ with $n_0 = 2400$
-        fits these measurements and makes the Cholesky variant the cheaper
-        one when $n + n_0 < 3m$ ($A$ $m\times n$ in $ASA\T$).
-        Kernel selection uses that condition, at run time when the sizes
-        are only known then (an \code{scf.if} with the gemm/gemmtr plan in
-        the other branch); the Kalman filter with $P$ asserted spd is as
-        fast as before for $n = 1000$ and 12\,\% faster for $n = 3000$.
-        The constant belongs to a measured cost model, which is future
-        work.
-        Missing:
-        the catalogue backend, so that new kernels are added as records,
-        and a fallback plan where a factorisation fails
-        (\cref{sec:info}).
-  \item \code{strategy=search}: sharing across products beyond reuse of
-        computed intervals, factorisation choices, anytime search; the LAMP
-        benchmark; a full Kalman filter (\cref{sec:kalman}).
+        fits these measurements; the rule is used when $n + n_0 < 3m$
+        ($A$ $m\times n$), at run time when the sizes are only known
+        then.
+        The Kalman filter of \cref{sec:kalmanfilter} is 17\,\% faster with
+        \code{gemmtr}, and with $P$ asserted spd another 12\,\% faster for
+        $n = 3000$.
   \item \emph{Done:} loop-aware selection: a loop-invariant prefix of a
         product is formed before the loop if the trip count, known at run
-        time, makes it pay off (the operator of \cref{sec:kalman}).
-        Open: invariant subchains other than a prefix, and a measured
-        instead of a fixed weight for matrix--vector flops.
-  \item \emph{Done for Python} (\cref{sec:python}): a frontend that
-        traces Python to \code{ulm_lam} IR, with a runtime and callbacks.
-        Open: \code{strategy=egraph} experiments; QR and $LDL\T$ once
-        ulmBLAS has them (\cref{sec:ulmblas}).
+        time, makes it pay off (\cref{sec:kalman}).
+  \item \emph{Done:} frontends for Python and Julia (\cref{sec:python,sec:julia}), Float64 and Float32, \code{@code_lam} and
+        \code{lib.f.code}, a notebook that runs in the browser.
 \end{enumerate}
 
-\paragraph{Next steps.}
+% =====================================================================
+\section{What is open}\label{sec:open}
+% =====================================================================
+
+The open points, grouped by the kind of work: what the problem is, and
+what solving it would take.
+
+\paragraph{Kernel selection.}
 \begin{enumerate}
-  \item \emph{Tests}: more \code{lit} tests, so that every rule of
-        kernel selection has one (the examples and the frontends' tests
-        check the whole pipeline numerically).
-  \item \emph{Kernels}: \code{symm} for a symmetric first factor of a
-        chain ($FP$ with $P$ symmetric), \code{ger} for rank-1 products,
-        and a measured cost model (the efficiency of each kernel as a
-        function of its sizes, measured once per machine and BLAS) in place
-        of flop counts and the constant of the Cholesky rule for $FPF\T$.
-  \item \emph{Reactant.jl and Enzyme-JAX}: their \code{enzymexla}
-        dialect has BLAS and LAPACK operations, and their ``raising''
-        recognises linear algebra in lower-level code.
-        ulm.lam's kernel selection could take its input from raising and
-        emit their operations instead of C++.
-  \item \emph{More showcases}: ridge regression, linear attention and the
-        Kalman filter are done (\cref{sec:showcases}).
-        Bayesian linear regression too, with run-time scalars on products
-        and scalar arithmetic.
-        Next: \code{gemmtr} for the symmetric products of the Kalman
-        filter.
-  \item \emph{PyTorch}: PyTorch maps every operation by itself onto
-        BLAS/LAPACK or cuBLAS/cuSOLVER, and \code{torch.compile} fuses
-        elementwise operations but does no linear algebra mapping
-        (\cite{tfpt} measures what is missing).
-        Steps: CPU tensors in and out of compiled functions without
-        copies (DLPack); a \code{torch.compile} backend that replaces the
-        linear algebra in the FX graphs (matrix chains, \code{inv},
-        \code{solve}, \code{cholesky}, also in the backward graph of
-        autograd) by functions generated by ulm.lam, with the expressions
-        of \cite{tfpt} as the showcase; and, separately, a GPU backend
-        (cuBLAS, cuSOLVER), where most PyTorch users compute (float32 is
-        done).
-  \item \emph{Mojo} (an idea, to be checked first): Mojo is a
-        Python-like language on MLIR whose strength is fast kernels
-        (GEMM and others), but which, as far as known here, does no
-        linear algebra mapping.
-        ulm.lam could serve it as a frontend (formulas written in Mojo,
-        the generated library called through Mojo's C interface; whether
-        Mojo programs can be traced like Python and Julia ones is open) or
-        use Mojo's kernels as a backend, like the CBLAS one (which LAPACK
-        functionality Mojo's libraries provide is open).
-  \item \emph{Linnea}: the problems of the examples are compared
-        (\cref{sec:status}, ``Compared with Linnea'').
-        Next from it: \code{gemmtr} and the factorisation trick for
-        $FPF\T$, \code{ger} for rank-1 products.
-  \item \emph{Linnea's 25 application problems and the LAMP benchmark}
-        (\url{https://github.com/HPAC/LAMP_benchmark}): run them through
-        ulm.lam and compare FLOPs and coverage per problem with Linnea.
-        That gives the precise list of missing rules, factorisations and
-        kernels, and the basis for \code{strategy=search}.
+  \item \emph{A measured cost model.}
+        Kernel selection compares FLOP counts, which mislead, as
+        $FPF\T$ shows (\cref{sec:status}, M4); the constant $n_0$ of that rule is
+        calibrated for one machine and one BLAS.
+        Needed: the rate of every kernel as a function of its sizes,
+        measured once per machine and BLAS and stored, and estimated time
+        in place of FLOPs, also in the decisions taken at run time.
+        The idea is ATLAS's~\cite{atlas}: R.~Clint Whaley's pioneering
+        automated empirical tuning measured on the target machine what
+        cannot be predicted.
+        ulm.lam would apply it one level higher, to the choice between
+        kernels instead of the code of one kernel.
+  \item \emph{Fallbacks, and a numerical analyst inside.}
+        If \code{assume(S, :spd)} is wrong, potrf fails and the call
+        returns its \code{info}.
+        A LAPACK user often wants the next method instead: Cholesky
+        first, LU or $LDL\T$ if it fails, and so on.
+        The compiler should have a Jim Demmel inside: someone who knows
+        that for problem $X$ one uses method $A$ first, that $A$ fails in
+        certain cases and one falls back to $B$, and that $B$ in turn can
+        fail in yet other ways.
+        A successful factorisation is not enough for that: LU can return
+        \code{info} $= 0$ and still be numerical nonsense for the
+        operation that follows (a large growth factor, a matrix close to
+        singular, the condition number squared by the normal equations).
+        So beyond \code{info}, a check mode, switched on by an attribute,
+        would follow every method by a corresponding error estimate (a
+        condition estimate such as \code{gecon}/\code{pocon}, the
+        backward error of the solution, iterative refinement) and decide
+        whether the numerical solution is acceptable, falling back if it
+        is not.
+        Needed: a second plan behind a factorisation (an \code{scf.if} on
+        its \code{info} or on the estimate, as for the plans chosen at
+        run time), the estimators as kernels, and the knowledge of which
+        method follows which, as rules.
+  \item \emph{More factorisations: QR and $LDL\T$.}
+        Least squares with an ill-conditioned $X$ should use QR instead of
+        the normal equations; symmetric indefinite matrices need $LDL\T$.
+        Needed: the kernels (\code{geqrf}, \code{ormqr}, \code{sytrf},
+        \code{sytrs}), rules and lowerings; the CBLAS backend can call
+        LAPACK directly.
+        A matter of time.
+  \item \emph{Search over whole programs} (\code{strategy=search}).
+        The current selection solves each product optimally (a
+        generalised matrix chain) but separately: it shares no
+        subexpressions across products beyond the reuse of computed
+        intervals and compares no factorisation choices across the
+        program.
+        Linnea~\cite{linnea-toms,linnea-thesis} by Henrik Barthels,
+        Christos Psarras and Paolo Bientinesi solves the Linear Algebra
+        Mapping Problem with a graph search over rewrites, and much of
+        ulm.lam's view of the problem comes from their work.
+        ulm.lam was started for two reasons.
+        First, FLENS-LAPACK, written by hand twenty years ago with blood,
+        sweat and tears, was such a mechanical task that the author wanted
+        to see a machine do it.
+        Second, to learn MLIR in a domain the author knows well but which
+        is outside the usual mapping onto an instruction set: here the
+        BLAS is the instruction set, just not a typical one.
+        Needed for the search: alternatives with costs over whole
+        programs, branch and bound, an anytime variant (the best plan
+        found by a deadline).
+  \item \emph{E-graphs} (\code{strategy=egraph}).
+        Normalisation and selection are rewrite patterns written by hand,
+        whose order matters.
+        Equality saturation~\cite{egg,egglog} keeps all equivalent forms
+        at once and extracts the cheapest at the end; in MLIR there are
+        first dialects for it~\cite{eqsat,dialegg}.
+        Needed: the algebra of \code{ulm_lam} as rules, extraction with
+        ulm.lam's cost model, a comparison with \code{strategy=gmc}.
+  \item \emph{A catalogue of kernels as data.}
+        The ODS contains a kernel catalogue as TableGen records, but
+        selection is written by hand kernel by kernel.
+        Needed: matching rules and costs generated from the records, so
+        that a new kernel is one record.
+  \item \emph{Inverses in the normal form}: $(AB)\inv = B\inv A\inv$ is
+        applied by kernel selection, not by normalisation, so other passes
+        do not see it.
 \end{enumerate}
 
-\paragraph{Open questions.}
+\paragraph{Evaluation.}
+\begin{enumerate}[resume]
+  \item \emph{The LAMP benchmark and Linnea's 25 application problems}
+        (\url{https://github.com/HPAC/LAMP_benchmark}): ulm.lam has been
+        compared with Linnea on its own examples only
+        (\cref{sec:status}, ``Compared with Linnea'').
+        Needed: the problems written for ulm.lam, coverage, FLOPs and
+        time per problem; the list of missing rules this produces.
+\end{enumerate}
+
+\paragraph{Usability and reach.}
+\begin{enumerate}[resume]
+  \item \emph{Installation by \code{Pkg.add}.}
+        Today LLVM/MLIR, the plugin and a C++ compiler are needed, which
+        keeps the notebook off services such as plutojl.org.
+        Needed: either JLL packages of the plugin and the MLIR tools
+        (BinaryBuilder), or no C++ step at all: lowering to the LLVM
+        dialect and compiling in the process with MLIR's ExecutionEngine.
+  \item \emph{Differentiation at the matrix level.}
+        The gradients of the training loop in \cref{sec:torch} are
+        written by hand.
+        A pass deriving them from the \code{ulm_lam} IR with the rules of
+        matrix calculus would let kernel selection optimise forward and
+        backward pass together, reusing factorisations of the forward
+        pass; structure that is invisible at the level of LLVM IR
+        (symmetry, factorisations) stays visible.
+  \item \emph{Reactant.jl and Enzyme-JAX.}
+        Their \code{enzymexla} dialect has BLAS and LAPACK operations, and
+        their ``raising'' recognises linear algebra in lower-level code.
+        Needed: a lowering from \code{ulm_lamk} to \code{enzymexla}, or
+        raising as the input of kernel selection.
+  \item \emph{PyTorch}: a \code{torch.compile} backend that replaces the
+        linear algebra of FX graphs (matrix chains, \code{inv},
+        \code{solve}, \code{cholesky}, also in the backward graph) by
+        functions generated by ulm.lam, with tensors passed without copies
+        (DLPack); the expressions of \cite{tfpt} as the showcase.
+  \item \emph{A GPU backend} (cuBLAS, cuSOLVER), where most machine
+        learning computes.
+  \item \emph{Smaller things}: \code{symm} for a symmetric first factor of
+        a chain ($FP$), \code{ger} for rank-1 products, invariant
+        subchains of a loop other than a prefix, the per-call overhead of
+        the Python runtime, a typed Julia wrapper per function, more
+        \code{lit} tests (one per rule of kernel selection).
+\end{enumerate}
+
+\paragraph{Further questions.}
 \begin{itemize}
-  \item Dynamic sizes: should the compiler use size hints or
-        multi-version code with run-time dispatch?
-  \item Cost model: FLOPs mispredict memory-bound kernels.
-        Measured per-kernel efficiency (\code{cost-model=measured}) is the
-        obvious next step.
+  \item Dynamic sizes: size hints, or multi-version code with run-time
+        dispatch beyond the plans generated today?
   \item Should storage formats (packed triangular, banded) become a second
         encoding dimension, or a separate type?
-  \item Batched and tensor contractions: should \code{ulm_lam} be
-        generalised, or interoperate with \code{linalg}?
+  \item Batched operations and tensor contractions: should \code{ulm_lam}
+        be generalised, or interoperate with \code{linalg}?
+  \item Mojo (an idea, unchecked): a language on MLIR with fast kernels
+        but, as far as known here, no linear algebra mapping; ulm.lam could
+        be its frontend or use its kernels as a backend.
 \end{itemize}
 
 % =====================================================================
@@ -3371,6 +3424,9 @@ A linear layer trained by gradient descent, compared with PyTorch (\cref{sec:sho
 \bibitem{dialegg} DialEgg: Dialect-agnostic MLIR optimizer using equality
   saturation with egglog. \emph{CGO}, 2025.
   \href{https://doi.org/10.1145/3696443.3708957}{doi:10.1145/3696443.3708957}.
+\bibitem{atlas} R.~C.~Whaley, A.~Petitet, J.~J.~Dongarra.
+  Automated empirical optimization of software and the ATLAS project.
+  \emph{Parallel Computing} 27(1--2), 2001.
 \bibitem{flens} M.~Lehn, A.~Stippler, K.~Urban.
   FLENS -- A flexible library for efficient numerical solutions.
   \emph{Proceedings of Equadiff 11}, 2005.

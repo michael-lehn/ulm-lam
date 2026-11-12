@@ -261,10 +261,35 @@ showcases torch` runs the Python showcases.
 | `python/examples/`, `julia/examples/` | the showcases |
 | `doc/` | the design document |
 
+## What is open
+
+In detail in the [design document](doc/ulm-lam.pdf), section "What is
+open":
+
+- **Kernel selection.** A measured cost model instead of flop counts
+  (the idea of ATLAS: measure on the machine what cannot be predicted);
+  fallbacks when a method fails, and a check mode that estimates the error
+  of a result (a factorisation with `info = 0` can still be useless for
+  what follows); QR and LDLᵀ; a search over whole programs, as Linnea
+  does; e-graphs; kernels described as data.
+- **Evaluation.** The LAMP benchmark and Linnea's application problems.
+- **Usability and reach.** `Pkg.add` without a local LLVM/MLIR and C++
+  compiler; differentiation at the matrix level; a connection to
+  Reactant.jl/Enzyme-JAX; a `torch.compile` backend; a GPU backend.
+
 ## Background
 
-ulm.lam is the compiler that [FLENS](https://github.com/michael-lehn/FLENS)
-needed.  FLENS gave C++ a mathematical notation for linear algebra, and its
-LAPACK reimplementation, FLENS-LAPACK (verified bit for bit against
-LAPACK), was written by mapping formulas onto BLAS calls by hand.  ulm.lam
-does that mapping automatically.
+ulm.lam was started for two reasons.  The first is
+[FLENS](https://github.com/michael-lehn/FLENS): it gave C++ a mathematical
+notation for linear algebra, and its LAPACK reimplementation, FLENS-LAPACK
+(verified bit for bit against LAPACK), was written twenty years ago by
+mapping formulas onto BLAS calls by hand, with blood, sweat and tears.  The
+work was so mechanical that I wanted to see a machine do it.  The second is
+to learn MLIR in a domain I know well but which is outside the usual
+mapping onto an instruction set: here the BLAS is the instruction set,
+just not a typical one.
+
+Much of ulm.lam's view of the problem comes from
+[Linnea](https://github.com/HPAC/linnea) (Henrik Barthels, Christos
+Psarras, Paolo Bientinesi), which solves the Linear Algebra Mapping
+Problem by a graph search.
