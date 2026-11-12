@@ -236,7 +236,8 @@ Environment: `LLVM_PREFIX` (default `brew --prefix llvm`), `ULM_LAM_BACKEND`
 ## Development
 
 `make` builds and checks everything: the ODS (Operation Definition
-Specification) files, the plugin, the hand-written design stages, the
+Specification) files, the plugin, `ulm-lam-opt` and the pass tests
+(`make check`: lit and FileCheck, `test/`), the hand-written design stages, the
 examples in `examples/` (each against an independent evaluation; their
 generated C++ is kept in `examples/*/generated/`), the Python tests, the
 Julia tests and examples, and the document (LuaLaTeX).  `make gp
@@ -246,6 +247,8 @@ showcases torch` runs the Python showcases.
 |---|---|
 | `include/ulm_lam/*.td` | ODS of the `ulm_lam` and `ulm_lamk` dialects, interfaces, passes, the kernel catalogue |
 | `lib/` | the mlir-opt plugin: both dialects, normalisation, property inference, kernel selection, workspace, info, lowering to EmitC |
+| `tools/ulm-lam-opt.cpp` | `ulm-lam-opt`: mlir-opt with the ulm.lam dialects and passes (`build/bin/`) |
+| `test/` | lit/FileCheck tests of the passes: normalisation, property inference, kernel selection, lowering |
 | `scripts/ulm-lam-compile.sh` | the pipeline from `ulm_lam` to C++ (keeps every stage) |
 | `include/ulm_lam/cblas_backend.h` | the CBLAS/LAPACK backend of the generated code |
 | `julia/UlmLam/` | the Julia frontend (`@lam`, `@code_lam`) and runtime |

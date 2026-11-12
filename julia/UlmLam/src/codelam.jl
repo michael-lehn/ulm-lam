@@ -304,6 +304,18 @@ function render_once(f::LamFunction, body, choice, flags, infos)
             inv = dispinv(r, a, t ⊻ fb)
             rhs = (left ⊻ fb) ? "$al$inv $old" : "$al$old $inv"
             emit!(r, d, op, "$b ← $rhs")
+        elseif op == "trmm"
+            a = ins[1]
+            t = T(attr(line, "trans"))
+            ov = val(r, out)
+            b, fb = result!(r, k, res, out)
+            old = ov[1] * ((ov[2] ⊻ fb) && !(ov[1] in r.sym) ? "ᵀ" : "")
+            al = coef(r, operands(line, "alpha")[1])
+            left = attr(line, "side") != "right"
+            # B_ir ← op(A) B_ir; with B_ir = Bᵀ that is B ← B op(A)ᵀ
+            fa = disp(r, a, t ⊻ fb)
+            emit!(r, d, "trmm", "$b ← $al" * ((left ⊻ fb) ? "$fa $old" : "$old $fa"),
+                  "$(name(r, a)) triangular")
         elseif op == "gecopy"
             src = ins[1]
             b, fb = result!(r, k, res, out)

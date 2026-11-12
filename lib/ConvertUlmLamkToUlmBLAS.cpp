@@ -671,6 +671,29 @@ ULM_LAMK_LOWERING(TrsmLowering, lk::TrsmOp)
                        : "ulmBLAS::trusm" kIndexType);
 }
 
+// B := alpha op(A) B (left) or alpha B op(A) (right), A triangular
+ULM_LAMK_LOWERING(TrmmLowering, lk::TrmmOp)
+{
+    bool trans = o.getTrans() == lk::Trans::trans;
+    bool left = o.getSide() == lk::Side::left;
+    // right: B op(A) = (op(A)^T B^T)^T, a left product on transposed views
+    bool t = left ? trans : !trans;
+    View A = view(rw, o.getA(), t), B = view(rw, o.getB(), !left);
+    bool lower = (o.getUplo() == lk::Uplo::lower) != t;
+    return Args{rw}
+        .dim(B.rows)
+        .dim(B.cols)
+        .op(a.getAlpha())
+        .flag(false)
+        .flag(o.getDiag() == lk::Diag::unit)
+        .op(a.getA())
+        .strides(A)
+        .op(a.getB())
+        .strides(B)
+        .call(o, lower ? "ulmBLAS::trlmm" kIndexType
+                       : "ulmBLAS::trumm" kIndexType);
+}
+
 // x := op(A)^-1 x
 ULM_LAMK_LOWERING(TrsvLowering, lk::TrsvOp)
 {
@@ -1040,7 +1063,7 @@ struct ConvertUlmLamkToUlmBLAS
     Option<std::string> backend{
         *this, "backend",
         llvm::cl::desc("ulmblas (default) | cblas: the same calls on CBLAS "
-                       "and LAPACK via include/ulm_lam/cblas_backend.h"),
+	               "and LAPACK via include/ulm_lam/cblas_backend.h"),
         llvm::cl::init("ulmblas")};
 
     StringRef
@@ -1134,14 +1157,14 @@ struct ConvertUlmLamkToUlmBLAS
 	});
 
 	RewritePatternSet patterns(ctx);
-	patterns.add<AllocLowering, DeallocLowering, CopyLowering, ViewLowering,
-	             CastLowering, LoadLowering, StoreLowering,
-	             IndexAndLowering, IndexMaxSILowering, GemmLowering, SymmLowering, SymvLowering,
-	             SycompleteLowering, SyrkLowering, GemvLowering,
-	             TrsmLowering, TrsvLowering, GeaxpyLowering, GescalLowering,
-	             AdddiagLowering, GecopyLowering,
-	             PotrfLowering, GetrfLowering, GetrsLowering, CallLowering>(
-	    tc, ctx);
+	patterns
+	    .add<AllocLowering, DeallocLowering, CopyLowering, ViewLowering,
+	         CastLowering, LoadLowering, StoreLowering, IndexAndLowering,
+	         IndexMaxSILowering, GemmLowering, SymmLowering, SymvLowering,
+	         SycompleteLowering, SyrkLowering, GemvLowering, TrsmLowering,
+	         TrmmLowering, TrsvLowering, GeaxpyLowering, GescalLowering,
+	         AdddiagLowering, GecopyLowering, PotrfLowering, GetrfLowering,
+	         GetrsLowering, CallLowering>(tc, ctx);
 	populateArithToEmitCPatterns(tc, patterns);
 	populateSCFToEmitCConversionPatterns(patterns, tc);
 	populateFuncToEmitCPatterns(tc, patterns, /*lowerToCpp=*/true);
@@ -1160,7 +1183,8 @@ struct ConvertUlmLamkToUlmBLAS
 	for (bool erased = true; erased;) {
 	    erased = false;
 	    module.walk([&](Operation *op) {
-		if (isa<emitc::CastOp, emitc::ConstantOp, arith::ConstantOp>(op) &&
+		if (isa<emitc::CastOp, emitc::ConstantOp, arith::ConstantOp>(
+		        op) &&
 		    op->use_empty()) {
 		    op->erase();
 		    erased = true;
@@ -1188,8 +1212,8 @@ struct ConvertUlmLamkToUlmBLAS
 	auto include = [&](StringRef h) {
 	    emitc::IncludeOp::create(b, loc, h, /*is_standard=*/true);
 	};
-	for (StringRef h : {"cstddef", "cstdint", "cstdio", "cstdlib",
-	                    "cstring"})
+	for (StringRef h :
+	     {"cstddef", "cstdint", "cstdio", "cstdlib", "cstring"})
 	    include(h);
 	if (cblasBackend) {
 	    include("ulm_lam/cblas_backend.h");

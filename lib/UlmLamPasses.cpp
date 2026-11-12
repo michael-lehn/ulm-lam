@@ -1313,6 +1313,44 @@ class Selector
 	                              constant(elt, beta, loc), dest)
 	        ->getResult(0);
 	}
+	// a triangular factor (lower_tri / upper_tri): the other factor copied
+	// into dest, then trmm in place (half the flops of gemm); trmm cannot
+	// accumulate, so only for beta = 0
+	if (beta == 0) {
+	    auto tri = [&](const Leaf &x) -> int {
+		if (x.kind != Leaf::Mat || x.stored != Leaf::Full)
+		    return 0;
+		auto ty = cast<RankedTensorType>(x.v.getType());
+		Properties p = closure(propertiesOf(ty), ty.getShape());
+		if (bitEnumContainsAll(p, Properties::lower_tri))
+		    return 1;
+		if (bitEnumContainsAll(p, Properties::upper_tri))
+		    return 2;
+		return 0;
+	    };
+	    int tl = tri(l), tr = tri(r);
+	    if (tl || tr) {
+		bool left = tl != 0;
+		const Leaf &a = left ? l : r, &g = left ? r : l;
+		auto ty = cast<RankedTensorType>(a.v.getType());
+		bool unit =
+		    bitEnumContainsAll(closure(propertiesOf(ty), ty.getShape()),
+		                       Properties::unit_diag);
+		Value d =
+		    lk::GecopyOp::create(b, loc, TypeRange{dest.getType()},
+		                         t(g.trans), g.v, dest)
+		        ->getResult(0);
+		return lk::TrmmOp::create(
+		           b, loc, TypeRange{d.getType()},
+		           left ? lk::Side::left : lk::Side::right,
+		           (left ? tl : tr) == 1 ? lk::Uplo::lower
+			                         : lk::Uplo::upper,
+		           t(a.trans),
+		           unit ? lk::Diag::unit : lk::Diag::non_unit,
+		           alphaOf(), a.v, d)
+		    ->getResult(0);
+	    }
+	}
 	if (isVector(r.cols()) && !r.trans)
 	    return lk::GemvOp::create(b, loc, TypeRange{dest.getType()},
 	                              t(l.trans), alphaOf(), l.v, r.v,

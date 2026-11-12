@@ -3067,8 +3067,10 @@ and arguments that are silently destroyed.
 \begin{enumerate}[label=M\arabic*]
   \item \emph{Largely done.} Dialects, verifiers, property closure and
         inference.
-        Missing: a \code{ulm-lam-opt} tool and \code{lit} tests in place
-        of the scripts (with GNU Make, as the rest of the build).
+        \code{ulm-lam-opt} (\file{tools/ulm-lam-opt.cpp}, mlir-opt with
+        the ulm.lam dialects and passes, linked against the plugin) and
+        \code{lit}/\code{FileCheck} tests of the passes in \file{test/}
+        (\code{make check}, driven by GNU Make, \code{lit} from PyPI).
   \item \emph{Largely done.} \code{ulm-lam-normalize} flattens products
         and sums, pushes transposes to the leaves ($(AB)\T = B\T A\T$,
         also for sums and scales), folds double transposes and inverses
@@ -3078,14 +3080,17 @@ and arguments that are silently destroyed.
         Open: inverses pushed to the leaves already in the normal form,
         so that other passes see them.
   \item \emph{Done for what kernel selection emits.} \code{ulm_lamk} with DPS,
-        bufferization and the ulmBLAS lowering.
-        Missing: the lowering of \code{trmm}.
+        bufferization and the ulmBLAS and CBLAS lowerings, \code{trmm}
+        included.
   \item \emph{Partly done.} \code{strategy=gmc} with gemm, gemv, solves,
         factorisations and $Z\T Z$.
         \code{syrk} and \code{symm}/\code{symv} with triangles tracked
         (\cref{sec:storage}).
+        A triangular factor of a product is a \code{trmm} (the other
+        factor copied, then multiplied in place: half the flops of
+        \code{gemm}).
         Missing: \code{gemmtr} for symmetric products that are not
-        $Z\T Z$, triangular matrices stored as one triangle (\code{trmm}),
+        $Z\T Z$,
         the catalogue backend, so that new kernels are added as records,
         and a fallback plan where a factorisation fails
         (\cref{sec:info}).
@@ -3105,12 +3110,13 @@ and arguments that are silently destroyed.
 
 \paragraph{Next steps.}
 \begin{enumerate}
-  \item \emph{Build and tests}: a \code{ulm-lam-opt} tool and
-        \code{lit}/\code{FileCheck} tests of the passes, driven by GNU
-        Make.
-  \item \emph{Kernels}: \code{trmm} for products with triangular
-        matrices (stored as one triangle), \code{gemmtr} for symmetric
-        products that are not $Z\T Z$, \code{ger} for rank-1 products.
+  \item \emph{Tests}: more \code{lit} tests, so that every rule of
+        kernel selection has one (the examples and the frontends' tests
+        check the whole pipeline numerically).
+  \item \emph{Kernels}: \code{gemmtr} for symmetric products that are
+        not $Z\T Z$, \code{ger} for rank-1 products, \code{trmm} for
+        triangular factors that are computed (factors of a factorisation)
+        and not only parameters.
   \item \emph{Reactant.jl and Enzyme-JAX}: their \code{enzymexla}
         dialect has BLAS and LAPACK operations, and their ``raising''
         recognises linear algebra in lower-level code.

@@ -80,6 +80,12 @@ void ULM_LAM_SYM(cblas_dsyrk)(int, int, int, ulm_lam_blasint, ulm_lam_blasint,
 void ULM_LAM_SYM(cblas_ssyrk)(int, int, int, ulm_lam_blasint, ulm_lam_blasint,
                               float, const float *, ulm_lam_blasint, float,
                               float *, ulm_lam_blasint);
+void ULM_LAM_SYM(cblas_dtrmm)(int, int, int, int, int, ulm_lam_blasint,
+                              ulm_lam_blasint, double, const double *,
+                              ulm_lam_blasint, double *, ulm_lam_blasint);
+void ULM_LAM_SYM(cblas_strmm)(int, int, int, int, int, ulm_lam_blasint,
+                              ulm_lam_blasint, float, const float *,
+                              ulm_lam_blasint, float *, ulm_lam_blasint);
 void ULM_LAM_SYM(cblas_dtrsm)(int, int, int, int, int, ulm_lam_blasint,
                               ulm_lam_blasint, double, const double *,
                               ulm_lam_blasint, double *, ulm_lam_blasint);
@@ -258,6 +264,20 @@ syrk(ulm_lam_blasint o, ulm_lam_blasint u, ulm_lam_blasint t, ulm_lam_blasint n,
      float *C, ulm_lam_blasint ldc)
 {
     ULM_LAM_SYM(cblas_ssyrk)(o, u, t, n, k, al, A, lda, be, C, ldc);
+}
+inline void
+trmm(ulm_lam_blasint o, ulm_lam_blasint s, ulm_lam_blasint u, ulm_lam_blasint t,
+     ulm_lam_blasint d, ulm_lam_blasint m, ulm_lam_blasint n, double al,
+     const double *A, ulm_lam_blasint lda, double *B, ulm_lam_blasint ldb)
+{
+    ULM_LAM_SYM(cblas_dtrmm)(o, s, u, t, d, m, n, al, A, lda, B, ldb);
+}
+inline void
+trmm(ulm_lam_blasint o, ulm_lam_blasint s, ulm_lam_blasint u, ulm_lam_blasint t,
+     ulm_lam_blasint d, ulm_lam_blasint m, ulm_lam_blasint n, float al,
+     const float *A, ulm_lam_blasint lda, float *B, ulm_lam_blasint ldb)
+{
+    ULM_LAM_SYM(cblas_strmm)(o, s, u, t, d, m, n, al, A, lda, B, ldb);
 }
 inline void
 trsm(ulm_lam_blasint o, ulm_lam_blasint s, ulm_lam_blasint u, ulm_lam_blasint t,
@@ -501,6 +521,41 @@ trsm(bool lower, I m, I n, T alpha, bool unitDiag, const T *A, I incRowA,
     else // X^T op(A)^T = B^T
 	detail::trsm(ColMajor, Right, u, flip(a.trans()), d, n, m, alpha, A,
 	             a.ld, B, b.ld);
+}
+
+// B := alpha A B, A m x m lower or upper triangular, B m x n
+template <typename I, typename T>
+void
+trmm(bool lower, I m, I n, T alpha, bool unitDiag, const T *A, I incRowA,
+     I incColA, T *B, I incRowB, I incColB)
+{
+    using namespace detail;
+    Op a = orient(m, m, incRowA, incColA), b = orient(m, n, incRowB, incColB);
+    int u = (lower == a.col) ? Lower : Upper; // triangle of the array
+    int d = unitDiag ? Unit : NonUnit;
+    if (b.col)
+	detail::trmm(ColMajor, Left, u, a.trans(), d, m, n, alpha, A, a.ld, B,
+	             b.ld);
+    else // B^T := B^T op(A)^T
+	detail::trmm(ColMajor, Right, u, flip(a.trans()), d, n, m, alpha, A,
+	             a.ld, B, b.ld);
+}
+
+template <typename I, typename T>
+void
+trlmm(I m, I n, T alpha, bool, bool unitDiag, const T *A, I incRowA, I incColA,
+      T *B, I incRowB, I incColB)
+{
+    trmm(true, m, n, alpha, unitDiag, A, incRowA, incColA, B, incRowB, incColB);
+}
+
+template <typename I, typename T>
+void
+trumm(I m, I n, T alpha, bool, bool unitDiag, const T *A, I incRowA, I incColA,
+      T *B, I incRowB, I incColB)
+{
+    trmm(false, m, n, alpha, unitDiag, A, incRowA, incColA, B, incRowB,
+         incColB);
 }
 
 template <typename I, typename T>

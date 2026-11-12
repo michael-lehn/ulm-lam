@@ -31,6 +31,16 @@ using UlmLam, LinearAlgebra, Random, Test
     @test rel(rb_i(A, y), A * y + 2y) < 1e-12
     @lam rb_dot(x::Vec(:n), y::Vec(:n)) = dot(x, y)
     @test rb_dot(y, y)[1] ≈ dot(y, y)
+    # triangular factors: trmm (left, right, transposed, unit diagonal)
+    Lt = tril(randn(40, 40)) + 40I; Bt = randn(40, 5); Ct = randn(5, 40)
+    @lam rb_trl(L::Mat(:n, :n, :lower_tri), B::Mat(:n, :m)) = L * B
+    @test rel(rb_trl(Lt, Bt), Lt * Bt) < 1e-12
+    @lam rb_trr(C::Mat(:m, :n), U::Mat(:n, :n, :upper_tri)) = 2 * C * U'
+    @test rel(rb_trr(Ct, triu(Lt')), 2 * Ct * triu(Lt')') < 1e-12
+    @lam rb_tru(L::Mat(:n, :n, :lower_tri, :unit_diag), B::Mat(:n, :m)) = L * B
+    Lg = tril(randn(40, 40), -1) + 5I    # the stored diagonal is not used
+    @test rel(rb_tru(Lg, Bt), (tril(Lg, -1) + I) * Bt) < 1e-12
+    @test occursin("trmm", string(@code_lam rb_trl(Lt, Bt)))
     # clear errors
     @lam rb_tr(A::Mat(:n, :n)) = tr(A)
     @test_throws LamError rb_tr(A)

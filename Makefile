@@ -1,14 +1,21 @@
 # ULMBLAS_DIR (default ~/git/ulmBLAS) and ARCHFLAGS (default -mcpu=native)
 # select ulmBLAS and its micro kernels, see scripts/ulmblas-env.sh.
-.PHONY: all ods plugin stages loop gls kalman compose cases dynamic gp showcases torch python julia doc clean
+.PHONY: all ods plugin tool check stages loop gls kalman compose cases dynamic gp showcases torch python julia doc clean
 
-all: ods plugin stages loop gls kalman compose cases dynamic python julia doc
+all: ods plugin check stages loop gls kalman compose cases dynamic python julia doc
 
 ods:            ## run all mlir-tblgen backends on the dialect sketch
 	scripts/check-ods.sh
 
 plugin:         ## build the mlir-opt plugin: dialects + passes (lib/*.cpp)
 	scripts/build-plugin.sh
+
+tool:           ## build ulm-lam-opt (tools/ulm-lam-opt.cpp): mlir-opt with ulm.lam's dialects and passes
+	scripts/build-tool.sh
+
+check: tool     ## the pass tests in test/ (lit, FileCheck; lit from PyPI into build/venv-lit)
+	@test -x build/venv-lit/bin/lit || (python3 -m venv build/venv-lit && build/venv-lit/bin/pip install -q lit)
+	build/venv-lit/bin/lit -sv test
 
 stages:         ## GLS stages 1-4 parse/verify; stage 3 bufferizes as stage 4 predicts
 	scripts/check-stages.sh
