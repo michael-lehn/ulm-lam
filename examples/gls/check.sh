@@ -15,7 +15,8 @@ fail=0
 check() { if eval "$2"; then echo "ok    $1"; else echo "FAIL  $1"; fail=1; fi; }
 check "two Cholesky factorisations, no LU" '[ "$(n ulm_lamk.potrf "$SEL")" = 2 ] && [ "$(n ulm_lamk.getrf "$SEL")" = 0 ]'
 check "one trsm (W = L^-1 X)" '[ "$(n ulm_lamk.trsm "$SEL")" = 1 ]'
-check "S = W^T W from W itself" 'grep "ulm_lamk.gemm" "$SEL" | grep -qE "trans_a\(trans\).*ins\((%[0-9]+), \1 "'
+w=$(grep -oE "ulm_lamk.syrk uplo\(lower\) trans\(trans\).*ins\(%[0-9]+" "$SEL" | grep -oE "%[0-9]+$" || true)
+check "S = W^T W by syrk (one triangle) from W = L^-1 X ($w)" '[ -n "$w" ] && grep -qE "^ *$w = ulm_lamk.trsm" "$SEL"'
 check "W reused for W^T z: three trsv (one with L, two with K)" '[ "$(n ulm_lamk.trsv "$SEL")" = 3 ]'
 check "no ulm_lam op left" '! grep -q "ulm.lam\.\(mul\|add\|transpose\|inverse\)" "$SEL"'
 check "three copies (M, X, y)" '[ "$(n memref.copy "$BUF")" = 3 ]'

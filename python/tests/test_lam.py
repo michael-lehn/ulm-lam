@@ -455,6 +455,34 @@ class Storage(unittest.TestCase):
     def test_interface_names_the_triangle(self):
         self.assertIn("lower triangle", self.lib.left.cpp)
 
+    def test_syrk_results(self):
+        """X^T X is computed by syrk (one triangle); the result is completed
+        where the whole matrix is needed (returned, summed), used by symm
+        in a product and by potrf directly."""
+        n, k = self.n, self.k
+
+        @lam.function
+        def gram(X: Matrix(n, k)):
+            return X.T @ X
+
+        @lam.function
+        def gram_use(X: Matrix(n, k, "full_rank"), Y: Matrix(k, 5)):
+            S = X.T @ X
+            return S @ Y, S.inv @ Y, S + S
+
+        lib = lam.compile([gram, gram_use], name="syrk")
+        X = self.rng.uniform(-1, 1, (n, k))
+        Y = self.rng.uniform(-1, 1, (k, 5))
+        S = X.T @ X
+        self.check(lib.gram(X), S)
+        a, b, c = lib.gram_use(X, Y)
+        self.check(a, S @ Y)
+        self.check(b, np.linalg.solve(S, Y))
+        self.check(c, 2 * S)
+        self.assertIn("sylrk", lib.gram.cpp)
+        self.assertNotIn("gemm", lib.gram.cpp)
+        self.assertIn("sylmm", lib.gram_use.cpp)
+
     def test_stored_needs_symmetric(self):
         with self.assertRaises(LamError):
             Matrix(4, 4, stored="lower")

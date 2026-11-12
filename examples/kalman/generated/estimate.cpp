@@ -66,9 +66,8 @@ estimate(double *v1, double *v2, size_t v3, int8_t *v4, int64_t *v5)
 		memcpy(v28, v1, 3200000);
 		ulmBLAS::trlsm<std::ptrdiff_t>(2000, 200, v7, false, false, v19,
 		                               2000, 1, v28, 200, 1);
-		ulmBLAS::gemm<std::ptrdiff_t>(200, 200, 2000, v7, false, v28, 1,
-		                              200, false, v28, 200, 1, v8, v26,
-		                              200, 1);
+		ulmBLAS::sylrk<std::ptrdiff_t>(200, 2000, v7, v28, 1, 200, v8,
+		                               v26, 200, 1);
 		int64_t v29 =
 		    ulmBLAS::potrf<std::ptrdiff_t>(true, 200, v26, 200, 1);
 		int64_t v30 = v29 != v9 ? 2 : v9;

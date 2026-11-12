@@ -61,9 +61,8 @@ gls_inout(double *v1, double *v2, double *v3, double *v4, int8_t *v5,
 		memcpy(v27, v1, 3200000);
 		ulmBLAS::trlsm<std::ptrdiff_t>(2000, 200, v8, false, false, v2,
 		                               2000, 1, v27, 200, 1);
-		ulmBLAS::gemm<std::ptrdiff_t>(200, 200, 2000, v8, false, v27, 1,
-		                              200, false, v27, 200, 1, v9, v25,
-		                              200, 1);
+		ulmBLAS::sylrk<std::ptrdiff_t>(200, 2000, v8, v27, 1, 200, v9,
+		                               v25, 200, 1);
 		int64_t v28 =
 		    ulmBLAS::potrf<std::ptrdiff_t>(true, 200, v25, 200, 1);
 		int64_t v29 = v28 != v10 ? 2 : v10;

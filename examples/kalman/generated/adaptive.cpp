@@ -84,9 +84,8 @@ estimate_adaptive(double *v1, double *v2, size_t v3, int8_t *v4, int64_t *v5)
 			ulmBLAS::trlsm<std::ptrdiff_t>(2000, 200, v7, false,
 			                               false, v21, 2000, 1, v27,
 			                               200, 1);
-			ulmBLAS::gemm<std::ptrdiff_t>(200, 200, 2000, v7, false,
-			                              v27, 1, 200, false, v27,
-			                              200, 1, v8, v25, 200, 1);
+			ulmBLAS::sylrk<std::ptrdiff_t>(200, 2000, v7, v27, 1,
+			                               200, v8, v25, 200, 1);
 			int64_t v39 = ulmBLAS::potrf<std::ptrdiff_t>(
 			    true, 200, v25, 200, 1);
 			int64_t v40 = v39 != v9 ? 2 : v9;

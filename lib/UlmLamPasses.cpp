@@ -307,7 +307,14 @@ class Selector
 	// Other uses (return, calls, loops) get the whole matrix: the storage
 	// of a matrix ends with the ops that know it.
 	SmallVector<OpOperand *> uses;
+	// (Also an ulm_lam.assume to a type without the storage: it would
+	// drop it.)
 	func.walk([&](Operation *op) {
+	    if (auto as = dyn_cast<AssumeOp>(op)) {
+		if (storageOf(as.getOperand()) && !storageOf(as.getResult()))
+		    uses.push_back(&as->getOpOperand(0));
+		return;
+	    }
 	    if (isUlmLamOp(op) || isa<lk::UlmLamkDialect>(op->getDialect()))
 		return;
 	    for (OpOperand &o : op->getOpOperands())
@@ -397,6 +404,9 @@ class Selector
     }
 
     // ---- storage -----------------------------------------------------------
+
+    /// Kernel results of which only the lower triangle is computed (syrk).
+    llvm::SmallPtrSet<Value, 4> lowerOnly;
 
     /// Completed (full) versions of matrices stored as one triangle.
     llvm::DenseMap<Value, Value> completed;
@@ -736,7 +746,9 @@ class Selector
 			mirror = L[i + t].isTransposeOf(L[j - t]);
 		    if (mirror && c.cost[h][j] < kInf) {
 			double zr = costSize(L[h].rows());
-			double cost = c.cost[h][j] + 2 * n * zr * n;
+			// syrk: one triangle, n^2 zr (as a gemm where the
+			// result must be complete, see emitKernels)
+			double cost = c.cost[h][j] + n * zr * n;
 			if (cost < c.cost[i][j]) {
 			    c.cost[i][j] = cost;
 			    c.choice[i][j] = {Choice::Gram, h};
@@ -854,8 +866,9 @@ class Selector
          Location loc)
     {
 	Value r = emitKernels(c, i, j, dest, alpha, beta, loc);
-	// a plain product: remember it for later products
-	if (alpha == 1 && beta == 0 &&
+	// a plain product: remember it for later products (not one triangle:
+	// later products read the whole matrix)
+	if (alpha == 1 && beta == 0 && !lowerOnly.contains(r) &&
 	    (!dest || dest.getDefiningOp<tensor::EmptyOp>()))
 	    computed[keyOf(c.leaves, i, j, false)] = r;
 	return r;
@@ -873,6 +886,29 @@ class Selector
 	                alpha, beta, loc);
 	case Choice::Gram: {
 	    Leaf z = operand(c, s, j, loc);
+	    // the whole product into a new matrix: syrk computes one triangle
+	    // (half the flops of gemm); the result is passed on as stored in
+	    // its lower triangle (lower_stored, see replace)
+	    bool top = i == 0 && j + 1 == static_cast<int>(c.leaves.size());
+	    if (top && beta == 0 && z.stored == Leaf::Full &&
+	        (!dest || dest.getDefiningOp<tensor::EmptyOp>())) {
+		Type elt = elementType(z.v);
+		if (!dest) {
+		    Leaf zt = z;
+		    zt.trans = !z.trans;
+		    dest = empty(zt, z, elt, loc);
+		}
+		// C = alpha op(A) op(A)^T with op(A) = Z^T
+		Value r = lk::SyrkOp::create(b, loc, TypeRange{dest.getType()},
+		                             lk::Uplo::lower,
+		                             z.trans ? lk::Trans::none
+		                                     : lk::Trans::trans,
+		                             constant(elt, alpha, loc), z.v,
+		                             constant(elt, 0, loc), dest)
+		              ->getResult(0);
+		lowerOnly.insert(r);
+		return r;
+	    }
 	    Leaf zt = z;
 	    zt.trans = !z.trans;
 	    return gemm(zt, z, dest, alpha, beta, loc);
@@ -1000,6 +1036,9 @@ class Selector
     replace(Operation *op, Value v)
     {
 	Type t = op->getResult(0).getType();
+	if (lowerOnly.contains(v)) // only the lower triangle is computed
+	    t = withProperties(cast<RankedTensorType>(t),
+	                       propertiesOf(t) | Properties::lower_stored);
 	if (v.getType() != t) {
 	    b.setInsertionPoint(op);
 	    v = AssumeOp::create(b, op->getLoc(), t, v, false);
