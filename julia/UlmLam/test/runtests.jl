@@ -69,7 +69,7 @@ end
 const ALL = [gls, gls_static, left_spd, left_lu, right_lu, chain, two, estimate,
              accumulate, gp, blr, overwrite]
 
-for backend in (:ulmblas, :cblas)
+for backend in (:julia, :ulmblas, :cblas)
     lib = UlmLam.compile(ALL; name="jltest_$backend", backend=backend)
     @testset "$backend" begin
         @testset "GLS" begin
@@ -155,4 +155,14 @@ end
     @test_throws LamError Mat(3, 3, :spdd)
     @lam bad(A::Mat(3, 4), B::Mat(3, 4)) = A * B
     @test_throws LamError UlmLam.lam_module([bad])
+end
+
+@testset "code_lam" begin
+    @lam cl_gls(X::Mat(:n, :m, :full_rank), M::Mat(:n, :n, :spd), y::Vec(:n)) =
+        inv(X' * inv(M) * X) * X' * inv(M) * y
+    t = string(@code_lam cl_gls(X, M, y))
+    @test occursin("potrf    L1 ← chol(M)", t)
+    @test occursin("syrk", t) && occursin("trsv", t)
+    @test !occursin("%", t)
+    @test occursin("Cholesky factorisation of M", t)
 end

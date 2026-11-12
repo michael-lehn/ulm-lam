@@ -15,9 +15,12 @@
 #   * results: allocated here and returned;
 #   * the workspace: queried and allocated here, 64-byte aligned, reused.
 #
+# Backends: :julia (default) calls Julia's BLAS and LAPACK through
+# libblastrampoline (OpenBLAS, or ulmBLAS after UlmBLAS.forward()), :ulmblas
+# the header-only ulmBLAS (ULMBLAS_DIR), :cblas a CBLAS/LAPACK library
+# (ULM_LAM_BLAS_LIBS, default Homebrew's OpenBLAS).
 # Environment: LLVM_PREFIX, ULMBLAS_DIR (default ~/git/ulmBLAS), ARCHFLAGS
-# (default -mcpu=native), CXX (default c++), OPENMP (0: without),
-# ULM_LAM_BLAS_LIBS (link flags of backend=:cblas, default OpenBLAS).
+# (default -mcpu=native), CXX (default c++), OPENMP (0: without).
 
 const ROOT = normpath(joinpath(@__DIR__, "..", "..", ".."))
 
@@ -41,8 +44,17 @@ function openmp_flags()
      "-L$omp/lib", "-Wl,-rpath,$omp/lib", "-lomp"]
 end
 
+"""The libblastrampoline Julia has loaded (its BLAS: OpenBLAS by default, or
+whatever it forwards to, e.g. ulmBLAS after UlmBLAS.forward())."""
+lbt_path() = Libdl.dlpath(LinearAlgebra.BLAS.libblastrampoline)
+
 function cxx_flags(backend::Symbol)
     arch = split(get(ENV, "ARCHFLAGS", "-mcpu=native"))
+    if backend == :julia
+        lbt = lbt_path()
+        return ["-std=c++17", "-O3", arch..., "-I", joinpath(ROOT, "include"),
+                "-DULM_LAM_CBLAS_ILP64", lbt, "-Wl,-rpath," * dirname(lbt)]
+    end
     if backend == :cblas
         libs = haskey(ENV, "ULM_LAM_BLAS_LIBS") ? split(ENV["ULM_LAM_BLAS_LIBS"]) :
                isdir("/opt/homebrew/opt/openblas/lib") ?
@@ -236,8 +248,9 @@ Compile ulm.lam functions into a shared library.  backend=:cblas runs the
 same kernel calls on CBLAS/LAPACK (OpenBLAS by default).
 """
 function compile(functions::Vector{LamFunction}; name::AbstractString=string(functions[1].name),
-                 backend::Symbol=Symbol(get(ENV, "ULM_LAM_BACKEND", "ulmblas")))
-    backend in (:ulmblas, :cblas) || throw(LamError("backend must be :ulmblas or :cblas"))
+                 backend::Symbol=Symbol(get(ENV, "ULM_LAM_BACKEND", "julia")))
+    backend in (:julia, :ulmblas, :cblas) ||
+        throw(LamError("backend must be :julia, :ulmblas or :cblas"))
     work = joinpath(ROOT, "build", "julia", name)
     mkpath(work)
     text, externs = lam_module(functions)
@@ -248,11 +261,15 @@ function compile(functions::Vector{LamFunction}; name::AbstractString=string(fun
     mlirfile = joinpath(work, "$name.mlir")
     write(mlirfile, text)
     cppfile = joinpath(work, "$name.cpp")
-    cached = !haskey(ENV, "ULM_LAM_REBUILD") && isfile(lib)
+    # the kernels after selection, for @code_lam (kept per program)
+    selected = joinpath(work, "$name.$(key[1:12]).selected.mlir")
+    cached = !haskey(ENV, "ULM_LAM_REBUILD") && isfile(lib) && isfile(selected)
     if !cached
         script = joinpath(ROOT, "scripts", "ulm-lam-compile.sh")
-        run_or_fail(addenv(`$script $mlirfile $(joinpath(work, name))`, "BACKEND" => string(backend)),
+        irbackend = backend == :ulmblas ? "ulmblas" : "cblas"  # :julia is CBLAS too
+        run_or_fail(addenv(`$script $mlirfile $(joinpath(work, name))`, "BACKEND" => irbackend),
                     "ulm-lam-compile")
+        cp(joinpath(work, "$name.selected.mlir"), selected; force=true)
     end
     src = read(cppfile, String)
     ifaces = interfaces(src)
@@ -460,3 +477,30 @@ function bind!(lib::Library; impls...)
     end
     lib
 end
+
+# -- calling a @lam function directly -----------------------------------------
+
+const JIT = IdDict{LamFunction,Library}()
+
+"""
+    library(f) -> Library
+
+The library of the ulm.lam function f, compiled at its first call (with the
+backend from ULM_LAM_BACKEND, default :julia) and kept.
+"""
+library(f::LamFunction) = get!(() -> compile(f), JIT, f)
+
+"""
+    f(args...; work=nothing)
+
+Call the ulm.lam function f with Julia arrays: compiled at the first call.
+"""
+(f::LamFunction)(args...; work::Union{Workspace,Nothing}=nothing) =
+    getproperty(library(f), f.name)(args...; work=work)
+
+"""
+    bind!(f; name = g, ...)
+
+Implement the external functions that the ulm.lam function f calls.
+"""
+bind!(f::LamFunction; impls...) = bind!(library(f); impls...)

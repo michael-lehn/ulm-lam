@@ -20,14 +20,17 @@ trsm, syrk, trsv).
 """
 module UlmLam
 
+using LinearAlgebra
 using LinearAlgebra: UniformScaling
 using Libdl
 using SHA: sha256
 
 export @lam, Mat, Vec, InOut, Index, Float, eye, assume, loop, extern,
-       bind!, InfoError, LamError, Workspace, workspace_size, cpp
+       bind!, InfoError, LamError, Workspace, workspace_size, cpp, code_lam,
+       @code_lam
 
 include("frontend.jl")
 include("runtime.jl")
+include("codelam.jl")
 
 end

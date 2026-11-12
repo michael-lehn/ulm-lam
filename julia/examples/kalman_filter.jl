@@ -78,7 +78,7 @@ end
 besttime(f, reps) = minimum(@elapsed(f()) for _ in 1:reps)
 
 function main()
-    lib = UlmLam.compile(kalman; name="kalman_filter_jl")
+    lib = UlmLam.compile(kalman; name="kalman_filter_jl", backend=:ulmblas)
     Random.seed!(5)
     println("Kalman filter, Julia $(VERSION); seconds, (x): relative to ulm.lam")
     println("     n     m  steps   ulm.lam   Julia as written   Julia by hand   difference")

@@ -34,7 +34,7 @@ end
 besttime(f, reps) = minimum(@elapsed(f()) for _ in 1:reps)
 
 function main()
-    lib = UlmLam.compile(blr; name="bayes_jl")
+    lib = UlmLam.compile(blr; name="bayes_jl", backend=:ulmblas)
     X0, y0 = bike_data()
     Random.seed!(2)
     perm = randperm(length(y0))

@@ -19,7 +19,7 @@ phi(x) = x > 0 ? x + 1 : exp(x)
 besttime(f, reps) = minimum(@elapsed(f()) for _ in 1:reps)
 
 function main()
-    lib = UlmLam.compile(attention; name="attention_jl")
+    lib = UlmLam.compile(attention; name="attention_jl", backend=:ulmblas)
     lib_ob = UlmLam.compile(attention; name="attention_jl_cblas", backend=:cblas)
     Random.seed!(4)
     d = 64

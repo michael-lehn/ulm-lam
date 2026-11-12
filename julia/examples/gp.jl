@@ -35,7 +35,7 @@ function rbf(A, B, ell)
 end
 
 function main(sizes=(2000, 4000, 8000), m=1000)
-    lib = UlmLam.compile(gp; name="gp_jl")
+    lib = UlmLam.compile(gp; name="gp_jl", backend=:ulmblas)
     lib_ob = UlmLam.compile(gp; name="gp_jl_cblas", backend=:cblas)
     Random.seed!(1)
     s2 = 0.01

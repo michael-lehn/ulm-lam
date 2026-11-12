@@ -10,6 +10,15 @@ GEN="$ROOT/build/gen-plugin"
 mkdir -p "$OUT" "$GEN"
 case "$(uname)" in Darwin) EXT=dylib ;; *) EXT=so ;; esac
 
+# up to date: nothing to do (ulm-lam-compile.sh calls this for every program)
+PLUGIN_LIB="$OUT/UlmLamPasses.$EXT"
+if [ -z "${FORCE:-}" ] && [ -e "$PLUGIN_LIB" ] && [ -z "$(find "$ROOT/lib" \
+	"$ROOT/include/ulm_lam" "$0" -newer "$PLUGIN_LIB" \
+	\( -name '*.cpp' -o -name '*.h' -o -name '*.td' -o -name '*.sh' \) | head -1)" ]; then
+	echo "$PLUGIN_LIB"
+	exit 0
+fi
+
 tblgen() { # td backend out [extra...]
 	local td=$1 b=$2 out=$3
 	shift 3

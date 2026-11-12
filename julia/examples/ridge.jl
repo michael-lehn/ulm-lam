@@ -20,7 +20,7 @@ include("data.jl")
 besttime(f, reps) = minimum(@elapsed(f()) for _ in 1:reps)
 
 function main()
-    lib = UlmLam.compile(ridge; name="ridge_jl")
+    lib = UlmLam.compile(ridge; name="ridge_jl", backend=:ulmblas)
     X0, y0 = bike_data()
     Random.seed!(2)
     perm = randperm(length(y0))

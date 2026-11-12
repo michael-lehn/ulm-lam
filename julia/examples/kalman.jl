@@ -37,7 +37,7 @@ end
 besttime(f, reps=3) = minimum(@elapsed(f()) for _ in 1:reps)
 
 function main(n=4000, m=200, steps=200)
-    t = @elapsed lib = UlmLam.compile(estimate; name="kalman_jl")
+    t = @elapsed lib = UlmLam.compile(estimate; name="kalman_jl", backend=:ulmblas)
     println("compiled in $(round(t, digits=1)) s (cached when unchanged)\n")
     println(cpp(lib.estimate))
     Random.seed!(3)

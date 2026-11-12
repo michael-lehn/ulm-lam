@@ -28,61 +28,123 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <vector>
 
+// ULM_LAM_CBLAS_ILP64: 64-bit integers and the symbol suffix 64_, as
+// libblastrampoline exports them (Julia's BLAS: OpenBLAS by default, or
+// whatever it forwards to, e.g. ulmBLAS via UlmBLAS.forward()).
+#ifdef ULM_LAM_CBLAS_ILP64
+typedef std::int64_t ulm_lam_blasint;
+#define ULM_LAM_SYM(f) f##64_
+#else
+typedef int ulm_lam_blasint;
+#define ULM_LAM_SYM(f) f
+#endif
+
 extern "C" {
 // CBLAS
-void cblas_dgemm(int, int, int, int, int, int, double, const double *, int,
-                 const double *, int, double, double *, int);
-void cblas_sgemm(int, int, int, int, int, int, float, const float *, int,
-                 const float *, int, float, float *, int);
-void cblas_dgemv(int, int, int, int, double, const double *, int,
-                 const double *, int, double, double *, int);
-void cblas_sgemv(int, int, int, int, float, const float *, int, const float *,
-                 int, float, float *, int);
-void cblas_dsymm(int, int, int, int, int, double, const double *, int,
-                 const double *, int, double, double *, int);
-void cblas_ssymm(int, int, int, int, int, float, const float *, int,
-                 const float *, int, float, float *, int);
-void cblas_dsymv(int, int, int, double, const double *, int, const double *,
-                 int, double, double *, int);
-void cblas_ssymv(int, int, int, float, const float *, int, const float *, int,
-                 float, float *, int);
-void cblas_dsyrk(int, int, int, int, int, double, const double *, int, double,
-                 double *, int);
-void cblas_ssyrk(int, int, int, int, int, float, const float *, int, float,
-                 float *, int);
-void cblas_dtrsm(int, int, int, int, int, int, int, double, const double *,
-                 int, double *, int);
-void cblas_strsm(int, int, int, int, int, int, int, float, const float *, int,
-                 float *, int);
-void cblas_dtrsv(int, int, int, int, int, const double *, int, double *, int);
-void cblas_strsv(int, int, int, int, int, const float *, int, float *, int);
+void ULM_LAM_SYM(cblas_dgemm)(int, int, int, ulm_lam_blasint, ulm_lam_blasint,
+                              ulm_lam_blasint, double, const double *,
+                              ulm_lam_blasint, const double *, ulm_lam_blasint,
+                              double, double *, ulm_lam_blasint);
+void ULM_LAM_SYM(cblas_sgemm)(int, int, int, ulm_lam_blasint, ulm_lam_blasint,
+                              ulm_lam_blasint, float, const float *,
+                              ulm_lam_blasint, const float *, ulm_lam_blasint,
+                              float, float *, ulm_lam_blasint);
+void ULM_LAM_SYM(cblas_dgemv)(int, int, ulm_lam_blasint, ulm_lam_blasint,
+                              double, const double *, ulm_lam_blasint,
+                              const double *, ulm_lam_blasint, double, double *,
+                              ulm_lam_blasint);
+void ULM_LAM_SYM(cblas_sgemv)(int, int, ulm_lam_blasint, ulm_lam_blasint, float,
+                              const float *, ulm_lam_blasint, const float *,
+                              ulm_lam_blasint, float, float *, ulm_lam_blasint);
+void ULM_LAM_SYM(cblas_dsymm)(int, int, int, ulm_lam_blasint, ulm_lam_blasint,
+                              double, const double *, ulm_lam_blasint,
+                              const double *, ulm_lam_blasint, double, double *,
+                              ulm_lam_blasint);
+void ULM_LAM_SYM(cblas_ssymm)(int, int, int, ulm_lam_blasint, ulm_lam_blasint,
+                              float, const float *, ulm_lam_blasint,
+                              const float *, ulm_lam_blasint, float, float *,
+                              ulm_lam_blasint);
+void ULM_LAM_SYM(cblas_dsymv)(int, int, ulm_lam_blasint, double, const double *,
+                              ulm_lam_blasint, const double *, ulm_lam_blasint,
+                              double, double *, ulm_lam_blasint);
+void ULM_LAM_SYM(cblas_ssymv)(int, int, ulm_lam_blasint, float, const float *,
+                              ulm_lam_blasint, const float *, ulm_lam_blasint,
+                              float, float *, ulm_lam_blasint);
+void ULM_LAM_SYM(cblas_dsyrk)(int, int, int, ulm_lam_blasint, ulm_lam_blasint,
+                              double, const double *, ulm_lam_blasint, double,
+                              double *, ulm_lam_blasint);
+void ULM_LAM_SYM(cblas_ssyrk)(int, int, int, ulm_lam_blasint, ulm_lam_blasint,
+                              float, const float *, ulm_lam_blasint, float,
+                              float *, ulm_lam_blasint);
+void ULM_LAM_SYM(cblas_dtrsm)(int, int, int, int, int, ulm_lam_blasint,
+                              ulm_lam_blasint, double, const double *,
+                              ulm_lam_blasint, double *, ulm_lam_blasint);
+void ULM_LAM_SYM(cblas_strsm)(int, int, int, int, int, ulm_lam_blasint,
+                              ulm_lam_blasint, float, const float *,
+                              ulm_lam_blasint, float *, ulm_lam_blasint);
+void ULM_LAM_SYM(cblas_dtrsv)(int, int, int, int, ulm_lam_blasint,
+                              const double *, ulm_lam_blasint, double *,
+                              ulm_lam_blasint);
+void ULM_LAM_SYM(cblas_strsv)(int, int, int, int, ulm_lam_blasint,
+                              const float *, ulm_lam_blasint, float *,
+                              ulm_lam_blasint);
 // LAPACK (Fortran; trailing hidden lengths of the character arguments)
-void dpotrf_(const char *, const int *, double *, const int *, int *,
-             std::size_t);
-void spotrf_(const char *, const int *, float *, const int *, int *,
-             std::size_t);
-void dgetrf_(const int *, const int *, double *, const int *, int *, int *);
-void sgetrf_(const int *, const int *, float *, const int *, int *, int *);
-void dgetrs_(const char *, const int *, const int *, const double *,
-             const int *, const int *, double *, const int *, int *,
-             std::size_t);
-void sgetrs_(const char *, const int *, const int *, const float *,
-             const int *, const int *, float *, const int *, int *,
-             std::size_t);
+void ULM_LAM_SYM(dpotrf_)(const char *, const ulm_lam_blasint *, double *,
+                          const ulm_lam_blasint *, ulm_lam_blasint *,
+                          std::size_t);
+void ULM_LAM_SYM(spotrf_)(const char *, const ulm_lam_blasint *, float *,
+                          const ulm_lam_blasint *, ulm_lam_blasint *,
+                          std::size_t);
+void ULM_LAM_SYM(dgetrf_)(const ulm_lam_blasint *, const ulm_lam_blasint *,
+                          double *, const ulm_lam_blasint *, ulm_lam_blasint *,
+                          ulm_lam_blasint *);
+void ULM_LAM_SYM(sgetrf_)(const ulm_lam_blasint *, const ulm_lam_blasint *,
+                          float *, const ulm_lam_blasint *, ulm_lam_blasint *,
+                          ulm_lam_blasint *);
+void ULM_LAM_SYM(dgetrs_)(const char *, const ulm_lam_blasint *,
+                          const ulm_lam_blasint *, const double *,
+                          const ulm_lam_blasint *, const ulm_lam_blasint *,
+                          double *, const ulm_lam_blasint *, ulm_lam_blasint *,
+                          std::size_t);
+void ULM_LAM_SYM(sgetrs_)(const char *, const ulm_lam_blasint *,
+                          const ulm_lam_blasint *, const float *,
+                          const ulm_lam_blasint *, const ulm_lam_blasint *,
+                          float *, const ulm_lam_blasint *, ulm_lam_blasint *,
+                          std::size_t);
 }
 
 namespace ulm_lam_cblas {
 
 namespace detail {
 
-enum { ColMajor = 102 };
-enum { NoTrans = 111, Trans = 112 };
-enum { Upper = 121, Lower = 122 };
-enum { NonUnit = 131, Unit = 132 };
-enum { Left = 141, Right = 142 };
+enum
+{
+    ColMajor = 102
+};
+enum
+{
+    NoTrans = 111,
+    Trans = 112
+};
+enum
+{
+    Upper = 121,
+    Lower = 122
+};
+enum
+{
+    NonUnit = 131,
+    Unit = 132
+};
+enum
+{
+    Left = 141,
+    Right = 142
+};
 
 inline int
 flip(int t)
@@ -96,8 +158,12 @@ flip(int t)
 struct Op
 {
     bool col;
-    int ld;
-    int trans() const { return col ? NoTrans : Trans; }
+    ulm_lam_blasint ld;
+    int
+    trans() const
+    {
+	return col ? NoTrans : Trans;
+    }
 };
 
 template <typename I>
@@ -105,140 +171,164 @@ Op
 orient(I rows, I cols, I incRow, I incCol)
 {
     if (incRow == 1 && (cols <= 1 || incCol >= rows))
-	return {true, static_cast<int>(cols <= 1 ? std::max<I>(rows, 1)
-	                                          : incCol)};
+	return {true, static_cast<ulm_lam_blasint>(
+	                  cols <= 1 ? std::max<I>(rows, 1) : incCol)};
     if (incCol == 1)
-	return {false, static_cast<int>(rows <= 1 ? std::max<I>(cols, 1)
-	                                           : incRow)};
+	return {false, static_cast<ulm_lam_blasint>(
+	                   rows <= 1 ? std::max<I>(cols, 1) : incRow)};
     std::abort(); // neither row- nor column-major: not generated by ulm.lam
 }
 
 // Overloads by element type.
 inline void
-gemm(int o, int ta, int tb, int m, int n, int k, double al, const double *A,
-     int lda, const double *B, int ldb, double be, double *C, int ldc)
+gemm(ulm_lam_blasint o, ulm_lam_blasint ta, ulm_lam_blasint tb,
+     ulm_lam_blasint m, ulm_lam_blasint n, ulm_lam_blasint k, double al,
+     const double *A, ulm_lam_blasint lda, const double *B, ulm_lam_blasint ldb,
+     double be, double *C, ulm_lam_blasint ldc)
 {
-    cblas_dgemm(o, ta, tb, m, n, k, al, A, lda, B, ldb, be, C, ldc);
+    ULM_LAM_SYM(cblas_dgemm)(o, ta, tb, m, n, k, al, A, lda, B, ldb, be, C,
+                             ldc);
 }
 inline void
-gemm(int o, int ta, int tb, int m, int n, int k, float al, const float *A,
-     int lda, const float *B, int ldb, float be, float *C, int ldc)
+gemm(ulm_lam_blasint o, ulm_lam_blasint ta, ulm_lam_blasint tb,
+     ulm_lam_blasint m, ulm_lam_blasint n, ulm_lam_blasint k, float al,
+     const float *A, ulm_lam_blasint lda, const float *B, ulm_lam_blasint ldb,
+     float be, float *C, ulm_lam_blasint ldc)
 {
-    cblas_sgemm(o, ta, tb, m, n, k, al, A, lda, B, ldb, be, C, ldc);
+    ULM_LAM_SYM(cblas_sgemm)(o, ta, tb, m, n, k, al, A, lda, B, ldb, be, C,
+                             ldc);
 }
 inline void
-gemv(int o, int t, int m, int n, double al, const double *A, int lda,
-     const double *x, int ix, double be, double *y, int iy)
+gemv(ulm_lam_blasint o, ulm_lam_blasint t, ulm_lam_blasint m, ulm_lam_blasint n,
+     double al, const double *A, ulm_lam_blasint lda, const double *x,
+     ulm_lam_blasint ix, double be, double *y, ulm_lam_blasint iy)
 {
-    cblas_dgemv(o, t, m, n, al, A, lda, x, ix, be, y, iy);
+    ULM_LAM_SYM(cblas_dgemv)(o, t, m, n, al, A, lda, x, ix, be, y, iy);
 }
 inline void
-gemv(int o, int t, int m, int n, float al, const float *A, int lda,
-     const float *x, int ix, float be, float *y, int iy)
+gemv(ulm_lam_blasint o, ulm_lam_blasint t, ulm_lam_blasint m, ulm_lam_blasint n,
+     float al, const float *A, ulm_lam_blasint lda, const float *x,
+     ulm_lam_blasint ix, float be, float *y, ulm_lam_blasint iy)
 {
-    cblas_sgemv(o, t, m, n, al, A, lda, x, ix, be, y, iy);
+    ULM_LAM_SYM(cblas_sgemv)(o, t, m, n, al, A, lda, x, ix, be, y, iy);
 }
 inline void
-symm(int o, int s, int u, int m, int n, double al, const double *A, int lda,
-     const double *B, int ldb, double be, double *C, int ldc)
+symm(ulm_lam_blasint o, ulm_lam_blasint s, ulm_lam_blasint u, ulm_lam_blasint m,
+     ulm_lam_blasint n, double al, const double *A, ulm_lam_blasint lda,
+     const double *B, ulm_lam_blasint ldb, double be, double *C,
+     ulm_lam_blasint ldc)
 {
-    cblas_dsymm(o, s, u, m, n, al, A, lda, B, ldb, be, C, ldc);
+    ULM_LAM_SYM(cblas_dsymm)(o, s, u, m, n, al, A, lda, B, ldb, be, C, ldc);
 }
 inline void
-symm(int o, int s, int u, int m, int n, float al, const float *A, int lda,
-     const float *B, int ldb, float be, float *C, int ldc)
+symm(ulm_lam_blasint o, ulm_lam_blasint s, ulm_lam_blasint u, ulm_lam_blasint m,
+     ulm_lam_blasint n, float al, const float *A, ulm_lam_blasint lda,
+     const float *B, ulm_lam_blasint ldb, float be, float *C,
+     ulm_lam_blasint ldc)
 {
-    cblas_ssymm(o, s, u, m, n, al, A, lda, B, ldb, be, C, ldc);
+    ULM_LAM_SYM(cblas_ssymm)(o, s, u, m, n, al, A, lda, B, ldb, be, C, ldc);
 }
 inline void
-symv(int o, int u, int n, double al, const double *A, int lda,
-     const double *x, int ix, double be, double *y, int iy)
+symv(ulm_lam_blasint o, ulm_lam_blasint u, ulm_lam_blasint n, double al,
+     const double *A, ulm_lam_blasint lda, const double *x, ulm_lam_blasint ix,
+     double be, double *y, ulm_lam_blasint iy)
 {
-    cblas_dsymv(o, u, n, al, A, lda, x, ix, be, y, iy);
+    ULM_LAM_SYM(cblas_dsymv)(o, u, n, al, A, lda, x, ix, be, y, iy);
 }
 inline void
-symv(int o, int u, int n, float al, const float *A, int lda, const float *x,
-     int ix, float be, float *y, int iy)
+symv(ulm_lam_blasint o, ulm_lam_blasint u, ulm_lam_blasint n, float al,
+     const float *A, ulm_lam_blasint lda, const float *x, ulm_lam_blasint ix,
+     float be, float *y, ulm_lam_blasint iy)
 {
-    cblas_ssymv(o, u, n, al, A, lda, x, ix, be, y, iy);
+    ULM_LAM_SYM(cblas_ssymv)(o, u, n, al, A, lda, x, ix, be, y, iy);
 }
 inline void
-syrk(int o, int u, int t, int n, int k, double al, const double *A, int lda,
-     double be, double *C, int ldc)
+syrk(ulm_lam_blasint o, ulm_lam_blasint u, ulm_lam_blasint t, ulm_lam_blasint n,
+     ulm_lam_blasint k, double al, const double *A, ulm_lam_blasint lda,
+     double be, double *C, ulm_lam_blasint ldc)
 {
-    cblas_dsyrk(o, u, t, n, k, al, A, lda, be, C, ldc);
+    ULM_LAM_SYM(cblas_dsyrk)(o, u, t, n, k, al, A, lda, be, C, ldc);
 }
 inline void
-syrk(int o, int u, int t, int n, int k, float al, const float *A, int lda,
-     float be, float *C, int ldc)
+syrk(ulm_lam_blasint o, ulm_lam_blasint u, ulm_lam_blasint t, ulm_lam_blasint n,
+     ulm_lam_blasint k, float al, const float *A, ulm_lam_blasint lda, float be,
+     float *C, ulm_lam_blasint ldc)
 {
-    cblas_ssyrk(o, u, t, n, k, al, A, lda, be, C, ldc);
+    ULM_LAM_SYM(cblas_ssyrk)(o, u, t, n, k, al, A, lda, be, C, ldc);
 }
 inline void
-trsm(int o, int s, int u, int t, int d, int m, int n, double al,
-     const double *A, int lda, double *B, int ldb)
+trsm(ulm_lam_blasint o, ulm_lam_blasint s, ulm_lam_blasint u, ulm_lam_blasint t,
+     ulm_lam_blasint d, ulm_lam_blasint m, ulm_lam_blasint n, double al,
+     const double *A, ulm_lam_blasint lda, double *B, ulm_lam_blasint ldb)
 {
-    cblas_dtrsm(o, s, u, t, d, m, n, al, A, lda, B, ldb);
+    ULM_LAM_SYM(cblas_dtrsm)(o, s, u, t, d, m, n, al, A, lda, B, ldb);
 }
 inline void
-trsm(int o, int s, int u, int t, int d, int m, int n, float al,
-     const float *A, int lda, float *B, int ldb)
+trsm(ulm_lam_blasint o, ulm_lam_blasint s, ulm_lam_blasint u, ulm_lam_blasint t,
+     ulm_lam_blasint d, ulm_lam_blasint m, ulm_lam_blasint n, float al,
+     const float *A, ulm_lam_blasint lda, float *B, ulm_lam_blasint ldb)
 {
-    cblas_strsm(o, s, u, t, d, m, n, al, A, lda, B, ldb);
+    ULM_LAM_SYM(cblas_strsm)(o, s, u, t, d, m, n, al, A, lda, B, ldb);
 }
 inline void
-trsv(int o, int u, int t, int d, int n, const double *A, int lda, double *x,
-     int ix)
+trsv(ulm_lam_blasint o, ulm_lam_blasint u, ulm_lam_blasint t, ulm_lam_blasint d,
+     ulm_lam_blasint n, const double *A, ulm_lam_blasint lda, double *x,
+     ulm_lam_blasint ix)
 {
-    cblas_dtrsv(o, u, t, d, n, A, lda, x, ix);
+    ULM_LAM_SYM(cblas_dtrsv)(o, u, t, d, n, A, lda, x, ix);
 }
 inline void
-trsv(int o, int u, int t, int d, int n, const float *A, int lda, float *x,
-     int ix)
+trsv(ulm_lam_blasint o, ulm_lam_blasint u, ulm_lam_blasint t, ulm_lam_blasint d,
+     ulm_lam_blasint n, const float *A, ulm_lam_blasint lda, float *x,
+     ulm_lam_blasint ix)
 {
-    cblas_strsv(o, u, t, d, n, A, lda, x, ix);
+    ULM_LAM_SYM(cblas_strsv)(o, u, t, d, n, A, lda, x, ix);
 }
-inline int
-potrf(char u, int n, double *A, int lda)
+inline ulm_lam_blasint
+potrf(char u, ulm_lam_blasint n, double *A, ulm_lam_blasint lda)
 {
-    int info;
-    dpotrf_(&u, &n, A, &lda, &info, 1);
+    ulm_lam_blasint info;
+    ULM_LAM_SYM(dpotrf_)(&u, &n, A, &lda, &info, 1);
     return info;
 }
-inline int
-potrf(char u, int n, float *A, int lda)
+inline ulm_lam_blasint
+potrf(char u, ulm_lam_blasint n, float *A, ulm_lam_blasint lda)
 {
-    int info;
-    spotrf_(&u, &n, A, &lda, &info, 1);
+    ulm_lam_blasint info;
+    ULM_LAM_SYM(spotrf_)(&u, &n, A, &lda, &info, 1);
     return info;
 }
-inline int
-getrf(int m, int n, double *A, int lda, int *piv)
+inline ulm_lam_blasint
+getrf(ulm_lam_blasint m, ulm_lam_blasint n, double *A, ulm_lam_blasint lda,
+      ulm_lam_blasint *piv)
 {
-    int info;
-    dgetrf_(&m, &n, A, &lda, piv, &info);
+    ulm_lam_blasint info;
+    ULM_LAM_SYM(dgetrf_)(&m, &n, A, &lda, piv, &info);
     return info;
 }
-inline int
-getrf(int m, int n, float *A, int lda, int *piv)
+inline ulm_lam_blasint
+getrf(ulm_lam_blasint m, ulm_lam_blasint n, float *A, ulm_lam_blasint lda,
+      ulm_lam_blasint *piv)
 {
-    int info;
-    sgetrf_(&m, &n, A, &lda, piv, &info);
+    ulm_lam_blasint info;
+    ULM_LAM_SYM(sgetrf_)(&m, &n, A, &lda, piv, &info);
     return info;
 }
 inline void
-getrs(char t, int n, int nrhs, const double *A, int lda, const int *piv,
-      double *B, int ldb)
+getrs(char t, ulm_lam_blasint n, ulm_lam_blasint nrhs, const double *A,
+      ulm_lam_blasint lda, const ulm_lam_blasint *piv, double *B,
+      ulm_lam_blasint ldb)
 {
-    int info;
-    dgetrs_(&t, &n, &nrhs, A, &lda, piv, B, &ldb, &info, 1);
+    ulm_lam_blasint info;
+    ULM_LAM_SYM(dgetrs_)(&t, &n, &nrhs, A, &lda, piv, B, &ldb, &info, 1);
 }
 inline void
-getrs(char t, int n, int nrhs, const float *A, int lda, const int *piv,
-      float *B, int ldb)
+getrs(char t, ulm_lam_blasint n, ulm_lam_blasint nrhs, const float *A,
+      ulm_lam_blasint lda, const ulm_lam_blasint *piv, float *B,
+      ulm_lam_blasint ldb)
 {
-    int info;
-    sgetrs_(&t, &n, &nrhs, A, &lda, piv, B, &ldb, &info, 1);
+    ulm_lam_blasint info;
+    ULM_LAM_SYM(sgetrs_)(&t, &n, &nrhs, A, &lda, piv, B, &ldb, &info, 1);
 }
 
 /// B (rows x cols, strides incRow/incCol) copied into / from a column-major
@@ -323,7 +413,8 @@ symm(bool lower, I m, I n, T alpha, const T *A, I incRowA, I incColA,
 	tmp = toCol(c.col ? m : n, c.col ? n : m, B, c.col ? incRowB : incColB,
 	            c.col ? incColB : incRowB);
 	B = tmp.data();
-	b.ld = static_cast<int>(c.col ? std::max<I>(m, 1) : std::max<I>(n, 1));
+	b.ld = static_cast<ulm_lam_blasint>(c.col ? std::max<I>(m, 1)
+	                                          : std::max<I>(n, 1));
     }
     if (c.col)
 	detail::symm(ColMajor, Left, u, m, n, alpha, A, a.ld, B, b.ld, beta, C,
@@ -347,8 +438,8 @@ void
 syumm(I m, I n, T alpha, const T *A, I incRowA, I incColA, const T *B,
       I incRowB, I incColB, T beta, T *C, I incRowC, I incColC)
 {
-    symm(false, m, n, alpha, A, incRowA, incColA, B, incRowB, incColB, beta,
-         C, incRowC, incColC);
+    symm(false, m, n, alpha, A, incRowA, incColA, B, incRowB, incColB, beta, C,
+         incRowC, incColC);
 }
 
 // y := alpha A x + beta y, A symmetric, lower triangle
@@ -411,17 +502,16 @@ trsm(bool lower, I m, I n, T alpha, bool unitDiag, const T *A, I incRowA,
 
 template <typename I, typename T>
 void
-trlsm(I m, I n, T alpha, bool, bool unitDiag, const T *A, I incRowA,
-      I incColA, T *B, I incRowB, I incColB)
+trlsm(I m, I n, T alpha, bool, bool unitDiag, const T *A, I incRowA, I incColA,
+      T *B, I incRowB, I incColB)
 {
-    trsm(true, m, n, alpha, unitDiag, A, incRowA, incColA, B, incRowB,
-         incColB);
+    trsm(true, m, n, alpha, unitDiag, A, incRowA, incColA, B, incRowB, incColB);
 }
 
 template <typename I, typename T>
 void
-trusm(I m, I n, T alpha, bool, bool unitDiag, const T *A, I incRowA,
-      I incColA, T *B, I incRowB, I incColB)
+trusm(I m, I n, T alpha, bool, bool unitDiag, const T *A, I incRowA, I incColA,
+      T *B, I incRowB, I incColB)
 {
     trsm(false, m, n, alpha, unitDiag, A, incRowA, incColA, B, incRowB,
          incColB);
@@ -478,7 +568,8 @@ geaxpy(I m, I n, T alpha, const T *X, I incRowX, I incColX, T *Y, I incRowY,
 {
     for (I i = 0; i < m; ++i)
 	for (I j = 0; j < n; ++j)
-	    Y[i * incRowY + j * incColY] += alpha * X[i * incRowX + j * incColX];
+	    Y[i * incRowY + j * incColY] +=
+	        alpha * X[i * incRowX + j * incColX];
 }
 
 template <typename I, typename T>
@@ -498,7 +589,8 @@ potrf(bool lower, I n, T *A, I incRowA, I incColA)
     using namespace detail;
     Op a = orient(n, n, incRowA, incColA);
     bool lo = triangle(lower, n, incRowA, incColA) == Lower;
-    return detail::potrf(lo ? 'L' : 'U', static_cast<int>(n), A, a.ld);
+    return detail::potrf(lo ? 'L' : 'U', static_cast<ulm_lam_blasint>(n), A,
+                         a.ld);
 }
 
 // P A = L U in place.  A row-major A is factorised as the column-major
@@ -509,10 +601,14 @@ I
 getrf(I m, I n, T *A, I incRowA, I incColA, P *piv, I)
 {
     using namespace detail;
-    static_assert(sizeof(P) == sizeof(int), "LAPACK pivots are int");
     Op a = orient(m, n, incRowA, incColA);
-    return a.col ? detail::getrf(m, n, A, a.ld, reinterpret_cast<int *>(piv))
-                 : detail::getrf(n, m, A, a.ld, reinterpret_cast<int *>(piv));
+    // pivots: the IR's integers, LAPACK's (64 bit with ILP64) in between
+    std::vector<ulm_lam_blasint> p(std::min(m, n));
+    I info = a.col ? detail::getrf(m, n, A, a.ld, p.data())
+                   : detail::getrf(n, m, A, a.ld, p.data());
+    for (std::size_t k = 0; k < p.size(); ++k)
+	piv[k] = static_cast<P>(p[k]);
+    return info;
 }
 
 // B := op(A)^-1 B with the factors of getrf
@@ -522,17 +618,19 @@ getrs(bool trans, bool, I n, I nrhs, const T *LU, I incRowA, I incColA,
       const P *piv, I, T *B, I incRowB, I incColB)
 {
     using namespace detail;
-    Op a = orient(n, n, incRowA, incColA), b = orient(n, nrhs, incRowB, incColB);
+    Op a = orient(n, n, incRowA, incColA),
+       b = orient(n, nrhs, incRowB, incColB);
     // factors of A (column-major) or of A^T (row-major)
     char t = (trans == a.col) ? 'T' : 'N';
-    const int *p = reinterpret_cast<const int *>(piv);
+    std::vector<ulm_lam_blasint> pv(piv, piv + n);
+    const ulm_lam_blasint *p = pv.data();
     if (b.col) {
 	detail::getrs(t, n, nrhs, LU, a.ld, p, B, b.ld);
 	return;
     }
     std::vector<T> c = toCol(n, nrhs, B, incRowB, incColB);
     detail::getrs(t, n, nrhs, LU, a.ld, p, c.data(),
-                  static_cast<int>(std::max<I>(n, 1)));
+                  static_cast<ulm_lam_blasint>(std::max<I>(n, 1)));
     fromCol(n, nrhs, c, B, incRowB, incColB);
 }
 
