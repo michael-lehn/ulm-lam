@@ -622,6 +622,60 @@ struct FoldTranspose : OpRewritePattern<TransposeOp>
     }
 };
 
+/// The transposed type of a matrix (shape swapped, no properties: they are
+/// inferred again after normalisation).
+RankedTensorType
+transposedType(Type t)
+{
+    auto r = cast<RankedTensorType>(t);
+    return RankedTensorType::get({r.getDimSize(1), r.getDimSize(0)},
+                                 r.getElementType());
+}
+
+Value
+transposeOf(PatternRewriter &rewriter, Location loc, Value x)
+{
+    return TransposeOp::create(rewriter, loc, transposedType(x.getType()), x);
+}
+
+/// Transposes to the leaves: (A B C)^T -> C^T B^T A^T, (A + B)^T -> A^T +
+/// B^T, (alpha A)^T -> alpha A^T, if the inner value has no other use (it
+/// would be computed twice).  E.g. the Julia frontend returns the transpose
+/// of every result (a column-major array is a transposed row-major one).
+struct PushTranspose : OpRewritePattern<TransposeOp>
+{
+    using OpRewritePattern::OpRewritePattern;
+    LogicalResult
+    matchAndRewrite(TransposeOp op, PatternRewriter &rewriter) const override
+    {
+	Value x = op.getOperand();
+	Operation *def = x.getDefiningOp();
+	if (!def || !x.hasOneUse())
+	    return failure();
+	Location loc = op.getLoc();
+	Type t = transposedType(x.getType());
+	Value r;
+	if (auto m = dyn_cast<MulOp>(def)) {
+	    SmallVector<Value> fs;
+	    for (Value f : llvm::reverse(m.getFactors()))
+		fs.push_back(transposeOf(rewriter, loc, f));
+	    r = MulOp::create(rewriter, loc, t, fs);
+	} else if (auto a = dyn_cast<AddOp>(def)) {
+	    SmallVector<Value> ts;
+	    for (Value term : a.getTerms())
+		ts.push_back(transposeOf(rewriter, loc, term));
+	    r = AddOp::create(rewriter, loc, t, ts);
+	} else if (auto sc = dyn_cast<ScaleOp>(def)) {
+	    r = ScaleOp::create(rewriter, loc, t, sc.getAlpha(),
+	                        transposeOf(rewriter, loc, sc.getOperand()));
+	} else {
+	    return failure();
+	}
+	replaceKeepingType(rewriter, op, r);
+	return success();
+    }
+};
+
 /// inverse(inverse(x)) -> x.
 struct FoldInverse : OpRewritePattern<InverseOp>
 {
@@ -691,7 +745,7 @@ void
 TransposeOp::getCanonicalizationPatterns(RewritePatternSet &results,
                                          MLIRContext *ctx)
 {
-    results.add<FoldTranspose>(ctx);
+    results.add<FoldTranspose, PushTranspose>(ctx);
 }
 void
 InverseOp::getCanonicalizationPatterns(RewritePatternSet &results,
@@ -802,6 +856,7 @@ ULM_LAMK_COMMON(GetrsOp)
 ULM_LAMK_COMMON(GeaxpyOp)
 ULM_LAMK_COMMON(GescalOp)
 ULM_LAMK_COMMON(AdddiagOp)
+ULM_LAMK_COMMON(GecopyOp)
 ULM_LAMK_COMMON(SymvOp)
 ULM_LAMK_COMMON(SycompleteOp)
 #undef ULM_LAMK_COMMON
@@ -822,6 +877,7 @@ ULM_LAMK_GENERAL(GetrsOp)
 ULM_LAMK_GENERAL(GeaxpyOp)
 ULM_LAMK_GENERAL(GescalOp)
 ULM_LAMK_GENERAL(AdddiagOp)
+ULM_LAMK_GENERAL(GecopyOp)
 ULM_LAMK_GENERAL(SymvOp)
 #undef ULM_LAMK_GENERAL
 
@@ -855,6 +911,7 @@ ULM_LAMK_VERIFY_DPS(GetrsOp)
 ULM_LAMK_VERIFY_DPS(GeaxpyOp)
 ULM_LAMK_VERIFY_DPS(GescalOp)
 ULM_LAMK_VERIFY_DPS(AdddiagOp)
+ULM_LAMK_VERIFY_DPS(GecopyOp)
 ULM_LAMK_VERIFY_DPS(SymvOp)
 ULM_LAMK_VERIFY_DPS(SycompleteOp)
 #undef ULM_LAMK_VERIFY_DPS
@@ -972,6 +1029,14 @@ mlir::ulm_lamk::GeaxpyOp::estimateFlops(const SizeAssignment &)
     if (anyDynamic({m, n}))
 	return failure();
     return 2.0 * m * n;
+}
+FailureOr<double>
+mlir::ulm_lamk::GecopyOp::estimateFlops(const SizeAssignment &)
+{
+    auto [m, n] = shapeOf(getB());
+    if (anyDynamic({m, n}))
+	return failure();
+    return 1.0 * m * n;
 }
 FailureOr<double>
 mlir::ulm_lamk::AdddiagOp::estimateFlops(const SizeAssignment &)
@@ -1092,7 +1157,7 @@ mlir::ulm_lam::registerBufferizationModels(DialectRegistry &registry)
 	using namespace mlir::ulm_lamk;
 	attachAll<GemmOp, SymmOp, TrmmOp, TrsmOp, SyrkOp, GemvOp, SymvOp,
 	          SycompleteOp, TrsvOp, PotrfOp, GetrfOp, GetrsOp, GeaxpyOp,
-	          GescalOp, AdddiagOp, CallOp>(ctx);
+	          GescalOp, AdddiagOp, GecopyOp, CallOp>(ctx);
     });
 }
 

@@ -414,11 +414,17 @@ struct Args
     SmallVector<Value> ops;
     SmallVector<Attribute> attrs;
 
+    /// An operand; a value passed twice (e.g. n as rows, columns and
+    /// leading dimension) is one operand referenced twice in `args`.
+    /// (form-expressions' RemoveRecurringExpressionOperands crashes on a
+    /// call_opaque with the same operand three times, LLVM 23.)
     Args &
     op(Value v)
     {
-	attrs.push_back(rw.getIndexAttr(ops.size()));
-	ops.push_back(v);
+	auto it = llvm::find(ops, v);
+	attrs.push_back(rw.getIndexAttr(it - ops.begin()));
+	if (it == ops.end())
+	    ops.push_back(v);
 	return *this;
     }
     /// Sizes and strides.  The calls name IndexType = std::ptrdiff_t
@@ -710,6 +716,21 @@ ULM_LAMK_LOWERING(GescalLowering, lk::GescalOp)
         .call(o, "ulmBLAS::gescal" kIndexType);
 }
 
+// B := op(A) (ulm.lam's own helper, for both backends)
+ULM_LAMK_LOWERING(GecopyLowering, lk::GecopyOp)
+{
+    View A = view(rw, o.getA(), o.getTrans() == lk::Trans::trans);
+    View B = view(rw, o.getB());
+    return Args{rw}
+        .dim(B.rows)
+        .dim(B.cols)
+        .op(a.getA())
+        .strides(A)
+        .op(a.getB())
+        .strides(B)
+        .call(o, "ulm_lam_gecopy");
+}
+
 // A := A + alpha I (ulm.lam's own helper, for both backends)
 ULM_LAMK_LOWERING(AdddiagLowering, lk::AdddiagOp)
 {
@@ -749,11 +770,14 @@ ULM_LAMK_LOWERING(GetrfLowering, lk::GetrfOp)
 }
 
 // B := op(A)^-1 B with the LU factors
+// (right: B op(A)^-1 = (op(A)^-T B^T)^T, a left solve on the transposed
+// view of B with trans flipped)
 ULM_LAMK_LOWERING(GetrsLowering, lk::GetrsOp)
 {
-    View A = view(rw, o.getLU()), B = view(rw, o.getB());
+    bool right = o.getSide() == lk::Side::right;
+    View A = view(rw, o.getLU()), B = view(rw, o.getB(), right);
     return Args{rw}
-        .flag(o.getTrans() == lk::Trans::trans)
+        .flag((o.getTrans() == lk::Trans::trans) != right)
         .flag(false)
         .dim(A.rows)
         .dim(B.cols)
@@ -812,6 +836,25 @@ ulm_lam_copy(void *dst, const void *src, std::size_t bytes)
     }
 #endif
     std::memcpy(dst, src, bytes);
+}
+)";
+
+/// B := op(A) (ulm_lamk.gecopy): a transposed operand of an in-place
+/// solve.  Blocked, so that both the rows and the columns of a block stay
+/// in the cache; blocks in parallel with OpenMP.
+const char *kGecopy = R"(template <typename T>
+static void
+ulm_lam_gecopy(std::ptrdiff_t m, std::ptrdiff_t n, const T *A,
+               std::ptrdiff_t incRowA, std::ptrdiff_t incColA, T *B,
+               std::ptrdiff_t incRowB, std::ptrdiff_t incColB)
+{
+    const std::ptrdiff_t bs = 64;
+#pragma omp parallel for collapse(2) schedule(static) if (m * n > 1 << 16)
+    for (std::ptrdiff_t i0 = 0; i0 < m; i0 += bs)
+        for (std::ptrdiff_t j0 = 0; j0 < n; j0 += bs)
+            for (std::ptrdiff_t i = i0; i < i0 + bs && i < m; ++i)
+                for (std::ptrdiff_t j = j0; j < j0 + bs && j < n; ++j)
+                    B[i * incRowB + j * incColB] = A[i * incRowA + j * incColA];
 }
 )";
 
@@ -1077,8 +1120,9 @@ struct ConvertUlmLamkToUlmBLAS
 
 	// Which ulmBLAS LAPACK headers and info checks the output needs.
 	bool potrf = false, getrf = false, getrs = false, sycomplete = false,
-	     trtrs = false, copy = false, adddiag = false;
+	     trtrs = false, copy = false, adddiag = false, gecopy = false;
 	module.walk([&](Operation *op) {
+	    gecopy |= isa<lk::GecopyOp>(op);
 	    adddiag |= isa<lk::AdddiagOp>(op);
 	    copy |= isa<memref::CopyOp>(op);
 	    potrf |= isa<lk::PotrfOp>(op);
@@ -1095,7 +1139,7 @@ struct ConvertUlmLamkToUlmBLAS
 	             IndexAndLowering, IndexMaxSILowering, GemmLowering, SymmLowering, SymvLowering,
 	             SycompleteLowering, SyrkLowering, GemvLowering,
 	             TrsmLowering, TrsvLowering, GeaxpyLowering, GescalLowering,
-	             AdddiagLowering,
+	             AdddiagLowering, GecopyLowering,
 	             PotrfLowering, GetrfLowering, GetrsLowering, CallLowering>(
 	    tc, ctx);
 	populateArithToEmitCPatterns(tc, patterns);
@@ -1165,6 +1209,8 @@ struct ConvertUlmLamkToUlmBLAS
 	    emitc::VerbatimOp::create(b, loc, kCopy);
 	if (adddiag)
 	    emitc::VerbatimOp::create(b, loc, kAdddiag);
+	if (gecopy)
+	    emitc::VerbatimOp::create(b, loc, kGecopy);
 	if (sycomplete)
 	    emitc::VerbatimOp::create(b, loc, kSycomplete);
     }

@@ -99,8 +99,8 @@
 \newcommand{\src}{../}
 
 % ---------------------------------------------------------------- document
-\title{ulm.lam: Ulm Linear Algebra Mapping\\[4pt]
-  \large Solving the Linear Algebra Mapping Problem with MLIR and ulmBLAS}
+\title{ulm.lam: Write the Formula,\\Get the Expert's BLAS and LAPACK Code\\[4pt]
+  \large Ulm Linear Algebra Mapping with MLIR and ulmBLAS}
 \author{Design draft}
 \date{\today}
 
@@ -110,43 +110,210 @@
 
 \begin{abstract}
 \noindent
-The \emph{Linear Algebra Mapping Problem} (LAMP) asks for the cheapest
-sequence of calls to kernels like BLAS (Basic Linear Algebra Subprograms)
-and LAPACK (Linear Algebra PACKage) that evaluates a linear
-algebra expression such as $b = (X\T M\inv X)\inv X\T M\inv y$.
-Linnea~\cite{linnea-toms,linnea-thesis} solves it with a Python search
-built on term rewriting.
-This note sketches the same compiler on MLIR (Multi-Level Intermediate
-Representation)~\cite{mlir}.
-It uses two dialects.
-\code{ulm_lam} is the algebra, with matrix properties carried as tensor
-encodings.
-\code{ulm_lamk} is the kernels, in destination-passing style (DPS).
-They are connected by a kernel-selection pass and continue into upstream
-bufferization and a lowering to the C++ interface of
-ulmBLAS~\cite{ulmblas}, which provides BLAS and LAPACK routines as
-header-only templates on strided matrices.
-Both dialects and the passes are implemented, generated from TableGen
-files in ODS (Operation Definition Specification) format, and loaded into
-\code{mlir-opt} as a plugin.
-From the normal form of the worked example, kernel selection finds the
-expected derivation by itself: two Cholesky factorisations, triangular
-solves and a common subexpression up to transposition.
-The generated C++ is $3.7\times$ faster than evaluating the explicit
-inverses with the same library.
-Inside a loop in which only $y$ changes, as in a Kalman measurement update,
-everything else runs once before the loop, and each step costs
-$O(n^2)$ instead of $O(n^3)$.
-The note also points out where MLIR does \emph{not} help: the cost-driven
-search and the matching of associative-commutative expressions have to be
-built.
+You write linear algebra as on paper, in Python or Julia, with inverses,
+transposes and matrix properties; ulm.lam compiles it into the code an
+expert in numerical linear algebra would write on top of BLAS (Basic
+Linear Algebra Subprograms) and LAPACK (Linear Algebra PACKage):
+factorisations instead of inverses, computed once and pulled out of
+loops, products parenthesised by cost, symmetric results computed as one
+triangle, no memory allocated inside nested calls, and errors reported as
+LAPACK's \code{info}.
+The prediction of a Gaussian process, five lines of Python, runs
+$1.4\times$ faster than the same steps written by hand with SciPy and
+$8\times$ faster than the formula written in NumPy, and scales to
+$n = 100\,000$ on a cluster node, where it is as fast as the same steps
+written by hand with Intel's MKL (Math Kernel Library).
+A Kalman filter loop, written as the formula, is $3\times$ faster than
+NumPy code optimised by hand.
+Behind it is a solution of the \emph{Linear Algebra Mapping Problem}
+(LAMP) on MLIR (Multi-Level Intermediate Representation)~\cite{mlir}:
+two dialects (the algebra with matrix properties, and the kernels in
+destination-passing style), kernel selection by a generalised matrix
+chain algorithm in the spirit of Linnea~\cite{linnea-toms,linnea-thesis},
+MLIR's bufferization for the memory, and a lowering to C++ calling
+ulmBLAS~\cite{ulmblas}, or any CBLAS and LAPACK.
 \end{abstract}
 
 \setcounter{tocdepth}{1}
 \tableofcontents
 
 % =====================================================================
-\section{Introduction}
+\section{ulm.lam at a glance}\label{sec:glance}
+% =====================================================================
+
+\paragraph{What you write.}
+The prediction of a Gaussian process (GP), the textbook formula
+\[
+  \mu = K_*\T (K + \sigma^2 I)\inv y, \qquad
+  \Sigma = K_{**} - K_*\T (K + \sigma^2 I)\inv K_*,
+\]
+written in Python:
+\begin{lstlisting}[style=py]
+from ulm import lam
+from ulm.lam import Float, Matrix, Vector
+
+@lam.function
+def gp(K: Matrix("n", "n", "symmetric"), s2: Float, Ks: Matrix("n", "m"),
+       Kss: Matrix("m", "m", "symmetric"), y: Vector("n")):
+    Kn = lam.assume(K + s2 * lam.eye("n"), "spd")
+    return Ks.T @ Kn.inv @ y, Kss - Ks.T @ Kn.inv @ Ks
+
+lib = lam.compile(gp)                  # C++ calling ulmBLAS, compiled once
+mean, cov = lib.gp(K, 0.01, Ks, Kss, y)  # NumPy arrays in and out
+\end{lstlisting}
+The sizes are names: one compiled library serves all $n$ and $m$.
+\code{lam.assume} states what the compiler cannot know ($K + \sigma^2 I$
+is positive definite for $\sigma^2 > 0$); the Cholesky factorisation
+checks it at run time.
+
+\paragraph{How fast it is.}
+Bike-sharing data (UCI, University of California, Irvine), $m = 1000$
+test points, Apple M5 (seconds, without computing the kernel matrices):
+
+\begin{center}
+\begin{tabular}{rrrrrr}
+\toprule
+$n$ & ulm.lam/ulmBLAS & ulm.lam/OpenBLAS & SciPy by hand & scikit-learn & NumPy literal \\
+\midrule
+2000 & 0.036 & 0.046 & 0.053 & 0.119 & 0.194 \\
+4000 & 0.133 & 0.189 & 0.242 & 0.547 & 1.109 \\
+8000 & 0.886 & 1.105 & 1.209 & 2.970 & 6.983 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+``SciPy by hand'' is what scikit-learn does inside, written directly with
+SciPy; ``NumPy literal'' is the formula with \code{np.linalg.inv};
+scikit-learn's time includes the kernel matrices, which it computes
+inside (0.78\,s of its 2.97\,s at $n = 8000$).
+On the same BLAS (OpenBLAS, the one NumPy uses here) the generated code is
+faster than the hand-written version; on ulmBLAS it is faster still.
+On a cluster node (2$\times$ AMD EPYC 9454, 96 cores) the same function
+predicts terrain altitudes from $n = 100\,000$ road points
+(\cref{sec:gpcluster}): the factorisation of an 80\,GB matrix, in
+154\,s on MKL, as fast as the same steps written by hand with MKL.
+And in a loop, the Kalman measurement update
+$b_i = (H\T R\inv H)\inv H\T R\inv y_i$ for 200 measurements
+($n = 4000$) takes 122\,ms written as the formula, against 368\,ms for
+NumPy code in which the operator was formed by hand before the loop, and
+270\,s for the formula written in NumPy (\cref{sec:python}).
+
+\paragraph{The same in Julia.}
+The Julia package (\cref{sec:julia}) uses Julia's notation; Julia's
+column-major arrays are passed without copies:
+\begin{lstlisting}[style=py]
+using UlmLam, LinearAlgebra
+
+@lam function gp(K::Mat(:n, :n, :symmetric), s2::Float, Ks::Mat(:n, :m),
+                 Kss::Mat(:m, :m, :symmetric), y::Vec(:n))
+    Kn = assume(K + s2 * I, :spd)
+    (Ks' * inv(Kn) * y, Kss - Ks' * inv(Kn) * Ks)
+end
+
+lib = UlmLam.compile(gp)
+mean, cov = lib.gp(K, 0.01, Ks, Kss, y)
+\end{lstlisting}
+Compared with what a Julia programmer writes by hand
+(\code{C = cholesky(Symmetric(K + s2*I))}, \code{C \textbackslash{} y},
+\code{V = C.L \textbackslash{} Ks}, \code{Kss - V'V}) and with the formula
+written literally (\code{inv}), RBF (radial basis function) kernel
+matrices of random points, $m = 1000$, Apple M5, Julia 1.13 with its
+OpenBLAS on 4 threads (its default here; seconds):
+
+\begin{center}
+\begin{tabular}{rrrrr}
+\toprule
+$n$ & ulm.lam/ulmBLAS & ulm.lam/OpenBLAS & Julia by hand & Julia literal \\
+\midrule
+2000 & 0.037 & 0.045 & 0.071 & 0.212 \\
+4000 & 0.137 & 0.216 & 0.332 & 1.359 \\
+8000 & 0.907 & 1.462 & 1.922 & 8.828 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+In the Kalman loop (200 steps, $n = 4000$), ulm.lam takes about 140\,ms,
+Julia with the operator formed by hand before the loop 390 to 550\,ms
+(it varies between runs), and the formula written in Julia 400 to 520\,s
+(\file{julia/examples/kalman.jl}).
+
+\paragraph{Why it is fast.}
+ulm.lam is a compiler: the formula is traced into an intermediate
+representation, mapped onto BLAS and LAPACK calls, and compiled to C++.
+The mapping makes the decisions an expert makes when writing such code by
+hand:
+\begin{itemize}
+  \item inverses become factorisations and triangular solves; a matrix is
+        factorised once, however often its inverse appears;
+  \item properties are exploited: Cholesky instead of LU for positive
+        definite matrices, \code{syrk} for symmetric products (half the
+        flops of \code{gemm}), one triangle of symmetric matrices;
+  \item chains of products are parenthesised to minimise the cost,
+        at run time if the best order depends on the sizes;
+  \item factorisations and other loop-invariant work are pulled out of
+        loops, and the whole operator is formed before a loop if the
+        number of steps makes it pay off;
+  \item no memory is allocated dynamically, not even inside nested
+        calls: all temporaries live in one workspace with a LAPACK-style
+        size query, kernels work in place where an input is no longer
+        needed, and errors are returned as LAPACK's \code{info}.
+\end{itemize}
+In short: it generates the code a programmer experienced in numerical
+linear algebra would write on top of BLAS and LAPACK.
+
+\paragraph{What the mapping does.}
+With $K + \sigma^2 I = L L\T$ (Cholesky, $L$ lower triangular),
+$(K + \sigma^2 I)\inv = L\invT L\inv$, so
+\[
+  \mu = K_*\T \alpha \quad\text{with}\quad \alpha = L\invT (L\inv y),
+  \qquad
+  \Sigma = K_{**} - V\T V \quad\text{with}\quad V = L\inv K_*.
+\]
+One factorisation serves both results, no inverse is formed, and $V\T V$
+is symmetric, so only one triangle is computed.
+As calls (all temporaries in the workspace $w$):
+\begin{center}
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+& operation & kernel \\
+\midrule
+1 & $W \leftarrow K$, \ $W \leftarrow W + \sigma^2 I$ & copy, \code{adddiag} \\
+2 & $W = L L\T$ ($L$ overwrites $W$); if it fails: return \code{info} 1 & \code{potrf} \\
+3 & $a \leftarrow y$, \ $a \leftarrow L\inv a$, \ $a \leftarrow L\invT a$ & copy, \code{trsv}, \code{trsv} \\
+4 & $\mu \leftarrow K_*\T a$ & \code{gemv} \\
+5 & $V \leftarrow K_*$, \ $V \leftarrow L\inv V$ & copy, \code{trsm} \\
+6 & $\Sigma \leftarrow K_{**}$, \ $\Sigma \leftarrow \Sigma - V\T V$ (lower triangle), mirror it & copy, \code{syrk}, complete \\
+\bottomrule
+\end{tabular}
+\end{center}
+\noindent
+The copies exist because $K$, $K_*$ and $K_{**}$ are \code{in}
+parameters, which the function must not overwrite; declared
+\code{InOut}, $K$ is factorised in place (\cref{sec:gpcluster}).
+\Cref{lst:gpcpp} is the C++ that ulm.lam generates from the five lines of
+Python.
+
+% (not a float: the listing is longer than a page and breaks)
+\begin{flushleft}
+\IfFileExists{\src python/examples/generated/gp.cpp}{%
+  \srcbetween[style=c]{\src python/examples/generated/gp.cpp}{/* gp: matrices}{}{gpcpp}}{%
+  \fbox{run \code{make gp} to generate this listing}}
+\captionsetup{hypcap=false}
+\captionof{figure}{The function \code{gp} generated from the Python
+above (\file{python/examples/generated/gp.cpp}, without the
+\code{\#include} lines and the helpers \code{ulm_lam_copy},
+\code{ulm_lam_adddiag} and \code{ulm_lam_sycomplete} in front of it).
+The interface comment says what the caller passes and what \code{info}
+means; the outer \code{if}s implement the workspace query, the inner ones
+\code{info}; then come the steps of the table above.}
+\label{lst:gpcpp}
+\end{flushleft}
+
+% =====================================================================
+\section{The linear algebra mapping problem}
 % =====================================================================
 
 A linear algebra problem is written as mathematics:
@@ -1077,7 +1244,7 @@ The kernel sequence is identical, so the time of the generated code on
 MKL compared with the hand-written MKL version measures the mapping, and
 the same code on ulmBLAS compared with it on MKL measures ulmBLAS
 (\cref{sec:gpcluster}).
-All 41 Python tests pass with both backends.
+All 42 Python tests pass with both backends.
 
 \paragraph{The ulm.lam ABI.}
 \begin{itemize}
@@ -2102,7 +2269,7 @@ faster than the formula written literally.
 Before the operator was formed by kernel selection (with the per-step
 solves), ulm.lam took 482\,ms here and lost against the hand-written
 version.
-\file{python/tests/test_lam.py} (41 tests, \code{make python}) checks
+\file{python/tests/test_lam.py} (42 tests, \code{make python}) checks
 GLS with lists, buffers and NumPy arrays, \code{inout} parameters, loops
 with carried matrices and callbacks, the operator chosen by the trip
 count, functions calling functions, two results, NumPy layouts, one
@@ -2153,6 +2320,76 @@ per step), and the caller's $R_0$ (an \code{in} parameter) is not
 overwritten.
 
 % =====================================================================
+\section{Julia frontend}\label{sec:julia}
+% =====================================================================
+\file{julia/UlmLam} is a Julia package with the same frontend as the
+Python one: functions are traced to \code{ulm_lam} IR, compiled by the
+same pipeline, and called with \code{ccall}; no Python is involved.
+The notation is Julia's:
+\begin{lstlisting}[style=py]
+using UlmLam, LinearAlgebra
+
+@lam function gls(X::Mat(:n, :m, :full_rank), M::Mat(:n, :n, :spd), y::Vec(:n))
+    inv(X' * inv(M) * X) * X' * inv(M) * y
+end
+
+@lam function gp(K::Mat(:n, :n, :symmetric), s2::Float, Ks::Mat(:n, :m),
+                 Kss::Mat(:m, :m, :symmetric), y::Vec(:n))
+    Kn = assume(K + s2 * I, :spd)
+    (Ks' * inv(Kn) * y, Kss - Ks' * inv(Kn) * Ks)
+end
+
+lib = UlmLam.compile([gls, gp])
+b = lib.gls(X, M, y)            # Julia arrays in and out
+\end{lstlisting}
+\code{X'}, \code{inv}, \code{A \textbackslash{} B}, \code{B / A},
+\code{I} from \code{LinearAlgebra}, \code{assume}, \code{loop} (a
+do-block, with loop-carried matrices as its further arguments and
+results), \code{extern} with callbacks bound by \code{bind!}, \code{InOut},
+\code{Float} and \code{Index} parameters, sizes as symbols, the workspace,
+\code{InfoError} and both backends work as in Python.
+
+\paragraph{Column-major arrays without copies.}
+Julia stores matrices by columns, the generated code by rows.
+A Julia matrix $X$ ($n \times m$) is, as memory, the row-major matrix
+$X\T$ ($m \times n$).
+So the frontend declares a matrix parameter with the transposed type
+(triangles flipped: a lower triangular $X$ is an upper triangular $X\T$),
+the traced function sees \code{transpose(P)}, and a matrix result is
+returned transposed; vectors are the same in both orders.
+Kernel selection turns these transposes into strides, so no matrix is
+copied for the conversion: GLS from Julia gets exactly the kernel
+sequence of GLS from Python.
+That needed four general improvements of the selector, which help
+Python programs as well:
+transposes are pushed to the leaves in the normal form
+($(AB)\T = B\T A\T$, also for sums and scales), and an \code{assume} that
+only drops properties no longer hides a value from the rules (so $P$ and
+$P\T$ are recognised as transposes of each other for \code{syrk} and
+symmetry);
+a solve from the right with an LU factorisation is \code{getrs} on the
+transposed view of the right-hand side (in place);
+an operand of an in-place solve that is a transposed view is copied
+transposed (\code{gecopy}, $O(nm)$, only if nothing cheaper exists);
+and a transpose used outside the algebra (a loop's initial value, a
+result) is materialised by \code{gecopy}.
+Callbacks of external functions get vectors as \code{Vector} and matrices
+as lazy transposes of the row-major buffers, without copies.
+
+\paragraph{Results.}
+\file{julia/UlmLam/test/runtests.jl} (44 tests) runs GLS with fixed and
+run-time sizes, solves from the left and from the right (Cholesky and
+LU), a chain chosen at run time, two results, a loop with callbacks, a
+loop-carried matrix, GP with \code{s2 * I} and a wrong assumption
+(\code{InfoError}), \code{InOut}, a given workspace and argument errors,
+on ulmBLAS and on OpenBLAS (\code{backend=:cblas}).
+\file{julia/examples/gp.jl} and \file{julia/examples/kalman.jl} are the
+benchmarks of \cref{sec:glance}: the GP prediction against Julia code
+written by hand ($2$--$2.4\times$ faster on ulmBLAS, $1.3$--$1.6\times$ on
+the same OpenBLAS) and the Kalman loop ($3$--$4\times$ faster than the
+operator formed by hand).
+
+% =====================================================================
 \section{Showcase: Gaussian process regression}\label{sec:gp}
 % =====================================================================
 A GP (Gaussian process) with kernel $k$ predicts at test points $X_*$ from
@@ -2201,31 +2438,12 @@ For the last step the \code{syrk} rule of \cref{sec:storage} was extended:
 a Gram product $Z\T Z$ may also be added to a symmetric matrix whose lower
 triangle is valid ($C = \beta C + \alpha Z\T Z$).
 The sizes are run-time names, so one library serves all $n$ and $m$.
-\Cref{lst:gpcpp} shows the generated function: the interface comment, the
-workspace query, \code{info} after the Cholesky factorisation, and the
-kernel calls.
+\Cref{lst:gpcpp} in \cref{sec:glance} shows the generated function.
 With \code{backend="cblas"} (\cref{sec:cblas}) the code is the same, with
 \code{ulm_lam_cblas::} instead of \code{ulmBLAS::}
 (\file{python/examples/generated/gp\_cblas.cpp}).
 
-% (not a float: the listing is longer than a page and breaks)
-\begin{flushleft}
-\IfFileExists{\src python/examples/generated/gp.cpp}{%
-  \srcbetween[style=c]{\src python/examples/generated/gp.cpp}{/* gp: matrices}{}{gpcpp}}{%
-  \fbox{run \code{make gp} to generate this listing}}
-\captionsetup{hypcap=false}
-\captionof{figure}{The function \code{gp} generated from the five lines of
-Python above (\file{python/examples/generated/gp.cpp}, without the
-\code{\#include} lines and the helpers \code{ulm_lam_copy},
-\code{ulm_lam_adddiag} and \code{ulm_lam_sycomplete} in front of it).
-$K$ is copied into the workspace, $\sigma^2$ is added to its diagonal,
-and it is factorised there (\code{potrf}); $\alpha = L\invT L\inv y$
-by two triangular solves; the mean by \code{gemv}; $V = L\inv K_*$ by
-\code{trtrs} on a copy of $K_*$; $\Sigma = K_{**} - V\T V$ by \code{sylrk}
-with $\beta = 1$ on a copy of $K_{**}$, whose upper triangle is then
-completed.}
-\label{lst:gpcpp}
-\end{flushleft}
+
 
 \paragraph{Data.}
 Two public data sets, downloaded on first use:

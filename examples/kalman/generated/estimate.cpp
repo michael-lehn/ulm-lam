@@ -26,6 +26,21 @@ ulm_lam_copy(void *dst, const void *src, std::size_t bytes)
     std::memcpy(dst, src, bytes);
 }
 
+template <typename T>
+static void
+ulm_lam_gecopy(std::ptrdiff_t m, std::ptrdiff_t n, const T *A,
+               std::ptrdiff_t incRowA, std::ptrdiff_t incColA, T *B,
+               std::ptrdiff_t incRowB, std::ptrdiff_t incColB)
+{
+    const std::ptrdiff_t bs = 64;
+#pragma omp parallel for collapse(2) schedule(static) if (m * n > 1 << 16)
+    for (std::ptrdiff_t i0 = 0; i0 < m; i0 += bs)
+	for (std::ptrdiff_t j0 = 0; j0 < n; j0 += bs)
+	    for (std::ptrdiff_t i = i0; i < i0 + bs && i < m; ++i)
+		for (std::ptrdiff_t j = j0; j < j0 + bs && j < n; ++j)
+		    B[i * incRowB + j * incColB] = A[i * incRowA + j * incColA];
+}
+
 extern "C" void
 observe(size_t, double *);
 extern "C" void
@@ -96,21 +111,21 @@ estimate(double *v1, double *v2, size_t v3, int8_t *v4, int64_t *v5)
 		if (v30 == v9) {
 		    ptrdiff_t v31 = (ptrdiff_t)v3;
 		    ptrdiff_t v32 = (ptrdiff_t)v10;
-		    bool v33 = (v31 > v32 ? v3 : v10) * 8000000 + 960000000 <
+		    bool v33 = (v31 > v32 ? v3 : v10) * 8000000 + 960400000 <
 		               (v31 > v32 ? v3 : v10) * 48800000;
 		    int64_t v34 = (int64_t)35520000;
 		    double *v35 = (double *)(v17 + v34);
 		    if (v33) {
-			ulm_lam_copy(v35, v28, 3200000);
-			(void)ulmBLAS::trtrs<std::ptrdiff_t>(
-			    false, false, false, false, 2000, 200, v19, 1, 2000,
-			    v35, 200, 1);
+			ulm_lam_gecopy(200, 2000, v28, 1, 200, v35, 2000, 1);
 			(void)ulmBLAS::trtrs<std::ptrdiff_t>(
 			    true, false, false, false, 200, 2000, v26, 200, 1,
-			    v35, 1, 200);
+			    v35, 2000, 1);
 			(void)ulmBLAS::trtrs<std::ptrdiff_t>(
 			    false, false, false, false, 200, 2000, v26, 1, 200,
-			    v35, 1, 200);
+			    v35, 2000, 1);
+			(void)ulmBLAS::trtrs<std::ptrdiff_t>(
+			    false, false, false, false, 2000, 200, v19, 1, 2000,
+			    v35, 1, 2000);
 		    }
 		    int64_t v36 = (int64_t)38720000;
 		    double *v37 = (double *)(v17 + v36);
@@ -119,8 +134,9 @@ estimate(double *v1, double *v2, size_t v3, int8_t *v4, int64_t *v5)
 		    for (size_t i40 = v10; i40 < v3; i40 += 1) {
 			observe(i40, v37);
 			if (v33) {
-			    ulmBLAS::gemv<std::ptrdiff_t>(
-			        200, 2000, v7, v35, 1, 200, v37, 1, v8, v39, 1);
+			    ulmBLAS::gemv<std::ptrdiff_t>(200, 2000, v7, v35,
+			                                  2000, 1, v37, 1, v8,
+			                                  v39, 1);
 			} else {
 			    ulmBLAS::trlsv<std::ptrdiff_t>(2000, false, v19,
 			                                   2000, 1, v37, 1);

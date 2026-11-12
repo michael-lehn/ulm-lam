@@ -71,6 +71,33 @@ isUlmLamOp(Operation *op)
     return isa_and_nonnull<UlmLamDialect>(op->getDialect());
 }
 
+/// x' = assume(x) that only drops properties (as folds leave behind to
+/// keep a result type, e.g. transpose(transpose(P)) -> assume(P)): its
+/// uses in ulm_lam operations get x itself, which has more properties, and
+/// which other rules then recognise (P and P^T as each other's transpose,
+/// the full rank of P).  Other uses (return, calls) keep x'.
+struct ForwardDroppingAssume : OpRewritePattern<AssumeOp>
+{
+    using OpRewritePattern::OpRewritePattern;
+    LogicalResult
+    matchAndRewrite(AssumeOp op, PatternRewriter &rewriter) const override
+    {
+	if (op.getChecked() ||
+	    !bitEnumContainsAll(propertiesOf(op.getOperand().getType()),
+	                        propertiesOf(op.getType())))
+	    return failure();
+	bool changed = false;
+	for (OpOperand &u : llvm::make_early_inc_range(op->getUses())) {
+	    Operation *user = u.getOwner();
+	    if (!isa<MulOp, AddOp, TransposeOp, InverseOp, ScaleOp>(user))
+		continue;
+	    rewriter.modifyOpInPlace(user, [&] { u.set(op.getOperand()); });
+	    changed = true;
+	}
+	return success(changed);
+    }
+};
+
 //===----------------------------------------------------------------------===//
 // ulm-lam-normalize
 //===----------------------------------------------------------------------===//
@@ -94,6 +121,7 @@ struct UlmLamNormalize
     {
 	MLIRContext *ctx = &getContext();
 	RewritePatternSet patterns(ctx);
+	patterns.add<ForwardDroppingAssume>(ctx);
 	MulOp::getCanonicalizationPatterns(patterns, ctx);
 	AddOp::getCanonicalizationPatterns(patterns, ctx);
 	ScaleOp::getCanonicalizationPatterns(patterns, ctx);
@@ -318,6 +346,32 @@ class Selector
 	    if (failed(r))
 		return failure();
 	    replace(op, *r);
+	}
+	// A transpose used outside the ulm_lam ops (a loop's initial value, a
+	// result, an argument of a call) is materialised: a transposed copy
+	// (gecopy).  Inside products and sums transposes are strides.
+	SmallVector<TransposeOp> transposes;
+	func.walk([&](TransposeOp t) { transposes.push_back(t); });
+	for (TransposeOp t : transposes) {
+	    SmallVector<OpOperand *> outside;
+	    for (OpOperand &u : t->getUses())
+		if (!isUlmLamOp(u.getOwner()))
+		    outside.push_back(&u);
+	    if (outside.empty())
+		continue;
+	    b.setInsertionPointAfter(t);
+	    Location loc = t.getLoc();
+	    Leaf l;
+	    l.v = t.getOperand();
+	    l.trans = true;
+	    Value e = empty(l, l, elementType(l.v), loc);
+	    Value g = lk::GecopyOp::create(b, loc, TypeRange{e.getType()},
+	                                   lk::Trans::trans, l.v, e)
+	                  ->getResult(0);
+	    if (g.getType() != t.getType())
+		g = AssumeOp::create(b, loc, t.getType(), g, false);
+	    for (OpOperand *u : outside)
+		u->set(g);
 	}
 	// Other uses (return, calls, loops) get the whole matrix: the storage
 	// of a matrix ends with the ops that know it.
@@ -706,15 +760,39 @@ class Selector
     }
 
     /// Interval [i, j] can be the in-place operand of a solve: it is computed
-    /// into a buffer, or it is a single untransposed matrix.
+    /// into a buffer, or it is a single matrix.  A transposed one (a
+    /// transposed leaf, or a computed interval reused transposed) is first
+    /// copied transposed (gecopy, see transposedOperand).
     static bool
     solveOperand(const Chain &c, int i, int j)
     {
 	if (i < j)
-	    return c.cost[i][j] < kInf &&
-	           !(c.choice[i][j].kind == Choice::Reuse &&
-	             c.choice[i][j].trans);
-	return c.leaves[i].kind == Leaf::Mat && !c.leaves[i].trans;
+	    return c.cost[i][j] < kInf;
+	return c.leaves[i].kind == Leaf::Mat;
+    }
+
+    /// The operand [i, j] of a solve is a transposed view: it costs a
+    /// transposed copy (rows x cols of the interval).
+    static bool
+    transposedOperand(const Chain &c, int i, int j)
+    {
+	if (i < j)
+	    return c.choice[i][j].kind == Choice::Reuse && c.choice[i][j].trans;
+	return c.leaves[i].trans;
+    }
+
+    /// op(l) as an untransposed matrix: a transposed one is copied.
+    Leaf
+    untransposed(Leaf l, Location loc)
+    {
+	if (!l.trans)
+	    return l;
+	Value e = empty(l, l, elementType(l.v), loc);
+	l.v = lk::GecopyOp::create(b, loc, TypeRange{e.getType()},
+	                           lk::Trans::trans, l.v, e)
+	          ->getResult(0);
+	l.trans = false;
+	return l;
     }
 
     void
@@ -763,14 +841,21 @@ class Selector
 		    // place)
 		    if (s == i && L[i].isSolve() && solveOperand(c, s + 1, j)) {
 			double f = L[i].kind == Leaf::LUSolve ? 2 : 1;
-			consider(i, j, c.cost[s + 1][j] + f * m * m * n,
+			double copy =
+			    transposedOperand(c, s + 1, j) ? m * n : 0;
+			consider(i, j,
+			         c.cost[s + 1][j] + f * m * m * n + copy,
 			         {Choice::SolveLeft, s});
 		    }
 		    // a triangular solve applied from the right to the left
 		    // part
-		    if (s + 1 == j && L[j].kind == Leaf::TriSolve &&
-		        solveOperand(c, i, s))
-			consider(i, j, c.cost[i][s] + m * n * n,
+		    // (with LU: getrs on the transposed view, side(right))
+		    if (s + 1 == j && L[j].isSolve() && solveOperand(c, i, s))
+			consider(i, j,
+			         c.cost[i][s] +
+			             (L[j].kind == Leaf::LUSolve ? 2 : 1) * m * n *
+			                 n +
+			             (transposedOperand(c, i, s) ? m * n : 0),
 			         {Choice::SolveRight, s});
 		}
 		// Z^T Z: the left half is the transpose of the right half
@@ -816,8 +901,8 @@ class Selector
 	int64_t n = cast<RankedTensorType>(rhs.getType()).getDimSize(1);
 	auto trans = s.trans ? lk::Trans::trans : lk::Trans::none;
 	if (s.kind == Leaf::LUSolve)
-	    return lk::GetrsOp::create(b, loc, TypeRange{rhs.getType()}, trans,
-	                               s.v, s.piv, rhs)
+	    return lk::GetrsOp::create(b, loc, TypeRange{rhs.getType()},
+	                               lk::Side::left, trans, s.v, s.piv, rhs)
 	        ->getResult(0);
 	auto uplo = s.lower ? lk::Uplo::lower : lk::Uplo::upper;
 	if (isVector(n))
@@ -842,10 +927,17 @@ class Selector
 	    .getResult();
     }
 
-    /// x := x op(T)^-1 in place, T triangular (a solve from the right).
+    /// x := x op(T)^-1 in place, T triangular or LU factors (a solve from
+    /// the right).
     Value
     solveRightInPlace(const Leaf &t, Value x, Location loc)
     {
+	if (t.kind == Leaf::LUSolve)
+	    return lk::GetrsOp::create(
+	               b, loc, TypeRange{x.getType()}, lk::Side::right,
+	               t.trans ? lk::Trans::trans : lk::Trans::none, t.v, t.piv,
+	               x)
+	        ->getResult(0);
 	return lk::TrsmOp::create(b, loc, TypeRange{x.getType()},
 	                          lk::Side::right,
 	                          t.lower ? lk::Uplo::lower : lk::Uplo::upper,
@@ -877,7 +969,12 @@ class Selector
 	auto part = [&](int a, int z) -> Value {
 	    if (a < z && c.choice[a][z].kind != Choice::Reuse)
 		return emitInto(c, a, z, dest, 1.0, loc);
-	    return into(fullLeaf(operand(c, a, z, loc)).v, dest, loc);
+	    Leaf l = fullLeaf(operand(c, a, z, loc));
+	    if (l.trans) // copied transposed into dest
+		return lk::GecopyOp::create(b, loc, TypeRange{dest.getType()},
+		                            lk::Trans::trans, l.v, dest)
+		    ->getResult(0);
+	    return into(l.v, dest, loc);
 	};
 	switch (ch.kind) {
 	case Choice::Gemm:
@@ -1036,20 +1133,13 @@ class Selector
 	    return gemm(zt, z, dest, alpha, beta, loc);
 	}
 	case Choice::SolveLeft: {
-	    Leaf rhs = fullLeaf(operand(c, s + 1, j, loc));
+	    Leaf rhs = untransposed(fullLeaf(operand(c, s + 1, j, loc)), loc);
 	    return accumulate(solveInPlace(c.leaves[i], rhs.v, loc), dest,
 	                      alpha, beta, loc);
 	}
 	case Choice::SolveRight: {
-	    Leaf lhs = fullLeaf(operand(c, i, s, loc));
-	    const Leaf &t = c.leaves[j];
-	    Value x = lk::TrsmOp::create(
-	                  b, loc, TypeRange{lhs.v.getType()}, lk::Side::right,
-	                  t.lower ? lk::Uplo::lower : lk::Uplo::upper,
-	                  t.trans ? lk::Trans::trans : lk::Trans::none,
-	                  lk::Diag::non_unit,
-	                  constant(elementType(lhs.v), 1, loc), t.v, lhs.v)
-	                  ->getResult(0);
+	    Leaf lhs = untransposed(fullLeaf(operand(c, i, s, loc)), loc);
+	    Value x = solveRightInPlace(c.leaves[j], lhs.v, loc);
 	    return accumulate(x, dest, alpha, beta, loc);
 	}
 	case Choice::Reuse: // only proper subintervals, used via operand()
@@ -1145,12 +1235,18 @@ class Selector
 	    return add(
 	        add(costValue(c, i, s, loc), costValue(c, s + 1, j, loc)),
 	        mul(cst(2), mul(mul(m, dimIndex(L[s].colsDim(), loc)), n)));
-	case Choice::SolveLeft:
-	    return add(costValue(c, s + 1, j, loc),
-	               mul(cst(L[i].kind == Leaf::LUSolve ? 2 : 1),
-	                   mul(mul(m, m), n)));
-	case Choice::SolveRight:
-	    return add(costValue(c, i, s, loc), mul(mul(m, n), n));
+	case Choice::SolveLeft: {
+	    Value v = add(costValue(c, s + 1, j, loc),
+	                  mul(cst(L[i].kind == Leaf::LUSolve ? 2 : 1),
+	                      mul(mul(m, m), n)));
+	    return transposedOperand(c, s + 1, j) ? add(v, mul(m, n)) : v;
+	}
+	case Choice::SolveRight: {
+	    Value v = add(costValue(c, i, s, loc),
+	                  mul(cst(L[j].kind == Leaf::LUSolve ? 2 : 1),
+	                      mul(mul(m, n), n)));
+	    return transposedOperand(c, i, s) ? add(v, mul(m, n)) : v;
+	}
 	case Choice::Gram:
 	    return add(costValue(c, s, j, loc),
 	               mul(mul(n, dimIndex(L[s].rowsDim(), loc)), n));
@@ -1174,10 +1270,13 @@ class Selector
 	if (plans.empty())
 	    return mul.emitError(
 	               "ulm-lam-select-kernels: no kernel sequence for this "
-	               "product (an explicit inverse, or a right solve "
-	               "with an LU factorisation, would be needed)"),
+	               "product (an explicit inverse would be needed)"),
 	           failure();
-	b.setInsertionPoint(mul);
+	// at the product, or with an accumulator at the sum (the insertion
+	// point of selectAdd): the product may have been moved out of a loop
+	// in which the accumulator is defined (X + A B with X loop-carried)
+	if (!dest)
+	    b.setInsertionPoint(mul);
 	if (plans.size() > 1)
 	    return choosePlan(c, plans, mul, dest, alpha, beta);
 	if (!dest && !inBranch)

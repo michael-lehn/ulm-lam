@@ -394,6 +394,40 @@ class Dynamic(unittest.TestCase):
                               X.T @ np.linalg.solve(M, ys.T)).T
         self.assertLess(np.abs(out - ref).max(), 1e-12)
 
+    def test_lu_and_transposed_operands(self):
+        """LU with run-time sizes (crashed form-expressions before the
+        operands of a call were deduplicated), solves with a transposed
+        right-hand side (gecopy) and from the right with LU (getrs on the
+        transposed view)."""
+        @lam.function
+        def lu_d(M: Matrix("n", "n"), B: Matrix("n", "k")):
+            return M.inv @ B
+
+        @lam.function
+        def lu_t(M: Matrix("n", "n"), C: Matrix("k", "n")):
+            return M.inv @ C.T
+
+        @lam.function
+        def right_lu(C: Matrix("k", "n"), M: Matrix("n", "n")):
+            return C @ M.inv
+
+        @lam.function
+        def chol_t(M: Matrix("n", "n", "spd"), C: Matrix("k", "n")):
+            return M.inv @ C.T
+
+        lib = lam.compile([lu_d, lu_t, right_lu, chol_t], name="transposed")
+        n, k = 23, 4
+        A = self.rng.uniform(-1, 1, (n, n)) + n * np.eye(n)
+        S = A @ A.T
+        B = self.rng.uniform(-1, 1, (n, k))
+        C = self.rng.uniform(-1, 1, (k, n))
+        close = lambda x, r: np.abs(x - r).max() / np.abs(r).max() < 1e-12  # noqa: E731
+        self.assertTrue(close(lib.lu_d(A, B), np.linalg.solve(A, B)))
+        self.assertTrue(close(lib.lu_t(A, C), np.linalg.solve(A, C.T)))
+        self.assertTrue(close(lib.right_lu(C, A), C @ np.linalg.inv(A)))
+        self.assertTrue(close(lib.chol_t(S, C), np.linalg.solve(S, C.T)))
+        self.assertIn("ulm_lam_gecopy(", lib.chol_t.cpp)
+
     def test_operator_hoisted_by_trip_count(self):
         """b_i = (H^T R^-1 H)^-1 H^T R^-1 y_i: with many steps the operator
         is formed before the loop (one gemv per step), with few steps the

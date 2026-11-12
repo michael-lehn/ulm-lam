@@ -39,6 +39,26 @@ reuses (`lib.workspace`), or in one passed as `work=lam.Workspace(size)`.  See `
 `python/examples/adaptive_kalman.py` (the covariance updated in place by a
 Python callback in every step) and `python/tests/`.  NumPy is optional.
 
+## Julia
+
+```julia
+using UlmLam, LinearAlgebra
+
+@lam function gls(X::Mat(:n, :m, :full_rank), M::Mat(:n, :n, :spd), y::Vec(:n))
+    inv(X' * inv(M) * X) * X' * inv(M) * y
+end
+
+lib = UlmLam.compile(gls)       # the same pipeline as from Python
+b = lib.gls(X, M, y)            # Julia arrays in and out (ccall, no Python)
+```
+
+`julia/UlmLam` (`make julia`): `X'`, `inv`, `A \ B`, `B / A`, `K + s2*I`,
+`assume`, `loop` (do-block), `extern` with Julia callbacks (`bind!`),
+`InOut`, `Float`/`Index` parameters, sizes as symbols, workspaces,
+`InfoError`, `backend=:cblas`.  Julia's column-major arrays are passed as
+the row-major transposes, without copies; kernel selection turns the
+transposes into strides.  `julia/examples/kalman.jl` is the Kalman loop.
+
 ## Showcase: Gaussian process regression
 
 `python/examples/gp.py` (`make gp`) predicts with a GP (Gaussian process)
@@ -137,14 +157,14 @@ What is checked (`make`):
   info for an indefinite and a singular matrix and a too small workspace.
 - `make dynamic`: one compiled GLS with run-time sizes for six sizes.
 - `make gp`: the GP showcase above (needs the network once).
-- `make python`: the Python frontend: 41 unit tests (among them symmetric
+- `make python`: the Python frontend: 42 unit tests (among them symmetric
   matrices stored as one triangle, with NaN in the other one) and the two
   Kalman examples against NumPy.
 
-Requirements: Homebrew `llvm` (LLVM, originally "Low Level Virtual Machine";
+Requirements: Julia (for `make julia`), Homebrew `llvm` (LLVM, originally "Low Level Virtual Machine";
 MLIR 23), ulmBLAS (`ULMBLAS_DIR`, default `~/git/ulmBLAS`), TeX Live with
 LuaLaTeX.
 
 ```sh
-make            # ods, plugin, stages, loop, gls, kalman, compose, cases, dynamic, python, doc
+make            # ods, plugin, stages, loop, gls, kalman, compose, cases, dynamic, python, julia, doc
 ```

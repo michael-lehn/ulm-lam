@@ -1,8 +1,8 @@
 # ULMBLAS_DIR (default ~/git/ulmBLAS) and ARCHFLAGS (default -mcpu=native)
 # select ulmBLAS and its micro kernels, see scripts/ulmblas-env.sh.
-.PHONY: all ods plugin stages loop gls kalman compose cases dynamic gp python doc clean
+.PHONY: all ods plugin stages loop gls kalman compose cases dynamic gp python julia doc clean
 
-all: ods plugin stages loop gls kalman compose cases dynamic python doc
+all: ods plugin stages loop gls kalman compose cases dynamic python julia doc
 
 ods:            ## run all mlir-tblgen backends on the dialect sketch
 	scripts/check-ods.sh
@@ -41,6 +41,11 @@ python:         ## the Python frontend: unit tests and the Kalman examples
 	python3 -m unittest discover -s python/tests
 	python3 python/examples/kalman.py
 	python3 python/examples/adaptive_kalman.py
+
+julia:          ## the Julia frontend (julia/UlmLam): tests, Kalman and GP examples
+	julia --project=julia/UlmLam julia/UlmLam/test/runtests.jl
+	julia --project=julia/UlmLam julia/examples/kalman.jl
+	julia --project=julia/UlmLam julia/examples/gp.jl
 
 doc:            ## build doc/ulm-lam.pdf with LuaLaTeX
 	cd doc && latexmk

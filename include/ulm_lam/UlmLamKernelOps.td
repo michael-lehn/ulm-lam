@@ -73,6 +73,21 @@ def UlmLamk_GescalOp : UlmLamk_Op<"gescal", "X", [ScalarOf<"alpha", "X">]> {
   }];
 }
 
+def UlmLamk_GecopyOp : UlmLamk_Op<"gecopy", "B"> {
+  let summary = "B := op(A)  (a copy, transposed or not)";
+  let description = [{
+    A transposed operand of an in-place solve (e.g. B in M^-1 B^T, or a
+    Julia array, which is the transpose of a row-major one) is copied
+    transposed into a new buffer, where the solve then works.
+  }];
+  let arguments = (ins UlmLamk_TransAttr:$trans, UlmLamk_Shaped:$A,
+                       UlmLamk_Shaped:$B);
+  let assemblyFormat = [{
+    `trans` `(` $trans `)` `ins` `(` $A `:` type($A) `)`
+    `outs` `(` $B `:` type($B) `)` attr-dict (`->` type($result)^)?
+  }];
+}
+
 def UlmLamk_AdddiagOp : UlmLamk_Op<"adddiag", "A", [ScalarOf<"alpha", "A">]> {
   let summary = "A := A + alpha * I  (A square)";
   let description = [{
@@ -271,11 +286,18 @@ def UlmLamk_GetrfOp : Op<UlmLamk_Dialect, "getrf", [
 }
 
 def UlmLamk_GetrsOp : UlmLamk_Op<"getrs", "B"> {
-  let summary = "B := op(A)^-1 B using the LU factors from getrf";
-  let arguments = (ins UlmLamk_TransAttr:$trans, UlmLamk_Shaped:$LU,
-                       UlmLamk_Pivots:$ipiv, UlmLamk_Shaped:$B);
+  let summary = "B := op(A)^-1 B (left) or B op(A)^-1 (right), LU factors";
+  let description = [{
+    side(right) is the solve from the right, B op(A)^-1 = (op(A)^-T B^T)^T:
+    a solve from the left on the transposed view of the same buffer (the
+    lowering swaps the strides of B and flips trans), in place.
+  }];
+  let arguments = (ins
+      DefaultValuedAttr<UlmLamk_SideAttr, "::mlir::ulm_lamk::Side::left">:$side,
+      UlmLamk_TransAttr:$trans, UlmLamk_Shaped:$LU, UlmLamk_Pivots:$ipiv,
+      UlmLamk_Shaped:$B);
   let assemblyFormat = [{
-    `trans` `(` $trans `)`
+    (`side` `(` $side^ `)`)? `trans` `(` $trans `)`
     `ins` `(` $LU `,` $ipiv `:` type($LU) `,` type($ipiv) `)`
     `outs` `(` $B `:` type($B) `)` attr-dict (`->` type($result)^)?
   }];
