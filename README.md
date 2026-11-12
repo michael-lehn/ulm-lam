@@ -94,6 +94,9 @@ $K$ from two triangular solves instead of $S^{-1}$, $H P$ computed once and
 reused for $S$ and for $K H P$ (evaluated as $K (H P)$), and no allocation
 in the loop.
 
+**Try it in the browser: [▶ the notebook, live on Binder](https://mybinder.org/v2/gh/michael-lehn/ulm-lam/master?urlpath=pluto%2Fopen%3Fpath%3D%2Fhome%2Fjovyan%2Fnotebook%2Fulm-lam.jl)**
+([static version](https://michael-lehn.github.io/ulm-lam/)).
+
 The Pluto notebook [`notebook/ulm-lam.jl`](notebook/ulm-lam.jl) has these
 and more to play with: GP (Gaussian process) regression compared with
 AbstractGPs.jl, linear attention with the order of $Q K^T V$ chosen at run

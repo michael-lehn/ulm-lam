@@ -20,7 +20,7 @@
 # the header-only ulmBLAS (ULMBLAS_DIR), :cblas a CBLAS/LAPACK library
 # (ULM_LAM_BLAS_LIBS, default Homebrew's OpenBLAS).
 # Environment: LLVM_PREFIX, ULMBLAS_DIR (default ~/git/ulmBLAS), ARCHFLAGS
-# (default -mcpu=native), CXX (default c++), OPENMP (0: without).
+# (default -mcpu=native on macOS, -march=native elsewhere), CXX (default c++), OPENMP (0: without).
 
 const ROOT = normpath(joinpath(@__DIR__, "..", "..", ".."))
 
@@ -49,7 +49,7 @@ whatever it forwards to, e.g. ulmBLAS after UlmBLAS.forward())."""
 lbt_path() = Libdl.dlpath(LinearAlgebra.BLAS.libblastrampoline)
 
 function cxx_flags(backend::Symbol)
-    arch = split(get(ENV, "ARCHFLAGS", "-mcpu=native"))
+    arch = split(get(ENV, "ARCHFLAGS", Sys.isapple() ? "-mcpu=native" : "-march=native"))
     if backend == :julia
         lbt = lbt_path()
         return ["-std=c++17", "-O3", arch..., "-I", joinpath(ROOT, "include"),
@@ -112,7 +112,7 @@ end
 # ---------------------------------------------------------------------------
 
 const IFACE = r"/\* (\w+): matrices by reference[^\n]*\n(.*?)\n \*/"s
-const SIG = r"extern \"C\" void\s*\n(\w+)\(([^)]*)\);"
+const SIG = r"extern \"C\" void\s+(\w+)\(([^)]*)\);"
 
 """name => [(C type, intent)] from the interface comments."""
 function interfaces(cpp::String)

@@ -16,7 +16,7 @@ macro bind(def, element)
     #! format: on
 end
 
-# ╔═╡ cf8f5d36-e49f-4e71-bc75-d29a5d010cc2
+# ╔═╡ 1f86d865-3935-454e-a4e8-cb6425df5e31
 md"""
 # ulm.lam: write the formula, get the BLAS/LAPACK calls an expert would write
 
@@ -40,17 +40,22 @@ uses (OpenBLAS, or anything libblastrampoline forwards to).
 
 *An early research prototype; the sources are at
 [github.com/michael-lehn/ulm-lam](https://github.com/michael-lehn/ulm-lam).*
+
+**[▶ Run this notebook live](https://mybinder.org/v2/gh/michael-lehn/ulm-lam/master?urlpath=pluto%2Fopen%3Fpath%3D%2Fhome%2Fjovyan%2Fnotebook%2Fulm-lam.jl)** (on mybinder.org, with LLVM/MLIR,
+Julia and ulm.lam in the container; starting takes a minute or two).  Change
+a formula and `@code_lam` shows the new derivation.
 """
 
-# ╔═╡ 34186a44-87fb-4fc9-9737-b841a167b00d
+# ╔═╡ 6ec8deea-59ba-4a3e-afb6-95e39933c992
 begin
     import Pkg
-    Pkg.activate(@__DIR__)   # the notebook's environment (see the README)
+    # the notebook's environment (see the README; on Binder set by the image)
+    Pkg.activate(get(ENV, "ULM_LAM_NOTEBOOK_ENV", @__DIR__))
     using UlmLam, LinearAlgebra, BenchmarkTools, Random, Printf, Markdown
     using AbstractGPs, KernelFunctions, PlutoUI
 end
 
-# ╔═╡ 9b7b6e40-3942-445c-b623-5d25ce65fa35
+# ╔═╡ 48cfa4a2-d85c-4f4f-aeca-9291e4cd1ab8
 md"""
 ## Write the formula
 
@@ -65,18 +70,18 @@ In Julia, with the properties as part of the types (`:n` and `:m` are sizes
 known only at run time):
 """
 
-# ╔═╡ 0007b426-c121-4be5-a487-411dd06ad4c2
+# ╔═╡ 4b6a0989-6240-41ab-9b86-dd7ecdfdcc8c
 @lam function gls(X::Mat(:n, :m, :full_rank), M::Mat(:n, :n, :spd), y::Vec(:n))
     inv(X' * inv(M) * X) * X' * inv(M) * y
 end
 
-# ╔═╡ 205cc544-e046-4a3f-a012-71be7b77c9ea
+# ╔═╡ ae77e6a4-2440-4582-820b-0678d5f37730
 md"""
 Call it with ordinary Julia arrays.  The first call compiles it (about half a
 second), later calls reuse the library.
 """
 
-# ╔═╡ 0304cc9c-2c20-4070-a200-851faddd13f7
+# ╔═╡ c64bdd76-f0ff-4cd6-b67c-ab8c6ee871b3
 begin
     Random.seed!(1)
     n, m = 2000, 50
@@ -85,18 +90,18 @@ begin
     y = randn(n)
 end;
 
-# ╔═╡ 3c6e2168-0f97-4796-a866-8bc9e04b6bab
+# ╔═╡ 2ad231a6-a084-47d5-9ca3-3d8dce2c11ae
 β = gls(X, M, y)
 
-# ╔═╡ 59ef028c-8974-4ad4-8ecc-0b369de8cd07
+# ╔═╡ 35e3d952-dec5-4d4c-902b-e1f0d4a8099e
 md"""
 ## Why it is fast: `@code_lam`
 """
 
-# ╔═╡ f8c9ab99-7e6e-423e-a1cd-410eefd4b751
+# ╔═╡ d9e919a8-a84c-4f32-9218-bb19473679eb
 @code_lam gls(X, M, y)
 
-# ╔═╡ 75384a1f-26be-471b-bb82-fa35b02ec8da
+# ╔═╡ 2ad3b06d-92a8-4935-aa48-f1f3547d52b7
 md"""
 What happened to the formula:
 
@@ -114,17 +119,17 @@ The same function written as plain Julia, and the version a numerical analyst
 writes by hand:
 """
 
-# ╔═╡ 19d31e1e-ff06-4c4b-9f0b-82afc42b2c6f
+# ╔═╡ ce228192-aa94-4d58-84b6-0d534693c894
 gls_literal(X, M, y) = inv(X' * inv(M) * X) * X' * inv(M) * y
 
-# ╔═╡ 54555783-3e8b-4dc8-ba6d-d6096e921689
+# ╔═╡ ed1178e4-7e5a-4696-992a-a5c71680e60f
 function gls_by_hand(X, M, y)
     C = cholesky(Symmetric(M))
     V = C.L \ X
     cholesky(Symmetric(V' * V)) \ (V' * (C.L \ y))
 end
 
-# ╔═╡ 5402f935-768c-4e03-bc3c-e8bfee7e90c5
+# ╔═╡ dd9a2d2a-4602-46a0-a1b7-dec2f39e6963
 "Time (best of several runs) and memory allocated per call, relative to the first case."
 function compare(cases...)
     rows = map(cases) do (name, f)
@@ -141,15 +146,15 @@ function compare(cases...)
     Markdown.parse(s)
 end
 
-# ╔═╡ 32bd761b-668e-4f17-8c28-203c23541291
+# ╔═╡ e3f544dc-3b00-4d4a-a6df-09563eddaec2
 compare("ulm.lam" => () -> gls(X, M, y),
         "Julia, the formula as written" => () -> gls_literal(X, M, y),
         "Julia, by hand" => () -> gls_by_hand(X, M, y))
 
-# ╔═╡ 00738dd0-3b73-4fd3-8c0b-1dd884cfdd0b
+# ╔═╡ 33626ac4-8046-4691-8dff-497a96108edb
 norm(β - gls_by_hand(X, M, y)) / norm(β)   # the same result
 
-# ╔═╡ 74439455-849b-4d9f-a3fd-91a972a2628e
+# ╔═╡ afabe02a-51a0-47aa-a80a-c6899d99f3c6
 md"""
 ## Gaussian process regression, compared with AbstractGPs.jl
 
@@ -159,17 +164,17 @@ test points, ``K_{**}`` of the test points, ``\sigma^2`` the noise variance,
 a run-time `Float`):
 """
 
-# ╔═╡ a1a46c76-c497-4c4f-99ac-f11e6a548c8f
+# ╔═╡ b2cef0aa-1713-4e80-a6d0-7c07fbee9c2b
 @lam function gp(K::Mat(:n, :n, :symmetric), s2::Float, Ks::Mat(:n, :m),
                  Kss::Mat(:m, :m, :symmetric), y::Vec(:n))
     Kn = assume(K + s2 * I, :spd)    # what we know, the compiler cannot derive
     (Ks' * inv(Kn) * y, Kss - Ks' * inv(Kn) * Ks)
 end
 
-# ╔═╡ 7de7602a-7e4d-4744-8f4c-4a19f5d7b694
+# ╔═╡ f14cf7b3-e69a-479c-a81f-1eb1928862ff
 @code_lam gp(K, s2, Ks, Kss, y)
 
-# ╔═╡ d1a5945b-083f-4e6e-a895-a05e24da254f
+# ╔═╡ 72916aad-2ed2-43e0-a88c-c9776278419c
 md"""
 One Cholesky factorisation for both results, ``\sigma^2`` added to the
 diagonal in place, ``K_*^T K_n^{-1} K_*`` as ``V^T V`` with
@@ -178,7 +183,7 @@ what [AbstractGPs.jl](https://github.com/JuliaGaussianProcesses/AbstractGPs.jl)
 does by hand.  ulm.lam derives it from the formula:
 """
 
-# ╔═╡ 3f78cf7e-bcd7-4d25-89f9-d371fe9f44d4
+# ╔═╡ 14ed5dc9-9f6c-43a3-913a-519d9bd224a7
 begin
     kernel = SqExponentialKernel()
     s2 = 0.01
@@ -190,18 +195,18 @@ begin
     gp_abstractgps(x, xs, y) = mean_and_cov(posterior(GP(kernel)(x, s2), y)(xs))
 end;
 
-# ╔═╡ df27d207-809e-4644-9393-90d1aa23efb8
+# ╔═╡ eb4980cd-0146-4629-a21c-940ee78b6fa2
 compare("ulm.lam (kernel matrices from KernelFunctions.jl)" =>
             () -> gp_ulmlam(xtrain, xtest, ytrain),
         "AbstractGPs.jl" => () -> gp_abstractgps(xtrain, xtest, ytrain))
 
-# ╔═╡ db1cac5a-0382-4a99-908c-78a023330018
+# ╔═╡ 7d1053fe-1de8-498d-9e72-a8c4f3c54508
 let (μ, Σ) = gp_ulmlam(xtrain, xtest, ytrain),
     (μ2, Σ2) = gp_abstractgps(xtrain, xtest, ytrain)
     (norm(μ - μ2) / norm(μ2), norm(Σ - Σ2) / norm(Σ2))
 end
 
-# ╔═╡ 71383705-747c-472d-b0f2-28c88390af18
+# ╔═╡ 619544bf-3097-4aa1-ba9f-38d42a5ef98d
 md"""
 As fast as the hand-written package, with half the memory: ulm.lam's
 temporaries live in one workspace that is reused across calls.
@@ -213,7 +218,7 @@ step to step; the measurements come from a Julia function and the estimates
 go to one (`extern`):
 """
 
-# ╔═╡ 93f4bf49-06a6-4910-8c4a-e58ec6f844ab
+# ╔═╡ 13c30aff-eaf2-4f25-88dc-bc8b53aaf107
 begin
     measure = extern(:measure, [Index], Vec(:m))
     estimate = extern(:estimate, [Index, Vec(:n)])
@@ -234,10 +239,10 @@ begin
     end
 end
 
-# ╔═╡ bc606a0c-e4fa-4d80-a5dc-7e86ca667a96
+# ╔═╡ 92b661fe-eb74-42b6-a73b-4413592a4c46
 @code_lam kalman(F, Q, H, R, x0, P0, steps)
 
-# ╔═╡ 4803d565-8d52-4568-bbf4-a256274a4ff1
+# ╔═╡ be9de426-96ca-47db-8a84-419a567d7b03
 md"""
 ``S^{-1}`` is never formed: ``K = P H^T S^{-1}`` is two triangular solves
 with the Cholesky factor of ``S``.  ``H P`` is computed once and reused
@@ -249,7 +254,7 @@ The model: a field on a periodic grid, transported and diffused, observed by
 ``m`` sensors.
 """
 
-# ╔═╡ 8fba5f78-64fe-4ced-8425-4eb328824596
+# ╔═╡ 679ffed0-23f5-40fd-8144-0cc9fedb5915
 function model(n, m, steps)
     c, ν = 0.4, 0.2
     F = zeros(n, n)
@@ -274,7 +279,7 @@ function model(n, m, steps)
     F, Q, H, R, zeros(n), Matrix(1.0I, n, n), zs, truth
 end
 
-# ╔═╡ fcd411bb-dd34-4245-bced-ebc86226282f
+# ╔═╡ ca3f7101-36cb-4666-a0e8-b7c10bf4e16d
 begin
     steps = 20
     F, Q, H, R, x0, P0, zs, truth = model(1000, 100, steps)
@@ -282,7 +287,7 @@ begin
     bind!(kalman; measure = i -> zs[i+1], estimate = (i, x) -> (estimates[:, i+1] .= x))
 end;
 
-# ╔═╡ 37a58da2-9436-4c1e-b46a-d3a72464d9cb
+# ╔═╡ 77b9e80c-bc61-4105-accd-506d09899067
 function kalman_literal(F, Q, H, R, x, P, zs)
     for z in zs
         x = F * x
@@ -295,18 +300,18 @@ function kalman_literal(F, Q, H, R, x, P, zs)
     x, P
 end
 
-# ╔═╡ 25cf2473-0c3e-465c-b99b-6f5fd35c5dda
+# ╔═╡ bc28e36e-a76d-407f-b09e-cd1837598769
 compare("ulm.lam" => () -> kalman(F, Q, H, R, x0, P0, steps),
         "Julia, the formula as written" =>
             () -> kalman_literal(F, Q, H, R, x0, P0, zs))
 
-# ╔═╡ 657e4623-dd89-46ce-88af-77d2fe79ae6b
+# ╔═╡ f8fbe8fd-95b1-4a81-ab4d-322b18bebacb
 let (x, P) = kalman(F, Q, H, R, x0, P0, steps),
     (x2, P2) = kalman_literal(F, Q, H, R, x0, P0, zs)
     (norm(x - x2) / norm(x2), norm(P - P2) / norm(P2))
 end
 
-# ╔═╡ c8ac9d4a-cf1d-45e4-9f7c-6670d6f5e806
+# ╔═╡ f14629d7-76f1-4520-9dfb-4d56a888b05d
 md"""
 ## Decisions at run time: linear attention
 
@@ -317,18 +322,18 @@ run time, so ulm.lam generates both orders and picks the cheaper one when it
 is called:
 """
 
-# ╔═╡ 93c954cf-f30c-4548-8d4d-a8180c099975
+# ╔═╡ cb3eea95-b703-44bb-8c96-3dbe825af206
 @lam attention(Q::Mat(:N, :d), K::Mat(:N, :d), V::Mat(:N, :e)) = Q * K' * V
 
-# ╔═╡ 451aa381-97e3-43b3-8236-f7313ef660a5
+# ╔═╡ 06c276ae-9b25-4a53-81ec-7e7b11806aa7
 @code_lam attention(Q, K, V)
 
-# ╔═╡ 8a4bb3d7-8acb-48fb-9c93-47c44f13972d
+# ╔═╡ 5fa2be83-0c48-48bd-b396-6694f753376e
 md"""
 Sequence length ``N`` (head dimension ``d = 64``): $(@bind N Select([256, 1024, 4096, 8192]; default = 4096))
 """
 
-# ╔═╡ 21c7e163-fc3e-4728-960b-b312205e2270
+# ╔═╡ 5e8c8dd3-1331-4727-bb28-13846897758b
 begin
     ϕ(x) = x > 0 ? x + 1 : exp(x)
     Qa, Ka, Va = ϕ.(randn(N, 64)), ϕ.(randn(N, 64)), randn(N, 64)
@@ -337,7 +342,7 @@ begin
             "Julia, Q * (K' * V)" => () -> Qa * (Ka' * Va))
 end
 
-# ╔═╡ e90a62ad-d8e3-4a65-ba59-fe9960964812
+# ╔═╡ dd8a20ce-d848-4abb-8dc1-4d68e4528941
 md"""
 (Julia's `*(Q, K', V)` with three arguments also picks the order; ulm.lam
 does it for any chain inside a larger expression, and together with the
@@ -348,10 +353,10 @@ rest: transposes, symmetry, solves, scalars.)
 ulm.lam calls the BLAS and LAPACK Julia uses, through libblastrampoline:
 """
 
-# ╔═╡ e2032850-d9fb-46ee-8bec-b4aa67603c1d
+# ╔═╡ f811f80d-b4c2-460a-a9be-7af74a90354f
 BLAS.get_config()
 
-# ╔═╡ 3e268740-d5dc-402c-a4f2-b7c6d2b597c4
+# ╔═╡ 0b70a5e3-1b6c-43aa-a63f-a35eeff8087d
 md"""
 With [UlmBLAS.jl](https://github.com/michael-lehn/UlmBLAS.jl),
 `using UlmBLAS; UlmBLAS.forward()` makes ulmBLAS the BLAS of Julia, and with
@@ -367,10 +372,10 @@ with NumPy arrays.
 of linear algebra on matrices whose types carry the properties.
 """
 
-# ╔═╡ c117bb16-33cf-46e0-8ee0-84038a1c7a3e
+# ╔═╡ 7f2bf9b0-a6f3-45b3-ae0e-885d52b26e04
 Text(first(UlmLam.lam_module([gls])))
 
-# ╔═╡ bebc4150-174a-4649-8a23-1860ca899b04
+# ╔═╡ b6079899-cdea-4297-8b34-031ab15a3f78
 md"""
 MLIR passes then
 
@@ -408,44 +413,44 @@ So far: real double precision, dense matrices.
 """
 
 # ╔═╡ Cell order:
-# ╟─cf8f5d36-e49f-4e71-bc75-d29a5d010cc2
-# ╠═34186a44-87fb-4fc9-9737-b841a167b00d
-# ╟─9b7b6e40-3942-445c-b623-5d25ce65fa35
-# ╠═0007b426-c121-4be5-a487-411dd06ad4c2
-# ╟─205cc544-e046-4a3f-a012-71be7b77c9ea
-# ╠═0304cc9c-2c20-4070-a200-851faddd13f7
-# ╠═3c6e2168-0f97-4796-a866-8bc9e04b6bab
-# ╟─59ef028c-8974-4ad4-8ecc-0b369de8cd07
-# ╠═f8c9ab99-7e6e-423e-a1cd-410eefd4b751
-# ╟─75384a1f-26be-471b-bb82-fa35b02ec8da
-# ╠═19d31e1e-ff06-4c4b-9f0b-82afc42b2c6f
-# ╠═54555783-3e8b-4dc8-ba6d-d6096e921689
-# ╠═5402f935-768c-4e03-bc3c-e8bfee7e90c5
-# ╠═32bd761b-668e-4f17-8c28-203c23541291
-# ╠═00738dd0-3b73-4fd3-8c0b-1dd884cfdd0b
-# ╟─74439455-849b-4d9f-a3fd-91a972a2628e
-# ╠═a1a46c76-c497-4c4f-99ac-f11e6a548c8f
-# ╠═7de7602a-7e4d-4744-8f4c-4a19f5d7b694
-# ╟─d1a5945b-083f-4e6e-a895-a05e24da254f
-# ╠═3f78cf7e-bcd7-4d25-89f9-d371fe9f44d4
-# ╠═df27d207-809e-4644-9393-90d1aa23efb8
-# ╠═db1cac5a-0382-4a99-908c-78a023330018
-# ╟─71383705-747c-472d-b0f2-28c88390af18
-# ╠═93f4bf49-06a6-4910-8c4a-e58ec6f844ab
-# ╠═bc606a0c-e4fa-4d80-a5dc-7e86ca667a96
-# ╟─4803d565-8d52-4568-bbf4-a256274a4ff1
-# ╠═8fba5f78-64fe-4ced-8425-4eb328824596
-# ╠═fcd411bb-dd34-4245-bced-ebc86226282f
-# ╠═37a58da2-9436-4c1e-b46a-d3a72464d9cb
-# ╠═25cf2473-0c3e-465c-b99b-6f5fd35c5dda
-# ╠═657e4623-dd89-46ce-88af-77d2fe79ae6b
-# ╟─c8ac9d4a-cf1d-45e4-9f7c-6670d6f5e806
-# ╠═93c954cf-f30c-4548-8d4d-a8180c099975
-# ╠═451aa381-97e3-43b3-8236-f7313ef660a5
-# ╟─8a4bb3d7-8acb-48fb-9c93-47c44f13972d
-# ╠═21c7e163-fc3e-4728-960b-b312205e2270
-# ╟─e90a62ad-d8e3-4a65-ba59-fe9960964812
-# ╠═e2032850-d9fb-46ee-8bec-b4aa67603c1d
-# ╟─3e268740-d5dc-402c-a4f2-b7c6d2b597c4
-# ╠═c117bb16-33cf-46e0-8ee0-84038a1c7a3e
-# ╟─bebc4150-174a-4649-8a23-1860ca899b04
+# ╟─1f86d865-3935-454e-a4e8-cb6425df5e31
+# ╠═6ec8deea-59ba-4a3e-afb6-95e39933c992
+# ╟─48cfa4a2-d85c-4f4f-aeca-9291e4cd1ab8
+# ╠═4b6a0989-6240-41ab-9b86-dd7ecdfdcc8c
+# ╟─ae77e6a4-2440-4582-820b-0678d5f37730
+# ╠═c64bdd76-f0ff-4cd6-b67c-ab8c6ee871b3
+# ╠═2ad231a6-a084-47d5-9ca3-3d8dce2c11ae
+# ╟─35e3d952-dec5-4d4c-902b-e1f0d4a8099e
+# ╠═d9e919a8-a84c-4f32-9218-bb19473679eb
+# ╟─2ad3b06d-92a8-4935-aa48-f1f3547d52b7
+# ╠═ce228192-aa94-4d58-84b6-0d534693c894
+# ╠═ed1178e4-7e5a-4696-992a-a5c71680e60f
+# ╠═dd9a2d2a-4602-46a0-a1b7-dec2f39e6963
+# ╠═e3f544dc-3b00-4d4a-a6df-09563eddaec2
+# ╠═33626ac4-8046-4691-8dff-497a96108edb
+# ╟─afabe02a-51a0-47aa-a80a-c6899d99f3c6
+# ╠═b2cef0aa-1713-4e80-a6d0-7c07fbee9c2b
+# ╠═f14cf7b3-e69a-479c-a81f-1eb1928862ff
+# ╟─72916aad-2ed2-43e0-a88c-c9776278419c
+# ╠═14ed5dc9-9f6c-43a3-913a-519d9bd224a7
+# ╠═eb4980cd-0146-4629-a21c-940ee78b6fa2
+# ╠═7d1053fe-1de8-498d-9e72-a8c4f3c54508
+# ╟─619544bf-3097-4aa1-ba9f-38d42a5ef98d
+# ╠═13c30aff-eaf2-4f25-88dc-bc8b53aaf107
+# ╠═92b661fe-eb74-42b6-a73b-4413592a4c46
+# ╟─be9de426-96ca-47db-8a84-419a567d7b03
+# ╠═679ffed0-23f5-40fd-8144-0cc9fedb5915
+# ╠═ca3f7101-36cb-4666-a0e8-b7c10bf4e16d
+# ╠═77b9e80c-bc61-4105-accd-506d09899067
+# ╠═bc28e36e-a76d-407f-b09e-cd1837598769
+# ╠═f8fbe8fd-95b1-4a81-ab4d-322b18bebacb
+# ╟─f14629d7-76f1-4520-9dfb-4d56a888b05d
+# ╠═cb3eea95-b703-44bb-8c96-3dbe825af206
+# ╠═06c276ae-9b25-4a53-81ec-7e7b11806aa7
+# ╟─5fa2be83-0c48-48bd-b396-6694f753376e
+# ╠═5e8c8dd3-1331-4727-bb28-13846897758b
+# ╟─dd8a20ce-d848-4abb-8dc1-4d68e4528941
+# ╠═f811f80d-b4c2-460a-a9be-7af74a90354f
+# ╟─0b70a5e3-1b6c-43aa-a63f-a35eeff8087d
+# ╠═7f2bf9b0-a6f3-45b3-ae0e-885d52b26e04
+# ╟─b6079899-cdea-4297-8b34-031ab15a3f78

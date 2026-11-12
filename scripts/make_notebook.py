@@ -30,11 +30,16 @@ uses (OpenBLAS, or anything libblastrampoline forwards to).
 
 *An early research prototype; the sources are at
 [github.com/michael-lehn/ulm-lam](https://github.com/michael-lehn/ulm-lam).*
+
+**[▶ Run this notebook live](https://mybinder.org/v2/gh/michael-lehn/ulm-lam/master?urlpath=pluto%2Fopen%3Fpath%3D%2Fhome%2Fjovyan%2Fnotebook%2Fulm-lam.jl)** (on mybinder.org, with LLVM/MLIR,
+Julia and ulm.lam in the container; starting takes a minute or two).  Change
+a formula and `@code_lam` shows the new derivation.
 ''')
 code(r'''
 begin
     import Pkg
-    Pkg.activate(@__DIR__)   # the notebook's environment (see the README)
+    # the notebook's environment (see the README; on Binder set by the image)
+    Pkg.activate(get(ENV, "ULM_LAM_NOTEBOOK_ENV", @__DIR__))
     using UlmLam, LinearAlgebra, BenchmarkTools, Random, Printf, Markdown
     using AbstractGPs, KernelFunctions, PlutoUI
 end

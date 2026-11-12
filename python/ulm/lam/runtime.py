@@ -119,7 +119,7 @@ def _openmp() -> list[str]:
             f"-L{omp / 'lib'}", f"-Wl,-rpath,{omp / 'lib'}", "-lomp"]
 
 
-_SIG = re.compile(r'extern "C" void\s*\n(\w+)\(([^)]*)\);')
+_SIG = re.compile(r'extern "C" void\s+(\w+)\(([^)]*)\);')
 _IFACE = re.compile(r"/\* (\w+): matrices by reference[^\n]*\n(.*?)\n \*/",
                     re.S)
 
