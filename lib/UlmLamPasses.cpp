@@ -907,6 +907,17 @@ class Selector
 	return r;
     }
 
+    /// An accumulator syrk may update: symmetric, its lower triangle
+    /// valid (stored completely or as the lower triangle).
+    static bool
+    symmetricAcc(Value v)
+    {
+	auto t = cast<RankedTensorType>(v.getType());
+	return bitEnumContainsAll(closure(propertiesOf(t), t.getShape()),
+	                          Properties::symmetric) &&
+	       storageOf(v) != 2;
+    }
+
     Value
     emitKernels(Chain &c, int i, int j, Value dest, double alpha, double beta,
                 Location loc)
@@ -919,12 +930,15 @@ class Selector
 	                alpha, beta, loc);
 	case Choice::Gram: {
 	    Leaf z = operand(c, s, j, loc);
-	    // the whole product into a new matrix: syrk computes one triangle
-	    // (half the flops of gemm); the result is passed on as stored in
-	    // its lower triangle (lower_stored, see replace)
+	    // the whole product into a new matrix, or added to a symmetric
+	    // one (C = beta C + alpha Z^T Z, e.g. K** - V^T V): syrk computes
+	    // one triangle (half the flops of gemm); the result is passed on
+	    // as stored in its lower triangle (lower_stored, see replace)
 	    bool top = i == 0 && j + 1 == static_cast<int>(c.leaves.size());
-	    if (top && !inBranch && beta == 0 && z.stored == Leaf::Full &&
-	        (!dest || dest.getDefiningOp<tensor::EmptyOp>())) {
+	    bool fresh = beta == 0 &&
+	                 (!dest || dest.getDefiningOp<tensor::EmptyOp>());
+	    bool update = beta != 0 && dest && symmetricAcc(dest);
+	    if (top && !inBranch && z.stored == Leaf::Full && (fresh || update)) {
 		Type elt = elementType(z.v);
 		if (!dest) {
 		    Leaf zt = z;
@@ -937,7 +951,7 @@ class Selector
 		                             z.trans ? lk::Trans::none
 		                                     : lk::Trans::trans,
 		                             constant(elt, alpha, loc), z.v,
-		                             constant(elt, 0, loc), dest)
+		                             constant(elt, beta, loc), dest)
 		              ->getResult(0);
 		lowerOnly.insert(r);
 		return r;
@@ -1254,8 +1268,11 @@ class Selector
 	Type t = op->getResult(0).getType();
 	if (lowerOnly.contains(v)) // only the lower triangle is computed
 	    t = withProperties(cast<RankedTensorType>(t),
-	                       propertiesOf(t) | Properties::lower_stored);
-	if (v.getType() != t) {
+	                       propertiesOf(t) | Properties::symmetric |
+	                           Properties::lower_stored);
+	// (always an assume for one triangle: storageOf ignores the storage
+	// in the type of a kernel result, e.g. syrk on a lower-stored C)
+	if (v.getType() != t || lowerOnly.contains(v)) {
 	    b.setInsertionPoint(op);
 	    v = AssumeOp::create(b, op->getLoc(), t, v, false);
 	}

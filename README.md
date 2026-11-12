@@ -39,6 +39,29 @@ reuses (`lib.workspace`), or in one passed as `work=lam.Workspace(size)`.  See `
 `python/examples/adaptive_kalman.py` (the covariance updated in place by a
 Python callback in every step) and `python/tests/`.  NumPy is optional.
 
+## Showcase: Gaussian process regression
+
+`python/examples/gp.py` (`make gp`) predicts with a GP (Gaussian process)
+from its textbook formula,
+
+```python
+@lam.function
+def gp(K: Matrix("n", "n", "spd"), Ks: Matrix("n", "m"),
+       Kss: Matrix("m", "m", "symmetric"), y: Vector("n")):
+    mean = Ks.T @ K.inv @ y
+    cov = Kss - Ks.T @ K.inv @ Ks
+    return mean, cov
+```
+
+and ulm.lam derives what scikit-learn's `GaussianProcessRegressor` does by
+hand: one Cholesky factorisation, `L^-1 K*` once (trsm), `K** - V^T V` by
+syrk, no inverse.  On public data, downloaded into `build/data/`: the
+Mauna Loa CO2 forecast of Rasmussen and Williams (NOAA, National Oceanic
+and Atmospheric Administration; plot in `build/gp/co2.png`) and hourly bike
+rentals (UCI, University of California, Irvine), timed for n up to 8000
+(`--full`: 16000) against NumPy, SciPy and scikit-learn.  Optional:
+SciPy, scikit-learn, Matplotlib.
+
 ## Conventions of the generated code
 
 - Matrices by reference (row-major), owned by the caller; parameters are
@@ -97,7 +120,8 @@ What is checked (`make`):
 - `make cases`: eight kernel selection cases against naive evaluations;
   info for an indefinite and a singular matrix and a too small workspace.
 - `make dynamic`: one compiled GLS with run-time sizes for six sizes.
-- `make python`: the Python frontend: 34 unit tests (among them symmetric
+- `make gp`: the GP showcase above (needs the network once).
+- `make python`: the Python frontend: 35 unit tests (among them symmetric
   matrices stored as one triangle, with NaN in the other one) and the two
   Kalman examples against NumPy.
 

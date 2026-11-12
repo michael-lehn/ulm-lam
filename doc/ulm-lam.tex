@@ -11,7 +11,7 @@
 
 \usepackage[margin=2.5cm]{geometry}
 \usepackage{microtype}
-\usepackage{booktabs,tabularx,array,multirow}
+\usepackage{booktabs,tabularx,array,multirow,graphicx}
 \usepackage[inline]{enumitem}
 \usepackage[skip=\medskipamount]{parskip}   % no indent, \medskip between paragraphs
 \usepackage{xcolor,luacolor,lua-ul}
@@ -1352,10 +1352,11 @@ the existing ones, with strides for every matrix, a template element type,
 \code{bool} flags only where strides cannot express the choice, and
 \code{info} as the return value of factorisations.
 \begin{itemize}
-  \item \emph{The triangle of a product} (\code{gemmtr}, in the
-        \code{ulmBLAS-gemmtr} branch, and \code{sylrk}): with them, $Z\T
-        Z$ costs half, once kernel selection tracks which triangle a
-        consumer reads.
+  \item \emph{The triangle of a product}: \code{sylrk} is used for
+        $Z\T Z$ (\cref{sec:storage}); \code{gemmtr} (in ulmBLAS
+        \code{master}) would halve the second product of $H P H\T$ and
+        $A\T P A$, whose results are symmetric although the factors are
+        not transposes of each other.
   \item \emph{QR factorisation} for least squares without normal
         equations, and for full-rank inverses that are not spd:
 \begin{lstlisting}[style=c]
@@ -1643,17 +1644,20 @@ with strides $(1, 200)$, in the \code{gemm} for $W\T W$ and in the
 \label{lst:glssel}
 \end{figure}
 
-% (not a float: the listing is longer than a page and breaks)
+% (not a float: the listing is longer than a page and breaks; the
+% environment gives \captionof its box)
+\begin{flushleft}
 \IfFileExists{\src examples/gls/generated/gls.cpp}{%
   \srcbetween[style=c]{\src examples/gls/generated/gls.cpp}{gls(double}{}{glscpp}}{%
   \fbox{run \code{make gls} to generate this listing}}
+\captionsetup{hypcap=false}
 \captionof{figure}{GLS in C++ calling ulmBLAS, generated from stage~2: the
 function \code{extern "C" int64_t gls(...)}, without the
 \code{\#include} lines in front of it.  The outer \code{if}s implement the
 workspace convention (\cref{sec:workspace}), the inner ones the
 \code{info} of \cref{sec:info}.}
 \label{lst:glscpp}
-\medskip
+\end{flushleft}
 
 \paragraph{Results.}
 \file{driver.cc} uses ulmBLAS for everything:
@@ -2058,6 +2062,101 @@ and $4.6\times$ faster than the formula as written.
 All three times include the Python callback that updates $R$ ($O(n^2)$
 per step), and the caller's $R_0$ (an \code{in} parameter) is not
 overwritten.
+
+% =====================================================================
+\section{Showcase: Gaussian process regression}\label{sec:gp}
+% =====================================================================
+A GP (Gaussian process) with kernel $k$ predicts at test points $X_*$ from
+training data $(X, y)$ by
+\[
+  \mu = K_*\T K\inv y, \qquad \Sigma = K_{**} - K_*\T K\inv K_*,
+\]
+with $K = k(X, X) + \sigma^2 I$ ($n\times n$, spd), $K_* = k(X, X_*)$
+($n\times m$) and $K_{**} = k(X_*, X_*)$.
+Written literally in NumPy, this forms $K\inv$.
+Libraries therefore implement it by hand; scikit-learn's
+\code{GaussianProcessRegressor}, for instance, computes
+$L = \mathrm{chol}(K)$, $\alpha = L\invT L\inv y$, $V = L\inv K_*$,
+$\mu = K_*\T\alpha$ and $\Sigma = K_{**} - V\T V$ in \code{fit} and
+\code{predict}.
+That is the hand work of FLENS-LAPACK again: someone had to notice that
+$K_*\T K\inv K_* = (L\inv K_*)\T (L\inv K_*)$.
+In ulm.lam the formula is the program
+(\code{python/examples/gp.py}):
+\begin{lstlisting}[style=py]
+@lam.function
+def gp(K: Matrix("n", "n", "spd"), Ks: Matrix("n", "m"),
+       Kss: Matrix("m", "m", "symmetric"), y: Vector("n")):
+    mean = Ks.T @ K.inv @ y
+    cov = Kss - Ks.T @ K.inv @ Ks
+    return mean, cov
+\end{lstlisting}
+and kernel selection derives the hand version: one \code{potrf}, two
+\code{trsv} and a \code{gemv} for $\mu$, one \code{trlsm} for
+$V = L\inv K_*$, and \code{sylrk} with $\beta = 1$ into a copy of
+$K_{**}$ for $\Sigma$, which is then completed (\code{sycomplete}).
+For the last step the \code{syrk} rule of \cref{sec:storage} was extended:
+a Gram product $Z\T Z$ may also be added to a symmetric matrix whose lower
+triangle is valid ($C = \beta C + \alpha Z\T Z$).
+The sizes are run-time names, so one library serves all $n$ and $m$.
+
+\paragraph{Data.}
+Two public data sets, downloaded on first use:
+the weekly CO$_2$ concentration at Mauna Loa (NOAA, National Oceanic and
+Atmospheric Administration, and Scripps; 2718 weeks since 1974), with
+the kernel and the hyperparameters of
+Rasmussen and Williams (Gaussian Processes for Machine Learning, 2006,
+Sec.~5.4.3), and the hourly rentals of a bike sharing system (UCI,
+University of California, Irvine, Machine Learning Repository; 17\,379
+hours, 14 features).
+For CO$_2$, a back test trained until 2016 predicts the following ten
+years with an RMSE (root mean square error) of 2.8\,ppm, and a forecast
+from all data reaches 2036 (\cref{fig:co2}; the kernel of 2006
+underestimates the accelerating trend).
+The results agree with SciPy and scikit-learn to $2.5\cdot 10^{-11}$.
+
+\IfFileExists{../build/gp/co2.png}{%
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{../build/gp/co2.png}
+\caption{CO$_2$ at Mauna Loa: back test and forecast by \code{gp}
+(mean $\pm 2$ standard deviations).}\label{fig:co2}
+\end{figure}}{}
+
+\paragraph{Timings.}
+Bike sharing, $m = 1000$ test hours, Apple M5; NumPy and SciPy with
+OpenBLAS, ulm.lam with ulmBLAS; without computing the kernel matrices
+(scikit-learn: with them, since it computes them inside):
+
+\begin{center}
+\begin{tabular}{rrrrrr}
+\toprule
+$n$ & ulm.lam & SciPy by hand & NumPy literal & scikit-learn \\
+\midrule
+1000 & 0.022\,s & 0.036\,s & 0.046\,s & 0.039\,s \\
+2000 & 0.062\,s & 0.052\,s & 0.181\,s & 0.117\,s \\
+4000 & 0.243\,s & 0.218\,s & 1.008\,s & 0.522\,s \\
+8000 & 1.478\,s & 1.297\,s & 7.066\,s & 3.149\,s \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+ulm.lam is $4.8\times$ faster than the literal formula at $n = 8000$ and
+gets the hand version without anyone writing it.
+Against SciPy's hand version it is about 10\,\% slower; the difference is
+\code{potrf} (at $n = 8000$: 0.875\,s in ulmBLAS, 0.804\,s in OpenBLAS),
+while \code{trsm} and \code{syrk} are on par.
+
+\paragraph{What the example shows is missing.}
+The kernel matrices are elementwise functions (NumPy here).
+The noise term $\sigma^2 I$ is added in NumPy: it needs the identity in the
+frontend and scalars known only at run time.
+Fitting the hyperparameters needs $\log\det K = 2\sum_i \log L_{ii}$ and
+traces such as $\operatorname{tr}(K\inv \partial K)$: scalar-valued
+operations that reuse the factorisation (scikit-learn fits them here, on
+1500 points).
+Often only the variances $\operatorname{diag}(\Sigma)$ are needed, which
+cost $O(nm)$ instead of $O(nm^2)$ after $V = L\inv K_*$.
 
 % =====================================================================
 \section{Testing strategy}

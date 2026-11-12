@@ -599,6 +599,39 @@ class Storage(unittest.TestCase):
         self.assertNotIn("gemm", lib.gram.cpp)
         self.assertIn("sylmm", lib.gram_use.cpp)
 
+    def test_syrk_update(self):
+        """C - V^T V (the GP covariance K** - V^T V): syrk updates the
+        lower triangle of a symmetric C (stored completely or as the lower
+        triangle); a general C needs gemm."""
+        n, k = self.n, self.k
+
+        @lam.function
+        def upd(C: Matrix(k, k, "symmetric"), V: Matrix(n, k)):
+            return C - V.T @ V
+
+        @lam.function
+        def upd_lo(C: Matrix(k, k, "symmetric", stored="lower"),
+                   V: Matrix(n, k)):
+            return 2 * C - 3 * (V.T @ V)
+
+        @lam.function
+        def upd_general(C: Matrix(k, k), V: Matrix(n, k)):
+            return C - V.T @ V
+
+        lib = lam.compile([upd, upd_lo, upd_general], name="syrk_update")
+        V = self.rng.uniform(-1, 1, (n, k))
+        M = self.rng.uniform(-1, 1, (k, k))
+        C = M + M.T
+        H = C.copy()
+        H[np.triu_indices(k, 1)] = np.nan
+        self.check(lib.upd(C, V), C - V.T @ V)
+        self.check(lib.upd_lo(H, V), 2 * C - 3 * V.T @ V)
+        self.check(lib.upd_general(M, V), M - V.T @ V)
+        for f in ("upd", "upd_lo"):
+            self.assertIn("sylrk", getattr(lib, f).cpp)
+            self.assertNotIn("gemm", getattr(lib, f).cpp)
+        self.assertIn("gemm", lib.upd_general.cpp)
+
     def test_stored_needs_symmetric(self):
         with self.assertRaises(LamError):
             Matrix(4, 4, stored="lower")

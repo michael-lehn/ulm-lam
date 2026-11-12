@@ -653,6 +653,28 @@ struct FoldScaleOne : OpRewritePattern<ScaleOp>
     }
 };
 
+/// a (b X) -> (a b) X for constants a and b (e.g. -(3 X), from A - 3 X).
+struct FoldScaleScale : OpRewritePattern<ScaleOp>
+{
+    using OpRewritePattern::OpRewritePattern;
+    LogicalResult
+    matchAndRewrite(ScaleOp op, PatternRewriter &rewriter) const override
+    {
+	auto inner = op.getOperand().getDefiningOp<ScaleOp>();
+	FloatAttr a, b;
+	if (!inner || !matchPattern(op.getAlpha(), m_Constant(&a)) ||
+	    !matchPattern(inner.getAlpha(), m_Constant(&b)))
+	    return failure();
+	Value ab = arith::ConstantOp::create(
+	    rewriter, op.getLoc(), a.getType(),
+	    rewriter.getFloatAttr(a.getType(),
+	                          a.getValueAsDouble() * b.getValueAsDouble()));
+	rewriter.replaceOpWithNewOp<ScaleOp>(op, op.getType(), ab,
+	                                     inner.getOperand());
+	return success();
+    }
+};
+
 } // namespace
 
 void
@@ -681,7 +703,7 @@ void
 ScaleOp::getCanonicalizationPatterns(RewritePatternSet &results,
                                      MLIRContext *ctx)
 {
-    results.add<FoldScaleOne>(ctx);
+    results.add<FoldScaleOne, FoldScaleScale>(ctx);
 }
 
 //===----------------------------------------------------------------------===//

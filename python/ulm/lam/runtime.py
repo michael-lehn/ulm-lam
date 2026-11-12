@@ -6,8 +6,8 @@
 lam.compile runs the ulm.lam pipeline (scripts/ulm-lam-compile.sh: kernel
 selection, bufferization, workspaces, lowering to C++ calling ulmBLAS),
 builds a shared library and returns its functions as Python callables.
-An unchanged program reuses its library (set ULM_LAM_REBUILD=1 to force a
-rebuild); the files are in build/python/<name>/.
+An unchanged program reuses its library as long as compiler, ulmBLAS
+and flags are unchanged (set ULM_LAM_REBUILD=1 to force a rebuild); the files are in build/python/<name>/.
 
 Calling convention, from the interface comment the compiler generates in
 front of every function:
@@ -156,6 +156,17 @@ def _newest_tool() -> float:
     return max(p.stat().st_mtime for p in parts)
 
 
+def _toolchain() -> str:
+    """What the C++ compilation depends on besides the generated code: the
+    compiler, the ulmBLAS flags (directory, micro kernels) and the newest
+    ulmBLAS header (a branch switch or an edit changes it)."""
+    flags = _ulmblas_flags()
+    ulm = Path(flags[flags.index("-isystem") + 1]) / "ulmblas"
+    newest = max((f.stat().st_mtime_ns for f in ulm.rglob("*")
+                  if f.is_file()), default=0)
+    return " ".join([os.environ.get("CXX", "c++"), *flags, str(newest)])
+
+
 def compile(functions, name: str | None = None, workdir=None,
             externs: dict | None = None) -> "Library":
     """Compile ulm.lam functions (and what they call) into a library."""
@@ -177,7 +188,10 @@ def compile(functions, name: str | None = None, workdir=None,
     #    path it knows), and
     #  * an interrupted build leaves no library: it is built under a
     #    temporary name and renamed when complete.
-    key = hashlib.sha256(f"{text}\n{_newest_tool()}".encode()).hexdigest()
+    #  * a different ulmBLAS (ULMBLAS_DIR, a changed header, other
+    #    flags) or C++ compiler builds a new library.
+    key = hashlib.sha256(
+        f"{text}\n{_newest_tool()}\n{_toolchain()}".encode()).hexdigest()
     lib = work / f"lib{name}.{key[:12]}{ext}"
     cached = not os.environ.get("ULM_LAM_REBUILD") and lib.exists()
     mlir.write_text(text)
