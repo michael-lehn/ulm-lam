@@ -76,6 +76,7 @@
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/SymbolTable.h"
@@ -154,6 +155,15 @@ struct UlmLamResultsToOutParams
     static void
     startInDestination(Value result, Value out)
     {
+	// a choice between plans: every branch computes into `out`
+	if (auto ifOp = result.getDefiningOp<scf::IfOp>()) {
+	    unsigned r = cast<OpResult>(result).getResultNumber();
+	    for (Block *blk : {ifOp.thenBlock(), ifOp.elseBlock()})
+		if (blk)
+		    startInDestination(blk->getTerminator()->getOperand(r),
+		                       out);
+	    return;
+	}
 	Value v = result;
 	OpOperand *first = nullptr;
 	while (auto dps = v.getDefiningOp<DestinationStyleOpInterface>()) {
@@ -163,9 +173,14 @@ struct UlmLamResultsToOutParams
 	    first = init;
 	    v = init->get();
 	}
-	if (!first || v.getDefiningOp<tensor::EmptyOp>())
+	if (!first)
 	    return;
 	Operation *op = first->getOwner();
+	if (v.getDefiningOp<tensor::EmptyOp>() &&
+	    !isa<scf::IfOp>(result.getParentBlock()->getParentOp())) {
+	    // outside of a branch, eliminate-empty-tensors does it
+	    return;
+	}
 	if (isa<ulm_lamk::CallOp>(op))
 	    return; // an external function updates its own argument
 	OpBuilder b(op);
@@ -173,6 +188,10 @@ struct UlmLamResultsToOutParams
 	auto t = bufferization::ToTensorOp::create(b, loc, v.getType(), out);
 	t.setRestrict(true);
 	t.setWritable(true);
+	if (v.getDefiningOp<tensor::EmptyOp>()) {
+	    first->set(t.getResult()); // a new matrix: the out buffer itself
+	    return;
+	}
 	Value c = bufferization::MaterializeInDestinationOp::create(
 	              b, loc, v.getType(), v, t.getResult())
 	              .getResult();

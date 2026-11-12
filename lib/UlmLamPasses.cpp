@@ -45,6 +45,7 @@
 #include "UlmLamDialect.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/Matchers.h"
@@ -215,6 +216,18 @@ struct Leaf
     type() const
     {
 	return cast<RankedTensorType>(v.getType());
+    }
+    /// The size of the rows / columns of op(v): a constant, or the index
+    /// value of a dynamic dimension.
+    OpFoldResult
+    rowsDim() const
+    {
+	return dimOf(v, trans ? 1 : 0);
+    }
+    OpFoldResult
+    colsDim() const
+    {
+	return dimOf(v, trans ? 0 : 1);
     }
     int64_t
     rows() const
@@ -656,6 +669,26 @@ class Selector
 
     // ---- the generalised matrix chain --------------------------------------
 
+    /// Sizes assumed for dynamic dimensions while comparing costs (a
+    /// sample of the run-time sizes; kNominal for the others).
+    llvm::DenseMap<Value, double> sample;
+    /// Emitting one of several plans inside a branch: its results do not
+    /// dominate later products (no reuse), and the product must be
+    /// complete (no syrk).
+    bool inBranch = false;
+
+    double
+    sz(OpFoldResult d) const
+    {
+	if (auto a = dyn_cast_if_present<Attribute>(d))
+	    return static_cast<double>(cast<IntegerAttr>(a).getInt());
+	if (auto v = dyn_cast_if_present<Value>(d)) {
+	    auto it = sample.find(v);
+	    return it != sample.end() ? it->second : kNominal;
+	}
+	return kNominal;
+    }
+
     struct Chain
     {
 	SmallVector<Leaf> leaves;
@@ -700,7 +733,7 @@ class Selector
 	for (int len = 2; len <= k; ++len)
 	    for (int i = 0; i + len - 1 < k; ++i) {
 		int j = i + len - 1;
-		double m = costSize(L[i].rows()), n = costSize(L[j].cols());
+		double m = sz(L[i].rowsDim()), n = sz(L[j].colsDim());
 		// computed by an earlier product (not the whole product: that
 		// would be a common subexpression, which CSE removes)
 		if (len < k) {
@@ -717,7 +750,7 @@ class Selector
 			continue;
 		}
 		for (int s = i; s < j; ++s) {
-		    double inner = costSize(L[s].cols());
+		    double inner = sz(L[s].colsDim());
 		    // gemm / gemv of two computable parts
 		    if (c.cost[i][s] < kInf && c.cost[s + 1][j] < kInf)
 			consider(i, j,
@@ -745,7 +778,7 @@ class Selector
 		    for (int t = 0; t < len / 2 && mirror; ++t)
 			mirror = L[i + t].isTransposeOf(L[j - t]);
 		    if (mirror && c.cost[h][j] < kInf) {
-			double zr = costSize(L[h].rows());
+			double zr = sz(L[h].rowsDim());
 			// syrk: one triangle, n^2 zr (as a gemm where the
 			// result must be complete, see emitKernels)
 			double cost = c.cost[h][j] + n * zr * n;
@@ -868,7 +901,7 @@ class Selector
 	Value r = emitKernels(c, i, j, dest, alpha, beta, loc);
 	// a plain product: remember it for later products (not one triangle:
 	// later products read the whole matrix)
-	if (alpha == 1 && beta == 0 && !lowerOnly.contains(r) &&
+	if (alpha == 1 && beta == 0 && !lowerOnly.contains(r) && !inBranch &&
 	    (!dest || dest.getDefiningOp<tensor::EmptyOp>()))
 	    computed[keyOf(c.leaves, i, j, false)] = r;
 	return r;
@@ -890,7 +923,7 @@ class Selector
 	    // (half the flops of gemm); the result is passed on as stored in
 	    // its lower triangle (lower_stored, see replace)
 	    bool top = i == 0 && j + 1 == static_cast<int>(c.leaves.size());
-	    if (top && beta == 0 && z.stored == Leaf::Full &&
+	    if (top && !inBranch && beta == 0 && z.stored == Leaf::Full &&
 	        (!dest || dest.getDefiningOp<tensor::EmptyOp>())) {
 		Type elt = elementType(z.v);
 		if (!dest) {
@@ -937,6 +970,108 @@ class Selector
 	llvm_unreachable("interval without a kernel sequence");
     }
 
+    using Plan = std::vector<std::vector<Choice>>;
+
+    static bool
+    samePlan(const Plan &a, const Plan &b)
+    {
+	for (size_t i = 0; i < a.size(); ++i)
+	    for (size_t j = 0; j < a.size(); ++j) {
+		const Choice &x = a[i][j], &y = b[i][j];
+		if (x.kind != y.kind || x.split != y.split ||
+		    x.value != y.value || x.trans != y.trans)
+		    return false;
+	    }
+	return true;
+    }
+
+    /// The plans that are optimal for some sizes: the DP for every
+    /// assignment of {10, 1000} to the (at most 4) distinct dynamic sizes
+    /// of the chain.  Without dynamic sizes: the one plan.
+    SmallVector<Plan>
+    plansOf(Chain &c, Operation *user)
+    {
+	llvm::SetVector<Value> syms;
+	for (const Leaf &l : c.leaves)
+	    for (OpFoldResult d : {l.rowsDim(), l.colsDim()})
+		if (auto v = dyn_cast_if_present<Value>(d))
+		    syms.insert(v);
+	int k = c.leaves.size();
+	SmallVector<Plan> plans;
+	sample.clear();
+	if (syms.empty() || syms.size() > 4) {
+	    solveChain(c, user);
+	    if (c.cost[0][k - 1] < kInf)
+		plans.push_back(c.choice);
+	    return plans;
+	}
+	for (unsigned mask = 0; mask < (1u << syms.size()); ++mask) {
+	    for (auto [t, v] : llvm::enumerate(syms))
+		sample[v] = (mask >> t) & 1 ? 1000.0 : 10.0;
+	    solveChain(c, user);
+	    if (c.cost[0][k - 1] == kInf)
+		continue;
+	    if (llvm::none_of(plans, [&](const Plan &p) {
+		    return samePlan(p, c.choice);
+	        }))
+		plans.push_back(c.choice);
+	}
+	sample.clear();
+	return plans;
+    }
+
+    /// An index value for a dimension.
+    Value
+    dimIndex(OpFoldResult d, Location loc)
+    {
+	if (auto a = dyn_cast<Attribute>(d))
+	    return arith::ConstantIndexOp::create(
+	        b, loc, cast<IntegerAttr>(a).getInt());
+	return cast<Value>(d);
+    }
+
+    /// The cost of interval [i, j] of plan c.choice from the run-time
+    /// sizes (index arithmetic, as the DP computes it).
+    Value
+    costValue(Chain &c, int i, int j, Location loc)
+    {
+	auto cst = [&](int64_t v) {
+	    return arith::ConstantIndexOp::create(b, loc, v).getResult();
+	};
+	auto mul = [&](Value x, Value y) {
+	    return arith::MulIOp::create(b, loc, x, y).getResult();
+	};
+	auto add = [&](Value x, Value y) {
+	    return arith::AddIOp::create(b, loc, x, y).getResult();
+	};
+	if (i == j)
+	    return cst(0);
+	const Choice &ch = c.choice[i][j];
+	auto &L = c.leaves;
+	Value m = dimIndex(L[i].rowsDim(), loc);
+	Value n = dimIndex(L[j].colsDim(), loc);
+	int s = ch.split;
+	switch (ch.kind) {
+	case Choice::Gemm:
+	    return add(
+	        add(costValue(c, i, s, loc), costValue(c, s + 1, j, loc)),
+	        mul(cst(2), mul(mul(m, dimIndex(L[s].colsDim(), loc)), n)));
+	case Choice::SolveLeft:
+	    return add(costValue(c, s + 1, j, loc),
+	               mul(cst(L[i].kind == Leaf::LUSolve ? 2 : 1),
+	                   mul(mul(m, m), n)));
+	case Choice::SolveRight:
+	    return add(costValue(c, i, s, loc), mul(mul(m, n), n));
+	case Choice::Gram:
+	    return add(costValue(c, s, j, loc),
+	               mul(mul(n, dimIndex(L[s].rowsDim(), loc)), n));
+	case Choice::Reuse:
+	case Choice::None:
+	    break;
+	}
+	return cst(0);
+    }
+
     /// beta * dest + alpha * (product), dest null: a new value.
     FailureOr<Value>
     chain(MulOp mul, Value dest, double alpha, double beta)
@@ -945,15 +1080,18 @@ class Selector
 	for (Value f : mul.getFactors())
 	    if (failed(leavesOf(f, mul, c.leaves, c.alpha)))
 		return failure();
-	solveChain(c, mul);
+	SmallVector<Plan> plans = plansOf(c, mul);
 	int k = c.leaves.size();
-	if (c.cost[0][k - 1] == kInf)
+	if (plans.empty())
 	    return mul.emitError(
 	               "ulm-lam-select-kernels: no kernel sequence for this "
 	               "product (an explicit inverse, or a right solve "
 	               "with an LU factorisation, would be needed)"),
 	           failure();
 	b.setInsertionPoint(mul);
+	if (plans.size() > 1)
+	    return choosePlan(c, plans, mul, dest, alpha, beta);
+	c.choice = plans.front();
 	Choice top = c.choice[0][k - 1];
 	if (!dest && (top.kind == Choice::Gemm || top.kind == Choice::Gram)) {
 	    auto t = cast<RankedTensorType>(mul.getType());
@@ -967,6 +1105,84 @@ class Selector
 	                                   t.getEncoding());
 	}
 	return emit(c, 0, k - 1, dest, alpha * c.alpha, beta, mul.getLoc());
+    }
+
+    /// A new matrix for the whole product.
+    FailureOr<Value>
+    newDest(MulOp mul)
+    {
+	auto t = cast<RankedTensorType>(mul.getType());
+	FailureOr<SmallVector<Value>> sizes = dynamicSizes(
+	    b, mul.getLoc(), t, mul.getResult(), 0, mul.getResult(), 1);
+	if (failed(sizes))
+	    return mul.emitError("ulm-lam-select-kernels: unknown size of the "
+	                         "product"),
+	           failure();
+	return tensor::EmptyOp::create(b, mul.getLoc(), t.getShape(),
+	                               t.getElementType(), *sizes,
+	                               t.getEncoding())
+	    .getResult();
+    }
+
+    /// Several plans, each optimal for some sizes: compute their costs
+    /// from the run-time sizes and run the cheapest one,
+    ///
+    ///   if (cost_0 <= cost_1 && cost_0 <= cost_2) { plan 0 }
+    ///   else if (cost_1 <= cost_2) { plan 1 } else { plan 2 }
+    ///
+    /// (scf.if, yielding the product).
+    FailureOr<Value>
+    choosePlan(Chain &c, ArrayRef<Plan> plans, MulOp mul, Value dest,
+               double alpha, double beta)
+    {
+	Location loc = mul.getLoc();
+	int k = c.leaves.size();
+	SmallVector<Value> costs;
+	for (const Plan &p : plans) {
+	    c.choice = p;
+	    costs.push_back(costValue(c, 0, k - 1, loc));
+	}
+	Type resultTy = mul.getType();
+	// (a new destination in each branch: eliminate-empty-tensors replaces
+	// each by the caller's buffer where the product is a result)
+	auto emitPlan = [&](size_t p) -> Value {
+	    c.choice = plans[p];
+	    Choice top = c.choice[0][k - 1];
+	    Value d = dest;
+	    if (!d && (top.kind == Choice::Gemm || top.kind == Choice::Gram))
+		d = *newDest(mul);
+	    Value r = emit(c, 0, k - 1, d, alpha * c.alpha, beta, loc);
+	    if (r.getType() != resultTy)
+		r = AssumeOp::create(b, loc, resultTy, r, false);
+	    return r;
+	};
+	bool saved = inBranch;
+	inBranch = true;
+	std::function<Value(size_t)> build = [&](size_t p) -> Value {
+	    if (p + 1 == plans.size())
+		return emitPlan(p);
+	    Value cond;
+	    for (size_t q = p + 1; q < plans.size(); ++q) {
+		Value le = arith::CmpIOp::create(
+		    b, loc, arith::CmpIPredicate::ule, costs[p], costs[q]);
+		cond = cond
+		           ? arith::AndIOp::create(b, loc, cond, le).getResult()
+		           : le;
+	    }
+	    auto ifOp = scf::IfOp::create(b, loc, TypeRange{resultTy}, cond,
+	                                  /*withElse=*/true);
+	    {
+		OpBuilder::InsertionGuard g(b);
+		b.setInsertionPointToStart(ifOp.thenBlock());
+		scf::YieldOp::create(b, loc, emitPlan(p));
+		b.setInsertionPointToStart(ifOp.elseBlock());
+		scf::YieldOp::create(b, loc, build(p + 1));
+	    }
+	    return ifOp.getResult(0);
+	};
+	Value r = build(0);
+	inBranch = saved;
+	return r;
     }
 
     FailureOr<Value>
@@ -1104,7 +1320,7 @@ struct UlmLamSelectKernels
     getDependentDialects(DialectRegistry &registry) const override
     {
 	registry.insert<lk::UlmLamkDialect, tensor::TensorDialect,
-	                arith::ArithDialect>();
+	                arith::ArithDialect, scf::SCFDialect>();
     }
     Option<std::string> strategy{*this, "strategy",
                                  llvm::cl::desc("gmc | search | egraph"),

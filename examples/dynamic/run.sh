@@ -10,3 +10,8 @@ OUT="${OUT:-$ROOT/build/dynamic}"
 "$CXX" "${ULMFLAGS[@]}" -Wall -Wextra -pedantic -c "$OUT/gls.cpp" -o "$OUT/gls.o"
 "$CXX" "${ULMFLAGS[@]}" "$OUT/gls.o" "$HERE/driver.cc" -o "$OUT/gls"
 "$OUT/gls"
+# D = A B C: the plan is chosen at run time (chain.mlir)
+"$ROOT/scripts/ulm-lam-compile.sh" "$HERE/chain.mlir" "$OUT/chain" "$HERE/generated"
+"$CXX" "${ULMFLAGS[@]}" -Wall -Wextra -pedantic -c "$OUT/chain.cpp" -o "$OUT/chain.o"
+"$CXX" "${ULMFLAGS[@]}" "$OUT/chain.o" "$HERE/driver_chain.cc" -o "$OUT/chain"
+"$OUT/chain"

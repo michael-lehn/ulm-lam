@@ -53,7 +53,7 @@ def UlmLamSelectKernels : Pass<"ulm-lam-select-kernels", "func::FuncOp"> {
            "flops | measured">
   ];
   let dependentDialects = ["ulm_lamk::UlmLamkDialect", "tensor::TensorDialect",
-                           "arith::ArithDialect"];
+                           "arith::ArithDialect", "scf::SCFDialect"];
 }
 
 def UlmLamResultsToOutParams : Pass<"ulm-lam-results-to-out-params", "ModuleOp"> {

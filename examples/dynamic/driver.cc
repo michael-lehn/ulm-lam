@@ -80,8 +80,7 @@ check(int n, int m, std::mt19937_64 &gen)
     ulmBLAS::getrs(false, false, n, 2, LU.data(), n, 1, piv.data(), 1, U.data(),
                    2, 1);
     ulmBLAS::gemv(m, n, 1.0, X.data(), 1, m, U.data(), 2, 0.0, r.data(), 1);
-    ulmBLAS::gemv(m, n, 1.0, X.data(), 1, m, U.data() + 1, 2, 0.0, q.data(),
-                  1);
+    ulmBLAS::gemv(m, n, 1.0, X.data(), 1, m, U.data() + 1, 2, 0.0, q.data(), 1);
     double res = nrm2(r) / nrm2(q);
     bool unchanged = X == X0 && M == M0 && y == y0;
     bool ok = info == 0 && res < 1e-10 && ws.size == expected && unchanged;
@@ -97,8 +96,12 @@ main()
 {
     std::mt19937_64 gen(42);
     bool ok = true;
-    for (auto [n, m] : {std::pair{1, 1}, {7, 3}, {100, 1}, {100, 100},
-                        {501, 37}, {2000, 200}})
+    for (auto [n, m] : {std::pair{1, 1},
+                        {7, 3},
+                        {100, 1},
+                        {100, 100},
+                        {501, 37},
+                        {2000, 200}})
 	ok &= check(n, m, gen);
     std::printf("%s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;

@@ -32,7 +32,11 @@
 // is laid out as [own temporaries | callee 1 | callee 2 | ...], every part
 // 64-byte aligned; each call gets its part of the block and its size in
 // *workspace_info.  Own temporaries (also those in loops) become views at
-// offsets computed at compile time; their deallocations disappear.
+// offsets computed from the sizes; their deallocations disappear.  The
+// branches of an scf.if (alternative plans) share their part of the block:
+// the required size is the one of the branch that runs (its condition is
+// computed at entry) or, if the condition is not available at entry, the
+// larger one.
 // Recursive calls between functions with a workspace are rejected.
 //
 // "Too small" is marked here by a call of ulm_lam_workspace_error(required,
@@ -50,6 +54,8 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/IRMapping.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/SetVector.h"
 
@@ -313,9 +319,34 @@ struct UlmLamWorkspace : PassWrapper<UlmLamWorkspace, OperationPass<ModuleOp>>
 	auto idx = [&](int64_t v) {
 	    return arith::ConstantIndexOp::create(b, loc, v).getResult();
 	};
-	SmallVector<Value> offsets;
-	Value own = idx(0);
-	for (memref::AllocOp a : allocs) {
+	// A choice between plans (scf.if): both branches start at the same
+	// offset; the size is the one of the branch that runs if its
+	// condition can be computed at entry (the cost comparison of the
+	// plans, from the sizes), otherwise the larger one.
+	llvm::DenseMap<Operation *, Value> offsetOf;
+	llvm::DenseMap<Value, Value> hoisted;
+	std::function<Value(Value)> hoist = [&](Value v) -> Value {
+	    if (auto a = dyn_cast<BlockArgument>(v))
+		return a.getOwner() == &entry ? v : Value();
+	    if (Value h = hoisted.lookup(v))
+		return h;
+	    Operation *def = v.getDefiningOp();
+	    if (!def || def->getNumRegions() ||
+	        !isa<arith::ArithDialect>(def->getDialect()) || !isPure(def))
+		return {};
+	    IRMapping map;
+	    for (Value o : def->getOperands()) {
+		Value h = hoist(o);
+		if (!h)
+		    return {};
+		map.map(o, h);
+	    }
+	    Operation *c = b.clone(*def, map);
+	    for (auto [x, y] : llvm::zip(def->getResults(), c->getResults()))
+		hoisted[x] = y;
+	    return hoisted.lookup(v);
+	};
+	auto bytesOf = [&](memref::AllocOp a) -> FailureOr<Value> {
 	    MemRefType t = a.getType();
 	    int64_t fixed = t.getElementTypeBitWidth() / 8;
 	    for (int64_t d : t.getShape())
@@ -327,15 +358,60 @@ struct UlmLamWorkspace : PassWrapper<UlmLamWorkspace, OperationPass<ModuleOp>>
 		if (!e)
 		    return a.emitError("ulm-lam-workspace: the size of a "
 		                       "temporary is not available at function "
-		                       "entry");
+		                       "entry"),
+		           failure();
 		bytes = arith::MulIOp::create(b, loc, bytes, e);
 	    }
-	    offsets.push_back(own);
-	    Value rounded = arith::AndIOp::create(
-	        b, loc, arith::AddIOp::create(b, loc, bytes, idx(kAlign - 1)),
-	        idx(-kAlign));
-	    own = arith::AddIOp::create(b, loc, own, rounded);
-	}
+	    return arith::AndIOp::create(
+	               b, loc,
+	               arith::AddIOp::create(b, loc, bytes, idx(kAlign - 1)),
+	               idx(-kAlign))
+	        .getResult();
+	};
+	std::function<FailureOr<Value>(Block &, Value)> layout =
+	    [&](Block &blk, Value cur) -> FailureOr<Value> {
+	    for (Operation &op : blk) {
+		if (auto a = dyn_cast<memref::AllocOp>(op)) {
+		    FailureOr<Value> n = bytesOf(a);
+		    if (failed(n))
+			return failure();
+		    offsetOf[a] = cur;
+		    cur = arith::AddIOp::create(b, loc, cur, *n);
+		    continue;
+		}
+		if (!op.getNumRegions() ||
+		    !op.walk([](memref::AllocOp) {
+		           return WalkResult::interrupt();
+		       }).wasInterrupted())
+		    continue;
+		if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
+		    FailureOr<Value> t = layout(*ifOp.thenBlock(), cur);
+		    FailureOr<Value> e = ifOp.elseBlock()
+		                             ? layout(*ifOp.elseBlock(), cur)
+		                             : FailureOr<Value>(cur);
+		    if (failed(t) || failed(e))
+			return failure();
+		    Value c = hoist(ifOp.getCondition());
+		    if (!c) // the larger one
+			c = arith::CmpIOp::create(
+			    b, loc, arith::CmpIPredicate::uge, *t, *e);
+		    cur = arith::SelectOp::create(b, loc, c, *t, *e);
+		    continue;
+		}
+		for (Region &r : op.getRegions())
+		    for (Block &bb : r) {
+			FailureOr<Value> n = layout(bb, cur);
+			if (failed(n))
+			    return failure();
+			cur = *n;
+		    }
+	    }
+	    return cur;
+	};
+	FailureOr<Value> ownSize = layout(entry, idx(0));
+	if (failed(ownSize))
+	    return failure();
+	Value own = *ownSize;
 
 	// query the callees (the accumulation of LAPACK workspace queries)
 	SmallVector<Value> sizes, parts; // per call: queried size, its offset
@@ -407,7 +483,8 @@ struct UlmLamWorkspace : PassWrapper<UlmLamWorkspace, OperationPass<ModuleOp>>
 	memref::DeallocOp::create(b, loc, base);
 
 	// own temporaries become views of the block
-	for (auto [a, off] : llvm::zip(allocs, offsets)) {
+	for (memref::AllocOp a : allocs) {
+	    Value off = offsetOf.lookup(a);
 	    OpBuilder vb(a);
 	    Value v = memref::ViewOp::create(vb, a.getLoc(), a.getType(), base,
 	                                     off, a.getDynamicSizes());

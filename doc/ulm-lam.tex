@@ -687,9 +687,8 @@ Gram products inside a larger chain, or reused by later products, stay
 Every op implements \code{KernelCostOpInterface}, with FLOPs and bytes
 moved.
 Sizes come from static shapes.
-For dynamic dimensions (\cref{sec:dynamic}) kernel selection currently
-compares costs with a nominal size of 1000; choosing between the plans at
-run time, by the actual sizes, is the next step.
+For dynamic dimensions (\cref{sec:dynamic}) the costs depend on run-time
+sizes, and kernel selection chooses at run time (next paragraph).
 Multi-versioning with a run-time dispatch on sizes is future work.
 
 \paragraph{Scalars.}
@@ -1138,6 +1137,34 @@ All ulmBLAS calls name their index type, \code{ulmBLAS::gemm<std::ptrdiff_t>},
 so that literals and \code{size_t} parameters convert to it.
 \file{examples/dynamic} checks one compiled GLS for six sizes, from
 $1\times1$ to $2000\times200$.
+
+\paragraph{Plans chosen at run time.}
+Which evaluation is best can depend on the sizes: for $D = ABC$ with
+$A\in\mathbb{R}^{n\times k}$, $B\in\mathbb{R}^{k\times m}$, $C\in\mathbb{R}^{m\times p}$,
+$(AB)C$ costs $2nkm+2nmp$ and $A(BC)$ costs $2kmp+2nkp$.
+Kernel selection runs the matrix-chain DP for every assignment of
+$\{10, 1000\}$ to the (at most four) distinct dynamic sizes of a product;
+if the optimal plans differ, the generated code computes the cost of each
+from the actual sizes (index arithmetic, as the DP does) and runs the
+cheapest (an \code{scf.if} chain):
+\begin{lstlisting}[style=c]
+if (((v1 * v2) * v3) * 2 + ((v1 * v3) * v4) * 2 <=
+    ((v2 * v3) * v4) * 2 + ((v1 * v2) * v4) * 2) {
+    ulmBLAS::gemm<std::ptrdiff_t>(v1, v3, v2, ..., v5, ..., v6, ..., T, ...);  // T = A B
+    ulmBLAS::gemm<std::ptrdiff_t>(v1, v4, v3, ..., T, ..., v7, ..., v8, ...);  // D = T C
+} else {
+    ulmBLAS::gemm<std::ptrdiff_t>(v2, v4, v3, ..., v6, ..., v7, ..., T, ...);  // T = B C
+    ulmBLAS::gemm<std::ptrdiff_t>(v1, v4, v2, ..., v5, ..., T, ..., v8, ...);  // D = A T
+}
+\end{lstlisting}
+Every plan writes the product into the caller's buffer.
+The workspace parts of the plans overlap, and the workspace query evaluates
+the same condition, so it returns the size of exactly the plan that runs:
+\code{v16 ? round64(8 * v1 * v3) : round64(8 * v2 * v4)}.
+Within a plan no subproduct is reused by later products (it would not
+dominate them), and no \code{syrk} result is passed on as one triangle.
+\file{examples/dynamic/driver\_chain.cc} checks sizes for which either plan
+wins.
 
 \paragraph{Workspaces.}\label{sec:workspace}
 A generated function does not allocate memory behind the caller's back.
