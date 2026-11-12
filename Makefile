@@ -1,6 +1,6 @@
 # ULMBLAS_DIR (default ~/git/ulmBLAS) and ARCHFLAGS (default -mcpu=native)
 # select ulmBLAS and its micro kernels, see scripts/ulmblas-env.sh.
-.PHONY: all ods plugin tool check stages loop gls kalman compose cases dynamic gp showcases torch python julia doc clean
+.PHONY: all ods plugin tool check egraph stages loop gls kalman compose cases dynamic gp showcases torch python julia doc clean
 
 all: ods plugin check stages loop gls kalman compose cases dynamic python julia doc
 
@@ -16,6 +16,10 @@ tool:           ## build ulm-lam-opt (tools/ulm-lam-opt.cpp): mlir-opt with ulm.
 check: tool     ## the pass tests in test/ (lit, FileCheck; lit from PyPI into build/venv-lit)
 	@test -x build/venv-lit/bin/lit || (python3 -m venv build/venv-lit && build/venv-lit/bin/pip install -q lit)
 	build/venv-lit/bin/lit -sv test
+
+egraph:         ## equality saturation experiment (egglog, experiments/egraph; Python 3.12)
+	@test -x build/venv-egglog/bin/python || (python3.12 -m venv build/venv-egglog && build/venv-egglog/bin/pip install -q egglog)
+	build/venv-egglog/bin/python experiments/egraph/lamp_egraph.py
 
 stages:         ## GLS stages 1-4 parse/verify; stage 3 bufferizes as stage 4 predicts
 	scripts/check-stages.sh

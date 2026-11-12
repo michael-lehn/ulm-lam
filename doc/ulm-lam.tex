@@ -3215,8 +3215,48 @@ what solving it would take.
         Equality saturation~\cite{egg,egglog} keeps all equivalent forms
         at once and extracts the cheapest at the end; in MLIR there are
         first dialects for it~\cite{eqsat,dialegg}.
-        Needed: the algebra of \code{ulm_lam} as rules, extraction with
-        ulm.lam's cost model, a comparison with \code{strategy=gmc}.
+        A first experiment (\file{experiments/egraph}, \code{make egraph},
+        with egglog) puts the algebra of \code{ulm_lam} and the kernels of
+        \code{ulm_lamk} into one e-graph, with general rules
+        (associativity, transposes, solves for products with inverses,
+        Gram matrices, $S = LL\T$ for spd $S$, \code{trmm} for triangular
+        factors, \code{gemmtr} for $ASA\T$) and properties as relations
+        derived by rules, and extracts the cheapest term by ulm.lam's
+        FLOP counts:
+
+        \begin{center}
+        \footnotesize
+        \begin{tabular}{lrrr}
+        \toprule
+        problem & tree extraction & DAG extraction & \code{strategy=gmc} \\
+        \midrule
+        GLS ($n = 2000$, $m = 50$) & $8.21\cdot10^9$ & $2.88\cdot10^9$ & $2.88\cdot10^9$ \\
+        GP ($n = 4000$, $m = 1000$) & $8.40\cdot10^{10}$ & $4.14\cdot10^{10}$ & $4.14\cdot10^{10}$ \\
+        $FPF\T$, $P$ spd ($n = 3000$) & $6.30\cdot10^{10}$ & $6.30\cdot10^{10}$ & $6.30\cdot10^{10}$ \\
+        Kalman step ($n = 1000$, $m = 100$) & $9.52\cdot10^{8}$ & $\mathbf{3.31\cdot10^{8}}$ & $4.30\cdot10^{8}$ \\
+        $QK\T V$ ($N = 4096$, $d = 64$) & $6.71\cdot10^{7}$ & $6.71\cdot10^{7}$ & $6.71\cdot10^{7}$ \\
+        \bottomrule
+        \end{tabular}
+        \end{center}
+
+        With DAG extraction (a factorisation used twice is paid once) the
+        e-graph finds ulm.lam's plans from general rules, Linnea's
+        variant of $FPF\T$ included, for which ulm.lam needs a rule of its
+        own.
+        For the Kalman step it finds a better one: with $S = LL\T$,
+        $KHP = PH\T S\inv HP = W\T W$ with $W = L\inv(HP)$, which $K$
+        needs anyway, so $P - KHP$ is a \code{syrk} instead of a gemm,
+        23\,\% fewer FLOPs for the step, and symmetric by construction.
+        Tree extraction pays a shared subterm at every use and misses
+        such plans; egglog's DAG extraction is greedy (optimal DAG
+        extraction is NP-hard).
+        The e-graphs stay small (at most 3212 nodes), but extraction needs
+        the sizes: plans chosen at run time, as ulm.lam's, would need
+        symbolic costs and a set of plans optimal in different regions.
+        Next: the \code{syrk} downdate as a rule of \code{strategy=gmc};
+        the experiment driven by the traced IR and its plans lowered back
+        to \code{ulm_lamk} (\code{strategy=egraph}); MLIR's own equality
+        saturation work as an alternative to egglog.
   \item \emph{A catalogue of kernels as data.}
         The ODS contains a kernel catalogue as TableGen records, but
         selection is written by hand kernel by kernel.
