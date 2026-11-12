@@ -2,7 +2,7 @@
 
 julia_version = "1.13.3"
 manifest_format = "2.1"
-project_hash = "18538bca96ba6099a85a689292006b7a80a87523"
+project_hash = "82e87d11d2ff50a287d5e7fe1ce4c096e660ae06"
 
 [[deps.AbstractGPs]]
 deps = ["ChainRulesCore", "Distributions", "FillArrays", "IrrationalConstants", "KernelFunctions", "LinearAlgebra", "PDMats", "Random", "RecipesBase", "Reexport", "Statistics", "StatsBase", "Test"]
@@ -1058,8 +1058,7 @@ version = "1.11.0"
 [[deps.UlmBLAS]]
 deps = ["Libdl", "LinearAlgebra", "ulmBLAS_jll"]
 git-tree-sha1 = "47ffef4379b0a6f44d5310a1b1a2f51a0ed99f18"
-repo-rev = "main"
-repo-url = "https://github.com/michael-lehn/UlmBLAS.jl"
+registries = "General"
 uuid = "cd55841f-6472-4438-97d9-4c2d8eed3a6b"
 version = "0.1.0"
 

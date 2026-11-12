@@ -394,7 +394,7 @@ code(r'''
 BLAS.get_config()
 ''')
 md(r'''
-With [UlmBLAS.jl](https://github.com/michael-lehn/UlmBLAS.jl),
+With [UlmBLAS.jl](https://github.com/michael-lehn/UlmBLAS.jl) (`Pkg.add("UlmBLAS")`),
 `using UlmBLAS; UlmBLAS.forward()` makes ulmBLAS the BLAS of Julia, and with
 it of every ulm.lam function.  The generated code can also call the
 header-only C++ library ulmBLAS directly (`UlmLam.compile(f; backend=:ulmblas)`)

@@ -21,7 +21,7 @@ hand:
 
 `@code_lam` shows what it derived.  The generated C++ calls the BLAS and
 LAPACK Julia uses (OpenBLAS, or whatever libblastrampoline forwards to,
-e.g. [UlmBLAS.jl](https://github.com/michael-lehn/UlmBLAS.jl)), the
+e.g. [UlmBLAS.jl](https://github.com/michael-lehn/UlmBLAS.jl), `Pkg.add("UlmBLAS")`), the
 header-only C++ library [ulmBLAS](https://github.com/michael-lehn/ulmBLAS),
 or any CBLAS (C interface to the BLAS) and LAPACK, such as MKL (Intel Math
 Kernel Library) or Apple's Accelerate.

@@ -9,5 +9,4 @@ UlmBLAS = "cd55841f-6472-4438-97d9-4c2d8eed3a6b"
 UlmLam = "5b8c7f0e-3c1a-4d2e-9f6a-0a1b2c3d4e5f"
 
 [sources]
-UlmBLAS = {rev = "main", url = "https://github.com/michael-lehn/UlmBLAS.jl"}
 UlmLam = {path = "../julia/UlmLam"}
