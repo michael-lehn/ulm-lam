@@ -117,6 +117,7 @@ def gls(X: Matrix("n", "m", "full_rank"), M: Matrix("n", "n", "spd"),
 
 lib = lam.compile(gls)     # one shared library for all sizes
 b = lib.gls(X, M, y)       # NumPy arrays (or any float64 buffer), no copies
+print(lib.gls.code)        # the derivation, as @code_lam shows it in Julia
 print(lib.gls.cpp)         # the generated C++
 ```
 
@@ -138,7 +139,7 @@ print(lib.gls.cpp)         # the generated C++
 | callbacks | `extern(name, argtypes, result)`, `bind!` | `lam.extern(...)`, `lib.bind(...)` |
 | overwritable parameter | `InOut(Mat(...))` | `InOut(Matrix(...))` |
 | several results | a tuple | a tuple |
-| inspect | `@code_lam f(args...)` | `lib.f.cpp` |
+| inspect | `@code_lam f(args...)` | `print(lib.f.code)`, `lib.f.cpp` |
 
 All vector-space operations on $\mathbb{R}^n$ and $\mathbb{R}^{m \times n}$
 work, also combined with products, transposes and solves: sums,

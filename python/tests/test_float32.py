@@ -54,3 +54,15 @@ class Float32(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Code(unittest.TestCase):
+    """lib.f.code: the derivation (Julia's @code_lam)."""
+
+    def test_code(self):
+        lib = lam.compile([f32_gls], name="code_test_py")
+        t = lib.f32_gls.code
+        self.assertIn("potrf    L1 ← chol(M)", t)
+        self.assertIn("syrk", t)
+        self.assertNotIn("%", t)
+        self.assertIn("info 1:  Cholesky factorisation of M", t)

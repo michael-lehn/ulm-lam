@@ -2436,6 +2436,9 @@ its \code{64\_} symbols (\file{include/ulm\_lam/cblas\_backend.h},
 ulmBLAS after \code{UlmBLAS.forward()} of
 UlmBLAS.jl~\cite{ulmblasjl}; \code{:ulmblas} and \code{:cblas} are the
 other two.
+From Python, \code{print(lib.f.code)} shows the same derivation
+(\file{python/ulm/lam/codelam.py}; Python's row-major arrays need no
+orientation).
 The Pluto notebook \file{notebook/ulm-lam.jl} demonstrates all of this
 (GLS, GP regression against AbstractGPs.jl, the Kalman filter, linear
 attention).

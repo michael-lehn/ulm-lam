@@ -261,12 +261,16 @@ def compile(functions, name: str | None = None, workdir=None,
         f"{text}\n{_newest_tool()}\n{_toolchain(backend)}".encode()
     ).hexdigest()
     lib = work / f"lib{name}.{key[:12]}{ext}"
-    cached = not os.environ.get("ULM_LAM_REBUILD") and lib.exists()
+    # the kernels after selection, for lib.f.code (kept per program)
+    selected = work / f"{name}.{key[:12]}.selected.mlir"
+    cached = (not os.environ.get("ULM_LAM_REBUILD") and lib.exists()
+              and selected.exists())
     mlir.write_text(text)
     if not cached:
         _run([str(ROOT / "scripts" / "ulm-lam-compile.sh"), str(mlir),
               str(work / name)], "ulm-lam-compile",
              env={**os.environ, "BACKEND": backend})
+        shutil.copyfile(work / f"{name}.selected.mlir", selected)
     cpp = (work / f"{name}.cpp").read_text()
     ifaces = _interfaces(cpp)
     decls = {n: p for n, p in _declarations(cpp).items()
@@ -294,6 +298,7 @@ def compile(functions, name: str | None = None, workdir=None,
             prog_fns[f.name] = f
     library = Library(lib, ifaces, decls, prog_fns, _externs_of(functions),
                       work / f"{name}.cpp", _ELT[dtype])
+    library.selected = selected
     if externs:
         library.bind(**externs)
     return library
@@ -670,6 +675,13 @@ class InfoError(fe.LamError):
                          + (f": {meaning}" if meaning else ""))
 
 
+class Code(str):
+    """The text of lib.f.code; shown as is in the REPL and in notebooks."""
+
+    def __repr__(self) -> str:
+        return str(self)
+
+
 class CompiledFunction:
     """A ulm.lam function in a compiled library."""
 
@@ -690,6 +702,15 @@ class CompiledFunction:
         """The generated C++ of this function (interface comment and
         definition; the helpers in front of it are in Library.source)."""
         return _function_source(self.lib.source, self.name)
+
+    @property
+    def code(self) -> "Code":
+        """The derivation ulm.lam found: the BLAS and LAPACK calls in
+        order, loops, decisions taken at run time, and what info means
+        (print(lib.f.code); Julia's @code_lam)."""
+        from .codelam import render
+        return Code(render(self.fn, Path(self.lib.selected).read_text(),
+                           self._codes))
 
     def interface(self) -> str:
         """The parameters and their intents (as the generated C++ says)."""
