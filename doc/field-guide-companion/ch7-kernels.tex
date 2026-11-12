@@ -1,0 +1,232 @@
+% ch7-kernels.tex
+\chapter{From Algebra to Kernels}
+\label{ch:kernels}
+
+\begin{answer}
+Three different mechanisms turn the formula into calls. Local algebraic
+identities (\((A\T)\T = A\), \((AB)\T = B\T A\T\), flattening) are
+\emph{rewrite patterns} applied by MLIR's greedy driver. The choice of
+kernels is a \emph{global optimization} written as an ordinary C++ pass: it
+needs whole products, a cost model, dominance and a memo table, which a
+local pattern cannot see. The final translation to C++ is a \emph{dialect
+conversion} with a type converter, the textbook use of MLIR's conversion
+framework. All three preserve the value over the real numbers; none of them
+preserves floating-point results bit for bit, and kernel selection changes
+the numerical behavior on purpose.
+\end{answer}
+
+% ---------------------------------------------------------------------------
+\section{Normalization: local rewrites to a fixpoint}
+\label{sec:kernels-normal}
+
+\Cref{sec:gls-normal} showed the patterns at work. The complete set
+(\srcref{lib/UlmLamDialect.cpp}{562}{799} and
+\srcref{lib/UlmLamPasses.cpp}{74}{99}):
+
+\begin{center}\small
+\begin{tabularx}{\linewidth}{@{}P{3.4cm}P{4.6cm}L@{}}
+\toprule
+\textbf{Pattern} & \textbf{Rewrite} & \textbf{Side condition} \\
+\midrule
+\code{Flatten<MulOp>}, \code{Flatten<AddOp>} & \(A(BC) \Rightarrow ABC\), \(A + (B + C) \Rightarrow A + B + C\) & inner op has one use \\
+\code{FoldTranspose} & \((A\T)\T \Rightarrow A\); \(A\T \Rightarrow A\) & \(A\) symmetric (from its type) \\
+\code{PushTranspose} & \((ABC)\T \Rightarrow C\T B\T A\T\), \((A+B)\T \Rightarrow A\T + B\T\), \((\alpha A)\T \Rightarrow \alpha A\T\) & inner value has one use \\
+\code{DropIdentity} & \(A I B \Rightarrow AB\) & --- \\
+\code{FoldInverse} & \((A\inv)\inv \Rightarrow A\) & --- \\
+\code{FoldScaleOne}, \code{FoldScaleScale} & \(1A \Rightarrow A\), \(a(bA) \Rightarrow (ab)A\) & --- \\
+\code{ForwardDroppingAssume} & uses of \code{assume(x)} in algebra ops \(\Rightarrow\) uses of \(x\) & the assume only drops facts \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Every rewrite that may produce a value with \emph{stronger} properties than
+the one it replaces wraps it in an \code{assume} back to the old type
+(\code{replaceKeepingType}), so that the IR stays valid for the result-type
+check of \cref{sec:infra-compat}; \code{ForwardDroppingAssume} then lets the
+algebra see the stronger value again.
+
+\begin{theory}[ (\FGs{3.4}, \FGs{3.5})]
+These are rewrite rules with side conditions, run by a greedy driver until
+none applies: \FG{3.4}{Pattern rewriting: greedy drivers, canonicalization,
+PDL}. The side conditions ``has one use'' make the rules depend on the
+\emph{graph} (sharing), not only on the term, which is typical of rewriting
+on SSA. Termination: every rule removes a transpose, inverse, identity or
+scale node, or moves a transpose toward the leaves, or reduces nesting;
+\FG{3.5}{Term rewriting theory: confluence, termination, strategies} gives
+the general method (a well-founded measure that every rule decreases).
+\end{theory}
+
+% ---------------------------------------------------------------------------
+\section{Kernel selection is a global optimization}
+\label{sec:kernels-select}
+
+\Cref{sec:gls-select} described what the selector does for GLS. Why is it
+not a set of patterns, or a dialect conversion?
+
+\begin{itemize}
+\item \textbf{It decides for a whole product at once.} The cheapest
+  evaluation of \(X\T L_1\invT L_1\inv X\) depends on all four leaves; a
+  pattern that sees one \code{mul} at a time and rewrites it greedily
+  cannot run a dynamic program over its parenthesizations.
+\item \textbf{It shares across products.} \(W\) is computed for the first
+  product and reused, transposed, by the second; the selector keeps a map
+  from leaf sequences to computed values (\code{computed}) and checks
+  dominance before it reuses one.
+\item \textbf{It places code elsewhere.} Factorizations go right after the
+  definition of the factorized matrix, which may be outside a loop, not at
+  the product that needs them.
+\item \textbf{It may fail with a diagnostic.} An explicit inverse in a
+  position that no kernel sequence covers is reported (``no kernel sequence
+  for this product''), not miscompiled.
+\end{itemize}
+
+So the pass walks the function, collects products and sums, and emits
+kernels with an \code{OpBuilder}. The dynamic program
+(\srcref{lib/UlmLamPasses.cpp}{1058}{1138}) fills two tables, cost and
+choice, over intervals \([i,j]\) of leaves. For each split it considers:
+
+\begin{center}\small
+\begin{tabularx}{\linewidth}{@{}P{3.4cm}P{4.4cm}L@{}}
+\toprule
+\textbf{Choice} & \textbf{Kernel} & \textbf{Cost (flops)} \\
+\midrule
+\code{Gemm} & \code{gemm} / \code{gemv} of two sub-intervals & \(2\,m\,k\,n\) \\
+\code{SolveLeft} & \code{trsm} / \code{trsv} / \code{getrs} applied to the right part, in place & \(m^2 n\) (\(2m^2 n\) with LU), plus \(mn\) for a transposed operand \\
+\code{SolveRight} & \code{trsm} side right / \code{getrs} side right & \(mn^2\) (\(2mn^2\)) \\
+\code{Gram} & \code{syrk}: \(Z\T Z\) when the left half mirrors the right half & \(n^2 r\) \\
+\code{Reuse} & a sub-product computed by an earlier product & 0 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Factorization costs are not part of the dynamic program: every inverted
+matrix is factorized anyway (Cholesky \(n^3/3\), LU \(2n^3/3\)). One
+decision does weigh them: whether \((AB)\inv\) is formed and factorized or
+expanded into \(B\inv A\inv\) (\code{invertFactorwise},
+\srcref{lib/UlmLamPasses.cpp}{816}{853}).
+
+\begin{theory}[ (\FGs{4.5}, \FGs{3.3})]
+Instruction selection covers an expression tree with machine-instruction
+patterns of known cost; the optimal cover of a tree is found by dynamic
+programming (Aho, Ganapathi and Tjiang~\cite{aho-ganapathi-tjiang}),
+\FG{4.5}{Instruction selection: tree/DAG tiling, SelectionDAG vs GlobalISel}.
+Here the ``instructions'' are BLAS and LAPACK routines, the tree is a chain
+of leaves, and the patterns are \code{gemm}, the solves and \code{syrk}.
+Two features go beyond tree tiling: the Gram pattern matches a
+\emph{symmetry} of the interval (the left half is the transpose of the
+right), and \code{Reuse} is CSE across products, up to transposition, which
+makes the problem a DAG covering problem. Both follow Linnea~\cite{linnea},
+whose generalized matrix chain algorithm~\cite{gmc} the dynamic program
+implements.
+\end{theory}
+
+% ---------------------------------------------------------------------------
+\section{Lowering to C++: a dialect conversion}
+\label{sec:kernels-emitc}
+
+\begin{steps}
+\item[Input] the bufferized module: \code{ulm_lamk} on memrefs, \code{memref}, \code{scf}, \code{arith}, \code{func}.
+\item[Representation] a \code{ConversionTarget} in which only EmitC is legal; a \code{TypeConverter} from memrefs to pointers.
+\item[Rule] one \code{OpConversionPattern} per kernel and memref op, plus the upstream \code{arith}/\code{scf}/\code{func}-to-EmitC patterns; \code{applyPartialConversion}.
+\item[Output] EmitC, printed as C++ by \code{mlir-translate --mlir-to-cpp}.
+\item[Theory] \FG{3.3}{Progressive lowering and the dialect conversion framework}; \FG{4.6}{Legalization: types, operations, and ABI lowering}.
+\end{steps}
+
+The setup (\srcref{lib/ConvertUlmLamkToUlmBLAS.cpp}{1154}{1200}):
+
+\begin{lstlisting}[style=cpp]
+TypeConverter tc;
+tc.addConversion([](Type t) -> std::optional<Type> {
+    if (emitc::isSupportedEmitCType(t)) return t;
+    return std::nullopt;
+});
+tc.addConversion([](MemRefType t) -> std::optional<Type> {
+    if (!isCArray(t)) return std::nullopt;
+    return emitc::PointerType::get(t.getElementType());
+});
+...
+patterns.add<AllocLowering, ..., GemmLowering, ..., TrsmLowering, ...,
+             PotrfLowering, GetrfLowering, GetrsLowering, CallLowering>(tc, ctx);
+populateArithToEmitCPatterns(tc, patterns);
+populateSCFToEmitCConversionPatterns(patterns, tc);
+populateFuncToEmitCPatterns(tc, patterns, /*lowerToCpp=*/true);
+
+ConversionTarget conv(*ctx);
+conv.addLegalDialect<emitc::EmitCDialect>();
+conv.addIllegalDialect<memref::MemRefDialect, lk::UlmLamkDialect,
+                       ulm_lam::UlmLamDialect, func::FuncDialect,
+                       scf::SCFDialect, arith::ArithDialect>();
+if (failed(applyPartialConversion(module, conv, std::move(patterns))))
+    return signalPassFailure();
+\end{lstlisting}
+
+This is the case for which the conversion framework is made: a local,
+op-by-op translation in which types change (a \code{memref<?x?xf64>}
+becomes a \code{double *}), and every op of the source dialects must be
+gone at the end. The type change is the ABI decision: a matrix is a pointer
+to row-major data; transposition is in the strides; sizes are
+\code{size_t}. A \code{trsm} with \(\alpha = 1\) becomes LAPACK's
+\code{trtrs}, which is why \texttt{7-gls.cpp} calls \code{trtrs} for \(W =
+L_1\inv X\).
+
+% ---------------------------------------------------------------------------
+\section{Algebra over the reals and floating point}
+\label{sec:kernels-fp}
+
+Every rewrite in this chapter is an identity of real matrices. None is an
+identity of floating-point computations, and the compiler does not claim
+otherwise. Three levels of difference:
+
+\paragraph{Rounding} Reassociating \((AB)C\) into \(A(BC)\), replacing
+\(M\inv b\) by two triangular solves, or \(X\T M\inv X\) by \(W\T W\),
+changes the rounding errors. In \cref{sec:gls-numbers} the result differs
+from Julia's in the last bit. Neither is ``the'' floating-point value of
+the formula: the formula does not prescribe an evaluation order.
+
+\paragraph{Special values} Floating-point arithmetic is not a field.
+Kernel selection is careful where that matters: to accumulate into a new
+destination it copies instead of scaling by \(\beta = 0\), because ``scaling
+it by beta = 0 would read uninitialised memory, 0 * NaN = NaN''
+(\srcref{lib/UlmLamPasses.cpp}{1262}{1271}). Over \(\R\), \(0\cdot C + AB =
+AB\) for every \(C\); in IEEE arithmetic only if \(C\) contains no NaN or
+infinity.
+
+\paragraph{Stability} The derivation \(S = W\T W\) is the method of normal
+equations in disguise: it squares the condition number. The facts that the
+compiler inferred are still true (\(S\) is SPD over \(\R\)), but the
+floating-point \(S\) may be so inaccurate that its Cholesky factorization
+fails. \code{examples/conditioning.jl} makes \(X\) nearly rank deficient,
+\(X = [\mathbf{1},\ \mathbf{1} + \varepsilon(0,1,2,3)\T]\), keeps \(M\) and
+\(y\) of \cref{sec:gls-numbers}, and compares ulm.lam with a QR (orthogonal
+triangular) factorization of \(L_1\inv X\), both against a 256-bit reference
+(\code{outputs/conditioning.out}):
+
+\begin{center}\small
+\begin{tabularx}{\linewidth}{@{}rrLP{2.6cm}@{}}
+\toprule
+\(\varepsilon\) & \(\kappa(L_1\inv X)\) & \textbf{ulm.lam, relative error} & \textbf{QR, relative error} \\
+\midrule
+\(10^{-2}\) & \(1.48\cdot 10^{2}\) & \(2.66\cdot 10^{-13}\) & \(2.54\cdot 10^{-15}\) \\
+\(10^{-5}\) & \(1.46\cdot 10^{5}\) & \(1.45\cdot 10^{-6}\) & \(1.13\cdot 10^{-12}\) \\
+\(10^{-7}\) & \(1.46\cdot 10^{7}\) & \(2.49\cdot 10^{-2}\) & \(4.86\cdot 10^{-10}\) \\
+\(10^{-9}\) & \(1.46\cdot 10^{9}\) & \code{InfoError: ... info 2: Cholesky factorisation of a computed matrix: not positive definite} & \(4.74\cdot 10^{-8}\) \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The error of ulm.lam grows like \(\kappa^2 u\) (\(u \approx 1.1\cdot
+10^{-16}\)), that of QR like \(\kappa u\), as the theory of least squares
+predicts~\cite{higham}. At \(\varepsilon = 10^{-9}\), \(X\) still has full
+column rank and \(S\) is SPD, but the computed \(S\) is not, and the
+run-time check fires. The README lists QR among the open points of kernel
+selection, and notes that a factorization with \(\mathrm{info} = 0\) can
+still be useless.
+
+\begin{limit}
+Algebraic correctness over \(\R\) is not floating-point equivalence.
+Mathematical equivalence alone does not establish identical rounding,
+numerical stability, or unrestricted legality of reassociation. ulm.lam's
+rewrites are justified over \(\R\); their floating-point quality is a
+property of the chosen algorithm (Cholesky on normal equations here), which
+the cost model does not consider: it counts flops, not errors.
+\end{limit}

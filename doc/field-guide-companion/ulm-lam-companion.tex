@@ -1,0 +1,122 @@
+% ulm-lam-companion.tex -- a companion to "Modern Compiler Concepts: A Field
+% Guide" that connects its theory with the implementation of ulm.lam.
+% Build: latexmk (LuaLaTeX, see latexmkrc).  The examples: examples/run.sh.
+\documentclass[11pt,a4paper,openany]{book}
+\input{preamble}
+
+\begin{document}
+
+\frontmatter
+\begin{titlepage}
+  \centering
+  \vspace*{0.18\textheight}
+  {\sffamily\bfseries\fontsize{28}{34}\selectfont ulm.lam and the Field Guide\par}
+  \vspace{0.6em}
+  {\sffamily\Large\color{accent} A Companion: Compiler Theory in a Linear-Algebra Compiler on MLIR\par}
+  \vspace{2.4em}
+  {\large What the compiler does · how MLIR represents it · what the theory calls it\par}
+  \vfill
+  {\small\color{metacolor}
+   Describes ulm.lam at commit \href{\repo/tree/\commit}{\texttt{\shortcommit}}
+   (\texttt{\commit}).\\[2pt]
+   A companion to \emph{Modern Compiler Concepts: A Field Guide}.
+   Every example was run; commands, versions and outputs are in \cref{app:repro}.\par}
+  \vspace{1em}
+\end{titlepage}
+
+\chapter*{How to Read This Companion}
+\phantomsection\addcontentsline{toc}{chapter}{How to Read This Companion}
+\markboth{How to Read This Companion}{How to Read This Companion}
+\label{ch:howto}
+
+This companion connects three things that you already have: the compiler
+ulm.lam (Ulm Linear Algebra Mapping), your practical experience with MLIR
+(Multi-Level Intermediate Representation), and the theory collected in
+\emph{Modern Compiler Concepts: A Field Guide} (here: \emph{the Field Guide},
+cited as FG). It does not repeat the Field Guide. It shows what ulm.lam
+does with one concrete program, how MLIR represents and checks it, and then
+names the concept and points to the Field Guide entry that explains it.
+
+Every section follows the same order:
+
+\begin{steps}
+\item[Input] the program or IR (intermediate representation) that goes in;
+\item[Representation] how MLIR holds it: types, attributes, operations, values;
+\item[Rule] the check, inference, rewrite or analysis that applies;
+\item[Output] what comes out (actual compiler output, not a sketch);
+\item[Theory] the theoretical name, with the exact Field Guide section.
+\end{steps}
+
+\paragraph{Chapter 1 stands alone} It follows the generalized least-squares
+(GLS) problem from the formula to the kernel calls and to numbers, and
+connects each step to its theory. The later chapters take up one question
+each and go deeper.
+
+\paragraph{Where facts come from} Every property that the compiler uses has
+an origin. The text marks it with one of six tags:
+
+\begin{center}\small
+\begin{tabularx}{\linewidth}{@{}lL@{}}
+\toprule
+\Odecl & stated by the programmer (a type such as \code{Mat(:n, :n, :spd)},
+  or \code{assume}) and trusted, not proved \\
+\Over & checked structurally by an MLIR verifier when the IR is built or
+  parsed (shapes, contradictions, result types) \\
+\Oinf & derived by an inference rule from other facts (\(X\T M\inv X\) is
+  SPD if \(M\) is SPD and \(X\) has full column rank) \\
+\Oana & established by an analysis of the program (which buffer a size comes
+  from, whether an in-place write conflicts with a later read) \\
+\Orun & checked when the generated code runs (array sizes, a failed
+  Cholesky factorization) \\
+\Onone & not checked anywhere; the result is wrong or unspecified if the
+  fact is false \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\paragraph{Boxes} A \emph{Theory} box names the concept behind a mechanism
+and gives the Field Guide section. A \emph{Not the same thing} box marks
+where an analogy stops, next to the example where it matters.
+
+\paragraph{Links} Internal references are hyperlinks. A reference such as
+\FG{1.7}{Refinement types} opens the Field Guide at that section when
+\texttt{\FGfile} is in the same directory as this PDF (a link to its named
+destination \texttt{section.1.7}); otherwise the printed number and title
+locate it. Links to source code, such as
+\srcref{lib/UlmLamDialect.cpp}{98}{130}, go to the exact lines at commit
+\texttt{\shortcommit} on GitHub. All section numbers and titles were checked
+against the current Field Guide source.
+
+\paragraph{Code} Excerpts are copied from the sources at commit
+\texttt{\shortcommit}; lines left out are marked \code{...}. IR listings are
+the actual output of the compiler, shortened only by omitting lines (also
+marked) and by wrapping long lines. Where a listing is schematic or an
+extension that does not exist in ulm.lam, it says so.
+
+\paragraph{Notation} Matrices are real, \(X\T\) is the transpose,
+\(M\inv\) the inverse, \(M\invT = (M\inv)\T\). SPD stands for symmetric
+positive definite, SPSD for symmetric positive semidefinite. BLAS (Basic
+Linear Algebra Subprograms) and LAPACK (Linear Algebra PACKage) routine names
+(\code{potrf}, \code{trsm}, \ldots) are introduced where they first appear~\cite{blas3,lapack}.
+Other abbreviations are spelled out at first use.
+
+\tableofcontents
+
+\mainmatter
+\input{ch1-gls}
+\input{ch2-infrastructure}
+\input{ch3-facts}
+\input{ch4-shapes}
+\input{ch5-values-effects}
+\input{ch6-storage}
+\input{ch7-kernels}
+\input{ch8-orders}
+\input{ch9-summary}
+
+\appendix
+\input{app-repro}
+
+\backmatter
+\input{references}
+
+\end{document}

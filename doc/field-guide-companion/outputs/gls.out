@@ -1,0 +1,50 @@
+==== traced ulm_lam IR (frontend output)
+func.func @gls(%s.n: index, %s.m: index, %p.X: tensor<?x?xf64, #ulm_lam.props<full_rank>> {ulm_lam.in, ulm_lam.dims = [1, 0]}, %p.M: tensor<?x?xf64, #ulm_lam.props<spd>> {ulm_lam.in, ulm_lam.dims = [0, 0]}, %p.y: tensor<?x1xf64> {ulm_lam.in, ulm_lam.dims = [0]}) -> (tensor<?x1xf64> {ulm_lam.out, ulm_lam.dims = [1]}) {
+  %v1 = ulm_lam.transpose %p.X : tensor<?x?xf64, #ulm_lam.props<full_rank>> -> tensor<?x?xf64>
+  %v2 = ulm_lam.transpose %p.M : tensor<?x?xf64, #ulm_lam.props<spd>> -> tensor<?x?xf64>
+  %v3 = ulm_lam.transpose %v1 : tensor<?x?xf64> -> tensor<?x?xf64>
+  %v4 = ulm_lam.inverse %v2 : tensor<?x?xf64> -> tensor<?x?xf64>
+  %v5 = ulm_lam.mul %v3, %v4 : tensor<?x?xf64>, tensor<?x?xf64> -> tensor<?x?xf64>
+  %v6 = ulm_lam.mul %v5, %v1 : tensor<?x?xf64>, tensor<?x?xf64> -> tensor<?x?xf64>
+  %v7 = ulm_lam.inverse %v6 : tensor<?x?xf64> -> tensor<?x?xf64>
+  %v8 = ulm_lam.transpose %v1 : tensor<?x?xf64> -> tensor<?x?xf64>
+  %v9 = ulm_lam.inverse %v2 : tensor<?x?xf64> -> tensor<?x?xf64>
+  %v10 = ulm_lam.mul %v7, %v8 : tensor<?x?xf64>, tensor<?x?xf64> -> tensor<?x?xf64>
+  %v11 = ulm_lam.mul %v10, %v9 : tensor<?x?xf64>, tensor<?x?xf64> -> tensor<?x?xf64>
+  %v12 = ulm_lam.mul %v11, %p.y : tensor<?x?xf64>, tensor<?x1xf64> -> tensor<?x1xf64>
+  return %v12 : tensor<?x1xf64>
+}
+==== exact β (rational): Rational{BigInt}[93//73, 69//73]
+==== exact β (Float64):  [1.273972602739726, 0.9452054794520548]
+==== ulm.lam β: [1.2739726027397262, 0.9452054794520546]
+==== Julia expert  (X'*(M\X)) \ (X'*(M\y)): [1.2739726027397262, 0.9452054794520547]
+==== Julia formula inv(X'*inv(M)*X)*X'*inv(M)*y: [1.2739726027397262, 0.9452054794520547]
+==== max abs error vs exact: 2.220446049250313e-16
+==== isposdef(M) = true, rank(X) = 2
+==== @code_lam
+gls(X::n×m full_rank, M::n×n spd, y::n)
+  potrf    L1 ← chol(M)                      M = L1 L1ᵀ, Cholesky
+  copy     T1 ← X
+  trsm     T1 ← L1⁻¹ T1
+  syrk     T2 ← T1ᵀ T1                       one triangle only
+  potrf    L2 ← chol(T2)                     T2 = L2 L2ᵀ, Cholesky
+  trsv     T3 ← L1⁻¹ y
+  gemv     T4 ← T1ᵀ T3
+  trsv     T4 ← L2⁻¹ T4
+  trsv     T4 ← L2⁻ᵀ T4
+  return T4
+if a factorisation fails, the call throws InfoError with
+  info 1:  Cholesky factorisation of M: not positive definite
+  info 2:  Cholesky factorisation of a computed matrix: not positive definite
+
+==== failing: M symmetric but indefinite
+InfoError: gls: info 1: Cholesky factorisation of v4: not positive definite
+==== failing: X rank deficient (declared full_rank)
+InfoError: gls: info 2: Cholesky factorisation of a computed matrix: not positive definite
+==== failing: inconsistent sizes at call time
+LamError: gls: y: size :n = 3, but 4 from an earlier argument
+==== failing: non-symmetric M declared spd
+InfoError: gls: info 1: Cholesky factorisation of v4: not positive definite
+==== trace-time error: symbolic sizes
+LamError: product of nxm and nxm: m columns but n rows
+==== versions: Julia 1.13.3, BLAS: LBTConfig([ILP64] libopenblas64_p-r0.3.34.dylib)

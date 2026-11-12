@@ -1,0 +1,7 @@
+module {
+  func.func @f(%arg0: tensor<4x4xf64>, %arg1: memref<4x4xf64>) -> tensor<4x4xf64> {
+    %info = ulm_lamk.potrf uplo(lower) outs(%arg1 : memref<4x4xf64>)
+    return %arg0 : tensor<4x4xf64>
+  }
+}
+

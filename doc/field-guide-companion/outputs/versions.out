@@ -1,0 +1,9 @@
+ulm-lam commit: 41855425a8b9ea4ee279fd2ea4b31b45b53e1983
+Homebrew LLVM version 23.1.4
+  Optimized build.
+julia version 1.13.3
+BLAS: LBTConfig([ILP64] libopenblas64_p-r0.3.34.dylib)
+Homebrew clang version 23.1.4
+Python 3.15.2
+ProductName:		macOS ProductVersion:		26.6 
+arm64

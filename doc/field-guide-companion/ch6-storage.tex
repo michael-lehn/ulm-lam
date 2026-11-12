@@ -1,0 +1,248 @@
+% ch6-storage.tex
+\chapter{From Immutable Values to Mutable Storage}
+\label{ch:storage}
+
+\begin{answer}
+Kernel selection produces BLAS and LAPACK kernels on \emph{tensors}, in
+destination-passing style: each kernel names the value it overwrites, and
+returns the new value. MLIR's One-Shot Bufferize then assigns buffers. It
+lets a kernel overwrite its destination in place when the destination's
+buffer may be written and no later use reads the old value; otherwise it
+inserts a copy. Read-only parameters are protected by an attribute, so the
+caller's \(M\) is copied before \code{potrf} overwrites it, unless the
+caller declares it overwritable. After bufferization, ulm.lam's own pass
+places all temporaries in one caller-provided workspace at disjoint
+offsets. No type system is involved: in-place updates are justified by an
+analysis, and the absence of aliasing by construction.
+\end{answer}
+
+% ---------------------------------------------------------------------------
+\section{Destination-passing style kernels}
+\label{sec:storage-dps}
+
+\begin{steps}
+\item[Input] a kernel that BLAS executes in place, \(B \leftarrow L\inv B\).
+\item[Representation] \code{ulm_lamk.trsm ... ins(\%L) outs(\%B) -> tensor} on tensors; the same op with no result on memrefs.
+\item[Rule] the \code{outs} operand is the DPS ``init'': on tensors, result \(i\) is the new value of init \(i\) and has its type (\code{verifyDps}).
+\item[Output] a value-semantic op whose natural buffer is that of its \code{outs} operand.
+\item[Theory] \FG{10.3}{Bufferization and destination-passing style}.
+\end{steps}
+
+All kernels share one ODS base class
+(\srcref{include/ulm_lam/UlmLamKernelOps.td}{30}{45}):
+
+\begin{lstlisting}[style=td]
+class UlmLamk_Op<string mnemonic, string init, list<Trait> traits = []>
+    : Op<UlmLamk_Dialect, mnemonic, !listconcat(traits, [
+        DestinationStyleOpInterface,
+        DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+        DeclareOpInterfaceMethods<UlmLam_PropertyInferenceOpInterface>,
+        DeclareOpInterfaceMethods<UlmLamk_KernelCostOpInterface>])> {
+  let results = (outs Variadic<2DTensorOf<[F32, F64]>>:$result);
+  ...
+}
+\end{lstlisting}
+
+The variadic result is the trick that lets one op serve both worlds: on
+tensors it has one result (the new value), on memrefs none. The GLS
+\code{trsm}, before and after bufferization:
+
+\begin{lstlisting}
+%3 = ulm_lamk.trsm side(left) uplo(lower) trans(none) diag(non_unit) alpha(%cst_0)
+       ins(%result : tensor<?x?xf64>) outs(%2 : tensor<?x?xf64>) -> tensor<?x?xf64>
+ulm_lamk.trsm side(left) uplo(lower) trans(none) diag(non_unit) alpha(%cst)
+       ins(%view : memref<?x?xf64>) outs(%view_2 : memref<?x?xf64>)
+\end{lstlisting}
+
+The bufferization model for every kernel
+(\srcref{lib/UlmLamDialect.cpp}{1168}{1213}) derives from MLIR's
+\code{DstBufferizableOpInterfaceExternalModel}, which supplies the analysis
+(which operands are read, which are written, which result aliases which
+destination). ulm.lam implements only \code{bufferize()}: create the same
+op on buffers and replace each tensor result by its destination's buffer.
+The comment says it in one line: ``Analysis (in-place decisions, copies)
+comes from the DPS default model.''
+
+% ---------------------------------------------------------------------------
+\section{Who may be overwritten}
+\label{sec:storage-intent}
+
+One-Shot Bufferize treats function arguments as writable unless told
+otherwise. \code{ulm-lam-results-to-out-params} tells it
+(\srcref{lib/UlmLamResultsToOutParams.cpp}{344}{368}): a parameter marked
+\code{ulm_lam.in} (the default) gets \code{bufferization.writable = false},
+one marked \code{ulm_lam.inout} gets \code{true}. Results become out
+parameters that the caller allocates.
+
+\begin{center}\small
+\begin{tabularx}{\linewidth}{@{}P{3.6cm}P{2.6cm}L@{}}
+\toprule
+\textbf{Variant} & \textbf{Copies} & \textbf{What changes} \\
+\midrule
+\code{gls}: \(X\), \(M\), \(y\) \code{in} & 3 (\(M\), \(X\), \(y\)) &
+  \code{potrf} and \code{trsv} work on copies in the workspace \\
+\code{gls_inout}: \(M\), \(y\) \code{inout} & 1 (\(X\)) & \code{potrf
+  uplo(lower) outs(\%arg1 ...)} works on the caller's \(M\); the caller's
+  \(M\) and \(y\) are destroyed, as with LAPACK \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Both lines are checked by \code{examples/gls/check.sh}
+(\cref{app:repro}). In Julia, \code{InOut(Mat(...))} declares the second
+kind of parameter. The intent is \Odecl{} by the programmer; that the
+generated code respects it is \Oana{} (One-Shot Bufferize's conflict
+analysis honors \code{writable = false}).
+
+% ---------------------------------------------------------------------------
+\section{Loop state in place}
+\label{sec:storage-loops}
+
+A loop-carried matrix should live in one buffer for the whole loop.
+One-Shot Bufferize can arrange that only if the value yielded at the end of
+the body is computed in the buffer of the iteration argument. Kernel
+selection makes sure of it (\srcref{lib/UlmLamPasses.cpp}{358}{377}): if
+the yielded value was computed elsewhere, it inserts a
+\code{bufferization.materialize_in_destination} into the iteration
+argument. In \code{iterate} (\code{outputs/iterate-selected.mlir}):
+
+\begin{lstlisting}
+%0 = scf.for %arg4 = %c0 to %arg3 step %c1 iter_args(%arg5 = %arg2) -> (tensor<?x1xf64>) {
+  %1 = ulm_lamk.trsv uplo(lower) trans(none) diag(non_unit) ins(%result : ...) outs(%arg5 : ...) -> ...
+  %2 = ulm_lamk.trsv uplo(lower) trans(trans) diag(non_unit) ins(%result : ...) outs(%1 : ...) -> ...
+  %3 = bufferization.materialize_in_destination %2 in %arg5 : (...) -> tensor<?x1xf64>
+  scf.yield %3 : tensor<?x1xf64>
+}
+\end{lstlisting}
+
+Here both solves already write into \code{\%arg5}'s buffer, and the
+materialization costs nothing. For \(x \leftarrow Fx\), which cannot be
+computed in place by \code{gemv}, it becomes one copy per iteration instead
+of one allocation per iteration.
+
+% ---------------------------------------------------------------------------
+\section{One workspace for all temporaries}
+\label{sec:storage-workspace}
+
+\begin{steps}
+\item[Input] the bufferized function, with a \code{memref.alloc} per temporary.
+\item[Representation] after \code{ulm-lam-workspace}: two extra parameters, a byte buffer and a size/protocol word; every temporary a \code{memref.view} into the buffer.
+\item[Rule] offsets are the running sum of the temporaries' sizes, each rounded up to 64 bytes; the size is a formula in the run-time sizes.
+\item[Output] no allocation inside the function (unless the caller asks for it).
+\item[Theory] an arena allocator with a LAPACK-style \code{lwork} protocol; buffer assignment as storage allocation, \FG{10.3}{Bufferization and destination-passing style}, by analogy with register assignment, \FG{4.1}{SSA destruction: parallel copies, lost-copy and swap problems}.
+\end{steps}
+
+The protocol (\srcref{lib/UlmLamWorkspace.cpp}{1}{47}): with
+\code{*workspace_info == -1} the function only stores the required size and
+returns; with \code{0} it allocates the block itself and frees it at the end;
+with a positive value it uses the given block, or returns
+\(\mathrm{info} = -i\) if the block is too small. The Julia runtime queries
+the size once per combination of run-time sizes and keeps one workspace per
+task, so repeated calls allocate nothing.
+
+For GLS the bufferized IR computes four aligned sizes and their offsets
+(the \code{arith} ops at the top of \texttt{6-bufferized.mlir}).
+\Cref{fig:workspace} shows the layout and the numbers for the example of
+\cref{sec:gls-numbers}.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[font=\sffamily\small,
+  seg/.style={draw=accent,fill=accent!8,minimum height=0.9cm,align=center,inner sep=2pt},
+  lbl/.style={font=\sffamily\scriptsize,text=metacolor}]
+  \node[seg,minimum width=5.2cm,anchor=west] (a) at (0,0) {copy of \(M\), then \(L_1\)\\[-1pt]\scriptsize\(8n^2\)};
+  \node[seg,minimum width=2.0cm,anchor=west,fill=oinf!12] (b) at (a.east) {\(S\), then \(L_2\)\\[-1pt]\scriptsize\(8m^2\)};
+  \node[seg,minimum width=3.4cm,anchor=west] (c) at (b.east) {\(W\)\\[-1pt]\scriptsize\(8nm\)};
+  \node[seg,minimum width=2.2cm,anchor=west] (d) at (c.east) {copy of \(y\), \(z\)\\[-1pt]\scriptsize\(8n\)};
+  \node[lbl,anchor=north] at (a.south west) {0};
+  \node[lbl,anchor=north] at (b.south west) {\code{\%4}};
+  \node[lbl,anchor=north] at (c.south west) {\code{\%9}};
+  \node[lbl,anchor=north] at (d.south west) {\code{\%13}};
+  \node[lbl,anchor=north] at (d.south east) {\code{\%16}};
+  \node[lbl,anchor=north west,align=left] at (0,-1.0) {\(n=4,\ m=2\): offsets 0, 128, 192, 256; total 320 bytes.\\
+    \(n=2000,\ m=50\): offsets 0, 32\,000\,000, 32\,020\,032, 32\,820\,032; total 32\,836\,032 bytes.};
+\end{tikzpicture}
+\caption{The GLS workspace: one block, four views at 64-byte aligned
+offsets (each size rounded up to a multiple of 64). \(\beta\) is not in it:
+it is written directly into the caller's output.}
+\label{fig:workspace}
+\end{figure}
+
+Every temporary has its own region of the block for the whole call. The
+pass does not overlap temporaries with disjoint lifetimes (in GLS that
+would not help: while \(z\) is computed, \(L_1\), \(L_2\), \(W\) and
+\(z\) are all live). It does let the branches of an \code{scf.if} share
+their part, because only one of them runs. Reuse happens \emph{across}
+calls, through the caller's workspace.
+
+% ---------------------------------------------------------------------------
+\section{Aliasing}
+\label{sec:storage-alias}
+
+BLAS and LAPACK assume that an output does not overlap an input (Fortran's
+rules). ulm.lam guarantees this by construction rather than by analysis:
+\begin{itemize}
+\item temporaries are views at disjoint offsets of one block;
+\item read-only parameters are never written (\code{writable = false});
+\item a kernel reads its \code{ins} and overwrites only its \code{outs}, and
+  bufferization gives an \code{outs} operand that is still needed elsewhere
+  a copy.
+\end{itemize}
+
+MLIR's generic passes see less. The memref effects of \code{ulm_lamk} ops
+are all on the \code{DefaultResource} (\cref{sec:effects}), so any two
+kernels on memrefs are treated as possibly touching the same memory. That
+is conservative and therefore sound; it costs nothing here, because all
+optimization happens before bufferization, on values.
+
+\begin{theory}[ (\FGs{5.5}, \FGs{2.7})]
+\FG{5.5}{Alias and points-to analysis: Andersen, Steensgaard, type-based}
+answers ``may these two pointers refer to the same memory?''. ulm.lam
+avoids the question: on tensors there is no memory and hence no aliasing
+(\FGs{2.7}), and after bufferization the program is no longer optimized. The
+one analysis that does reason about aliasing is One-Shot Bufferize's, which
+tracks which tensor values are equivalent to which buffers in order to
+decide in-place writes.
+\end{theory}
+
+\begin{limit}
+Bufferization and storage reuse do not imply linear typing. A linear type
+system (\FGs{1.2}) or a uniqueness type (\FGs{1.4}) would \emph{guarantee},
+by a typing rule, that a value is not used after it is updated in place.
+Here a value may be used any number of times, and the bufferizer
+\emph{decides}, for each update, whether an in-place write is safe; if not,
+it copies. The program is never rejected for using a value twice; it only
+gets slower.
+\end{limit}
+
+% ---------------------------------------------------------------------------
+\section{What each lowering keeps and drops}
+\label{sec:storage-lost}
+
+\begin{table}[h]
+\centering\small
+\begin{tabularx}{\linewidth}{@{}P{2.7cm}P{2.6cm}P{2.6cm}P{2.6cm}L@{}}
+\toprule
+\textbf{Information} & \textbf{ulm\_lam} & \textbf{ulm\_lamk, tensors} & \textbf{ulm\_lamk, memrefs} & \textbf{C++} \\
+\midrule
+matrix properties & encodings & kernel choice, \code{uplo}, \code{diag}; encodings until \code{strip-properties} & gone & routine names (\code{trlsv}, \code{trusv}) \\
+transposition & \code{transpose} ops & \code{trans} flags & \code{trans} flags & swapped strides \\
+the algebra & \code{mul}, \code{inverse} & kernels & kernels & calls \\
+value semantics & tensors & tensors (DPS) & buffers & pointers \\
+run-time sizes & \code{?} + \code{ulm_lam.dims} & \code{index} values & \code{index} values & \code{size_t} arguments \\
+in/out intent & arg.\ attributes & arg.\ attributes & copies or none & interface comment \\
+failure & --- & \code{info} result & \code{info}, then \code{scf.if} & return value \\
+\bottomrule
+\end{tabularx}
+\caption{Information through the stages. Properties are consumed by kernel
+selection: after it, the program no longer says \emph{why} a Cholesky
+factorization was chosen, only \emph{that} it was.}
+\label{tab:lost}
+\end{table}
+
+\Cref{tab:lost} answers ``what is preserved or lost during lowering''. The
+pattern is that of \FG{3.3}{Progressive lowering and the dialect conversion
+framework}: each stage keeps exactly what a later stage still needs. The
+properties are needed only by kernel selection and are dropped right after
+it; the DPS ties are needed by bufferization and disappear with it;
+transposition survives down to the C++ call, as strides.

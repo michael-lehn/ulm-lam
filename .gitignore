@@ -12,4 +12,10 @@ doc/*.log
 doc/*.lst
 doc/*.out
 doc/*.toc
+doc/field-guide-companion/*.aux
+doc/field-guide-companion/*.fdb_latexmk
+doc/field-guide-companion/*.fls
+doc/field-guide-companion/*.log
+doc/field-guide-companion/*.out
+doc/field-guide-companion/*.toc
 julia/UlmLam/Manifest.toml

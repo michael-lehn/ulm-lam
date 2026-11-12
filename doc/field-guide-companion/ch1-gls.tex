@@ -1,0 +1,813 @@
+% ch1-gls.tex
+\chapter{A Complete Worked Example: Generalized Least Squares}
+\label{ch:gls}
+
+\begin{answer}
+ulm.lam turns the formula \(\beta=(X\T M\inv X)\inv X\T M\inv y\) into
+eleven calls: three copies, two Cholesky factorizations, a triangular solve
+with many right-hand sides, a symmetric rank-\(k\) update, a matrix-vector
+product and three triangular solves with one right-hand side. No inverse is
+formed, \(M\) is factorized once although it is inverted twice, and the
+matrix \(L\inv X\) is computed once and used twice. The facts that make this
+possible (\(M\) is SPD, \(X\) has full rank, \(X\T M\inv X\) is SPD) are
+carried in MLIR tensor types; two of them are declared and one is inferred.
+The two factorizations are the only checks of these facts in the generated
+code.
+\end{answer}
+
+This chapter follows one program through every representation.
+\Cref{fig:pipeline} shows the stages; each section below explains one of
+them before the next one appears. All listings are the actual output of the
+commands in \cref{app:repro} (files in \code{outputs/gls/}).
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+  font=\sffamily\small,
+  node distance=0.95cm,
+  rep/.style={draw=accent,fill=accent!6,rounded corners=2pt,align=left,
+    text width=5.6cm,inner sep=4pt},
+  fact/.style={align=left,text width=4.6cm,font=\sffamily\scriptsize,text=metacolor,
+    anchor=west},
+  pass/.style={font=\sffamily\scriptsize,text=accent!70!black,align=left,anchor=west,
+    inner sep=1pt},
+  arr/.style={-{Stealth[length=2mm]},draw=accent!80!black,thick}]
+  \node[rep] (jl) {\textbf{Julia}: \code{@lam function gls(...)}};
+  \node[rep,below=of jl] (tr) {\textbf{ulm\_lam} on tensors: \code{mul}, \code{transpose},
+    \code{inverse}\\\scriptsize\code{1-traced.mlir}};
+  \node[rep,below=of tr] (no) {\textbf{ulm\_lam}, normal form\\\scriptsize\code{2-normal.mlir}};
+  \node[rep,below=of no] (in) {\textbf{ulm\_lam}, properties inferred\\\scriptsize\code{3-inferred.mlir}};
+  \node[rep,below=of in] (se) {\textbf{ulm\_lamk} on tensors (DPS):
+    \code{potrf}, \code{trsm}, \code{syrk}, \ldots\\\scriptsize\code{5-selected.mlir}};
+  \node[rep,below=of se] (bu) {\textbf{ulm\_lamk} on memrefs, workspace, \code{info}\\\scriptsize\code{6-bufferized.mlir}};
+  \node[rep,below=of bu] (cc) {\textbf{EmitC} \(\to\) \textbf{C++} calling BLAS/LAPACK\\\scriptsize\code{7-gls.cpp}, compiled to a shared library};
+  \foreach \a/\b/\t in {jl/tr/{tracing (operator overloading)},
+                       tr/no/{\code{ulm-lam-normalize}},
+                       no/in/{\code{ulm-lam-infer-properties}},
+                       in/se/{\code{loop-invariant-code-motion}, \code{ulm-lam-select-kernels}},
+                       se/bu/{\code{strip-properties}, \code{one-shot-bufferize}, \code{ulm-lam-workspace}, \code{ulm-lam-info}},
+                       bu/cc/{\code{convert-ulm-lamk-to-ulmblas}, \code{mlir-translate}}}
+    \draw[arr] (\a.south) -- node[pass,xshift=3pt] {\t} (\b.north);
+  \node[fact] at ([xshift=0.35cm]jl.east) {facts in Julia types: \code{Mat(:n, :m, :full_rank)}};
+  \node[fact] at ([xshift=0.35cm]tr.east) {facts in tensor types: shape, \code{#ulm_lam.props}; sizes in \code{ulm_lam.dims}};
+  \node[fact] at ([xshift=0.35cm]in.east) {stronger types on results: \code{spd} for \(X\T M\inv X\)};
+  \node[fact] at ([xshift=0.35cm]se.east) {facts turned into kernel choices and flags (\code{uplo}, \code{trans})};
+  \node[fact] at ([xshift=0.35cm]bu.east) {encodings gone; buffers, copies, offsets; \code{info} codes};
+  \node[fact] at ([xshift=0.35cm]cc.east) {pointers, strides, \code{size_t} sizes; no types beyond \code{double *}};
+\end{tikzpicture}
+\caption{The stages of the GLS example. Left: the representation and the
+pass that produces it. Right: where the facts about the matrices live at
+that stage.}
+\label{fig:pipeline}
+\end{figure}
+
+% ---------------------------------------------------------------------------
+\section{The problem and its assumptions}
+\label{sec:gls-problem}
+
+In the linear model \(y = X\beta + e\) with an error \(e\) of covariance
+\(\sigma^2 M\), the GLS estimate of \(\beta\in\R^m\) is
+\[
+  \beta = (X\T M\inv X)\inv X\T M\inv y,
+  \qquad X\in\R^{n\times m},\; M\in\R^{n\times n},\; y\in\R^n .
+\]
+The formula needs two facts:
+\begin{enumerate}
+\item \(M\) is SPD, so \(M\inv\) exists and is SPD;
+\item \(X\) has full column rank (\(\operatorname{rank} X = m \le n\)).
+\end{enumerate}
+Together they make \(S = X\T M\inv X\) SPD: for \(v \ne 0\), \(Xv \ne 0\)
+by (2), and \(v\T S v = (Xv)\T M\inv (Xv) > 0\) by (1). So \(S\) is
+invertible and \(\beta\) is well defined.
+
+A numerical analyst does not form either inverse. With the Cholesky
+factorization \(M = L_1 L_1\T\) (\(L_1\) lower triangular):
+\[
+  W = L_1\inv X,\quad z = L_1\inv y,\quad S = W\T W = L_2 L_2\T,\quad
+  \beta = L_2\invT L_2\inv\, W\T z .
+\]
+\(W\) appears twice; \(S\) is symmetric, so only one triangle is computed;
+\(S\) is SPD, so it is factorized by Cholesky as well. This is what ulm.lam
+derives, and the rest of the chapter shows how.
+
+% ---------------------------------------------------------------------------
+\section{The Julia frontend code}
+\label{sec:gls-julia}
+
+The program, as in the README and in \code{examples/gls.jl}:
+
+\begin{lstlisting}[style=jl]
+using UlmLam, LinearAlgebra
+
+@lam function gls(X::Mat(:n, :m, :full_rank), M::Mat(:n, :n, :spd), y::Vec(:n))
+    inv(X' * inv(M) * X) * X' * inv(M) * y
+end
+
+beta = gls(X, M, y)    # Julia arrays; the first call compiles
+\end{lstlisting}
+
+The body is the formula. The parameter types are not Julia types but
+ulm.lam types, values of the Julia structs \code{MatType}
+(\srcref{julia/UlmLam/src/frontend.jl}{39}{45}):
+
+\begin{itemize}
+\item \code{Mat(:n, :m, :full_rank)} is a matrix with \(n\) rows and \(m\)
+  columns and the property \code{full_rank}. The symbols \code{:n} and
+  \code{:m} are \emph{run-time sizes}: their values are taken from the
+  arrays at each call, and equal symbols mean equal sizes. A number
+  instead of a symbol is a size fixed at compile time.
+\item \code{Mat(:n, :n, :spd)} is an \(n\times n\) SPD matrix.
+\item \code{Vec(:n)} is a vector, represented as an \(n\times 1\) matrix.
+\end{itemize}
+
+The macro \code{@lam} does not compile anything. It wraps the function so
+that the first call with Julia arrays traces the body, compiles the traced
+program into a shared library (about half a second), and calls it.
+
+% ---------------------------------------------------------------------------
+\section{Tracing: from Julia to the first IR}
+\label{sec:gls-trace}
+
+\begin{steps}
+\item[Input] the Julia function, called once with placeholder values of type \code{LamValue}.
+\item[Representation] each Julia operation on a \code{LamValue} appends one line of MLIR text.
+\item[Rule] operator overloading: \code{*} emits \code{ulm_lam.mul}, \code{'} emits \code{ulm_lam.transpose}, \code{inv} emits \code{ulm_lam.inverse}.
+\item[Output] a \code{func.func} in the \code{ulm_lam} dialect (\texttt{1-traced.mlir}).
+\item[Theory] a tracing front end of an embedded DSL (domain-specific language), \FG{3.7}{Embedded DSLs and tracing/AST-capturing front ends}.
+\end{steps}
+
+The overloaded product (\srcref{julia/UlmLam/src/frontend.jl}{222}{231})
+already checks the inner sizes, by comparing sizes that may be symbols:
+
+\begin{lstlisting}[style=jl]
+function Base.:*(a::LamValue, b::LamValue)
+    ...
+    ta, tb = mat(a, "*"), mat(b, "*")
+    ta.cols == tb.rows ||
+        throw(LamError("product of $ta and $tb: $(ta.cols) columns but " *
+                       "$(tb.rows) rows"))
+    op!("ulm_lam.mul", [a, b], newtype(ta.rows, tb.cols))
+end
+\end{lstlisting}
+
+\paragraph{The signature} The traced function begins (one line in the
+file, wrapped here):
+
+\begin{lstlisting}
+func.func @gls(%s.n: index, %s.m: index,
+    %p.X: tensor<?x?xf64, #ulm_lam.props<full_rank>> {ulm_lam.in, ulm_lam.dims = [1, 0]},
+    %p.M: tensor<?x?xf64, #ulm_lam.props<spd>> {ulm_lam.in, ulm_lam.dims = [0, 0]},
+    %p.y: tensor<?x1xf64> {ulm_lam.in, ulm_lam.dims = [0]})
+    -> (tensor<?x1xf64> {ulm_lam.out, ulm_lam.dims = [1]}) {
+\end{lstlisting}
+
+Read it from left to right:
+\begin{itemize}
+\item \code{\%s.n} and \code{\%s.m} are the run-time sizes, as
+  \code{index} parameters of the function. The generated C function receives
+  them as \code{size_t} arguments.
+\item \code{\%p.X} has type \code{tensor<?x?xf64, #ulm_lam.props<full_rank>>}:
+  a rank-2 tensor of \code{f64} with two dynamic dimensions (\code{?}) and,
+  in the \emph{encoding} slot of the builtin tensor type, the property set
+  \code{full_rank}.
+\item \code{ulm_lam.dims = [1, 0]} is an argument attribute. It says which
+  \code{index} parameter each dynamic dimension is: the rows of \code{\%p.X}
+  are parameter 1 (\(m\)), its columns parameter 0 (\(n\)). So \code{\%p.X} is
+  \(m\times n\), not \(n\times m\): Julia stores matrices column-major, the
+  ulm.lam ABI (application binary interface) is row-major, and the memory of
+  the Julia matrix \(X\) \emph{is} the row-major matrix \(X\T\). The frontend
+  types the parameter as \(X\T\) (\code{abitype},
+  \srcref{julia/UlmLam/src/frontend.jl}{100}{106}) and hands the traced
+  function \code{transpose(\%p.X)}, which is \(X\). No data is copied for this.
+\item \code{ulm_lam.in} marks a read-only argument, \code{ulm_lam.out} the
+  result, which the caller allocates.
+\end{itemize}
+
+\paragraph{The body} Twelve operations, one per Julia operation:
+
+\begin{lstlisting}
+%v1 = ulm_lam.transpose %p.X  : ... -> tensor<?x?xf64>        // X   (Julia's X)
+%v2 = ulm_lam.transpose %p.M  : ... -> tensor<?x?xf64>        // M
+%v3 = ulm_lam.transpose %v1   : ...                           // X'
+%v4 = ulm_lam.inverse %v2     : ...                           // inv(M)
+%v5 = ulm_lam.mul %v3, %v4    : ...                           // X' * inv(M)
+%v6 = ulm_lam.mul %v5, %v1    : ...                           // ... * X
+%v7 = ulm_lam.inverse %v6     : ...                           // inv(...)
+%v8 = ulm_lam.transpose %v1   : ...                           // X'
+%v9 = ulm_lam.inverse %v2     : ...                           // inv(M), again
+%v10 = ulm_lam.mul %v7, %v8   : ...
+%v11 = ulm_lam.mul %v10, %v9  : ...
+%v12 = ulm_lam.mul %v11, %p.y : ... -> tensor<?x1xf64>
+return %v12 : tensor<?x1xf64>
+\end{lstlisting}
+
+(The comments are added here; the types after \code{:} are shortened.)
+Every intermediate result has the plain type \code{tensor<?x?xf64>}: the
+frontend writes no properties for results. It also records exactly what
+the Julia code does: Julia's left-to-right \code{*} gives binary products
+nested to the left, and \code{inv(M)} appears twice (\code{\%v4},
+\code{\%v9}) because the formula contains it twice.
+
+\begin{theory}[ (\FGs{3.7})]
+ulm.lam is an embedded DSL with a \emph{tracing} front end: the host
+language runs the program on symbolic stand-ins and records the operations,
+as JAX does with Python. Host-language control flow is evaluated during
+tracing and disappears; only the recorded operations reach the compiler.
+What is known when (Julia values at trace time, sizes at call time, entries
+at run time) is a question of binding times, the sixth thread of the Field
+Guide's conceptual map, and of \FG{8.6}{Multi-stage programming and
+binding-time analysis}.
+\end{theory}
+
+% ---------------------------------------------------------------------------
+\section{What the types encode, and what they do not}
+\label{sec:gls-types}
+
+Before the first pass runs, the IR carries everything the compiler will
+know about the problem. \Cref{tab:gls-info} lists where each piece of
+information is.
+
+\begin{table}[t]
+\centering\small
+\begin{tabularx}{\linewidth}{@{}P{3.3cm}P{4.4cm}L@{}}
+\toprule
+\textbf{Information} & \textbf{Where in the IR} & \textbf{Origin} \\
+\midrule
+element type \code{f64} & tensor element type & \Odecl{} by the call
+  (Float64 arrays; Float32 arrays compile an \code{f32} version) \\
+rank 2 & tensor rank; ODS constraint \code{2DTensorOf<[F32, F64]>} & \Over{}
+  by the generated operand checks \\
+static sizes & tensor shape & \Over{} by op verifiers when static \\
+which run-time size & \code{index} parameters and the argument attribute
+  \code{ulm_lam.dims} & \Odecl{} by the frontend; read by an \Oana{}
+  (\code{dimOf}, \cref{sec:shapes-dims}) \\
+matrix properties & tensor encoding \code{#ulm_lam.props<...>} & \Odecl{} on
+  parameters; \Oinf{} on results (\cref{sec:gls-infer}) \\
+may the function overwrite it? & argument attributes \code{ulm_lam.in} /
+  \code{ulm_lam.inout} & \Odecl{}; drives bufferization
+  (\cref{sec:gls-storage}) \\
+the entries & nowhere (run-time values) & checked only indirectly, by the
+  factorizations \Orun{} \\
+\bottomrule
+\end{tabularx}
+\caption{Where the GLS program's information lives in the first IR.}
+\label{tab:gls-info}
+\end{table}
+
+\paragraph{Why the properties are a tensor encoding} The builtin
+\code{RankedTensorType} has an optional \emph{encoding} attribute. ulm.lam
+defines an attribute, \code{#ulm_lam.props<...>}, and places it there,
+instead of defining its own matrix type. Upstream passes and One-Shot
+Bufferize then see ordinary tensors, and the properties are removed in one
+step (\code{ulm-lam-strip-properties}) once they are no longer needed. The
+attribute is a bit set over fifteen named facts; its declaration is in
+\srcref{include/ulm_lam/UlmLamAttrs.td}{1}{75} and is discussed in
+\cref{sec:infra-props}.
+
+\paragraph{What the type of \code{\%p.M} says} \code{tensor<?x?xf64,
+#ulm_lam.props<spd>>} reads ``some \(n\times n\) matrix that is SPD''. The
+compiler takes this as given. Nothing in the IR proves that the caller's
+array is symmetric or positive definite, and the compiler never reads the
+entries. This is the first boundary of the system: \Odecl{} facts enter at
+the parameters (and at \code{ulm_lam.assume}), and everything else is
+derived from them.
+
+\begin{theory}[ (\FGs{1.7})]
+A type that restricts a base type by a predicate,
+\(\{A : \R^{n\times n} \mid A \text{ is SPD}\}\), is a \emph{refinement
+type}, \FG{1.7}{Refinement types}. ulm.lam's predicates come from a fixed
+set of fifteen atoms and their conjunctions, like the qualifiers of liquid
+types~\cite{liquid,refinement}. \Cref{ch:infra,ch:facts} make the comparison precise, including
+what is missing (no proof obligations at call sites, no predicates that
+relate a matrix to other values).
+\end{theory}
+
+% ---------------------------------------------------------------------------
+\section{Normal form}
+\label{sec:gls-normal}
+
+\begin{steps}
+\item[Input] the traced IR of \cref{sec:gls-trace}.
+\item[Representation] the same ops; patterns are C++ classes derived from \code{OpRewritePattern}.
+\item[Rule] fold \(A\T{}\T \to A\); fold \(A\T \to A\) when \(A\) is symmetric; flatten nested products into one n-ary \code{ulm_lam.mul} (if the inner product has no other use).
+\item[Output] \texttt{2-normal.mlir}, below.
+\item[Theory] greedy pattern rewriting to a fixpoint, \FG{3.4}{Pattern rewriting: greedy drivers, canonicalization, PDL}; termination, \FG{3.5}{Term rewriting theory: confluence, termination, strategies}.
+\end{steps}
+
+The pass \code{ulm-lam-normalize} collects the canonicalization patterns of
+the ops and runs MLIR's greedy driver (\code{applyPatternsGreedily},
+\srcref{lib/UlmLamPasses.cpp}{105}{133}). The output (types shortened):
+
+\begin{lstlisting}
+%0 = ulm_lam.transpose %arg2 : <X^T, full_rank> -> tensor<?x?xf64>             // X
+%1 = ulm_lam.inverse %arg3 : <M, spd> -> tensor<?x?xf64>                       // M^-1
+%2 = ulm_lam.mul %arg2, %1, %0 : ... -> tensor<?x?xf64>                       // X^T M^-1 X
+%3 = ulm_lam.inverse %2 : tensor<?x?xf64> -> tensor<?x?xf64>
+%4 = ulm_lam.inverse %arg3 : <M, spd> -> tensor<?x?xf64>                       // M^-1
+%5 = ulm_lam.mul %3, %arg2, %4, %arg4 : ... -> tensor<?x1xf64>                // S^-1 X^T M^-1 y
+return %5 : tensor<?x1xf64>
+\end{lstlisting}
+
+Three rules did the work:
+\begin{itemize}
+\item \code{FoldTranspose} (\srcref{lib/UlmLamDialect.cpp}{604}{623})
+  replaced \(M\T\) by \(M\). It may do so only because the \emph{type} of
+  \code{\%p.M} says \code{spd}, which implies \code{symmetric}. A rewrite
+  that depends on a property in a type: this is the first place where a
+  declared fact changes the program.
+\item The same pattern folded \((X\T)\T\) to the parameter itself, so
+  \(X\T\) is now \code{\%arg2} and \(X\) is \code{\%0}.
+\item \code{Flatten} (\srcref{lib/UlmLamDialect.cpp}{578}{602}) merged the
+  left-nested binary products into one three-factor and one four-factor
+  \code{ulm_lam.mul}. An n-ary product leaves the parenthesization open;
+  choosing it is the job of kernel selection.
+\end{itemize}
+
+Note what did \emph{not} happen: \code{\%1} and \code{\%4} are still two
+\code{inverse} ops of the same value. The normalization pipeline contains
+no CSE (common subexpression elimination). The factorization will be shared
+anyway, by a memo table in kernel selection (\cref{sec:gls-select}).
+
+\begin{theory}[ (\FGs{3.4}, \FGs{3.5})]
+Each pattern is a rewrite rule \(\ell \Rightarrow r\) with a side
+condition (``\(A\) is symmetric'', ``the inner product has one use''). The
+greedy driver applies rules until none matches, a fixpoint of the rewrite
+relation. That the fixpoint is reached is a termination argument (each rule
+decreases a well-founded measure, as the pass description in
+\srcref{include/ulm_lam/UlmLamPasses.td}{8}{19} states); whether it is
+unique is confluence. Both are questions of
+\FG{3.5}{Term rewriting theory: confluence, termination, strategies}.
+\end{theory}
+
+% ---------------------------------------------------------------------------
+\section{Inferring properties}
+\label{sec:gls-infer}
+
+\begin{steps}
+\item[Input] the normal form.
+\item[Representation] result types without properties (\code{tensor<?x?xf64>}).
+\item[Rule] for every op in program order, compute the result type from the operand types (\code{InferTypeOpInterface::inferReturnTypes}) and replace the old one.
+\item[Output] \texttt{3-inferred.mlir}: \(M\inv\) is SPD, \(X\T M\inv X\) is SPD.
+\item[Theory] type inference in synthesis mode, \FG{1.10}{Type inference beyond Hindley–Milner: bidirectional and constraint-based}; the property set as an abstract domain, \FG{5.2}{Abstract interpretation: Galois connections, widening, narrowing}.
+\end{steps}
+
+The pass \code{ulm-lam-infer-properties}
+(\srcref{lib/UlmLamPasses.cpp}{139}{183}) changes only types. The
+interesting lines of its output:
+
+\begin{lstlisting}
+%1 = ulm_lam.inverse %arg3 : tensor<?x?xf64, #ulm_lam.props<spd>>
+       -> tensor<?x?xf64, #ulm_lam.props<square, symmetric, spd, non_singular, full_rank>>
+%2 = ulm_lam.mul %arg2, %1, %0 : ... -> tensor<?x?xf64, #ulm_lam.props<spd>>
+%3 = ulm_lam.inverse %2 : tensor<?x?xf64, #ulm_lam.props<spd>>
+       -> tensor<?x?xf64, #ulm_lam.props<square, symmetric, spd, non_singular, full_rank>>
+\end{lstlisting}
+
+\paragraph{\(M\inv\) is SPD} The rule for \code{inverse} keeps the
+properties that survive inversion (\code{inverseProperties}, a mask). The
+list printed for \code{\%1} is the \emph{closure} of \code{spd}: SPD
+implies symmetric, square and non-singular, and square plus non-singular
+implies full rank (\code{closure}, \srcref{lib/UlmLamDialect.cpp}{97}{123}).
+
+\paragraph{\(X\T M\inv X\) is SPD} The rule for \code{mul} recognizes
+products that are their own transpose. Its core
+(\srcref{lib/UlmLamDialect.cpp}{238}{269}):
+
+\begin{lstlisting}[style=cpp]
+/// Products that read the same backwards when transposed,
+/// F_1 ... F_k with F_i^T = F_(k+1-i):
+///   Z^T Z      (k even)            spsd, spd if Z has full column rank;
+///   Z^T M Z    (k odd, M middle)   symmetric if M is, spsd if M is, spd if
+///                                  M is spd and Z has full column rank.
+P palindromeProperties(ValueRange f, ArrayRef<P> ps)
+{
+    size_t k = f.size(), h = k / 2;
+    ...
+    for (size_t i = 0; i < h; ++i) {
+        auto [a, ta] = leafOf(f[i]);           // (matrix, transposed?)
+        auto [b, tb] = leafOf(f[k - 1 - i]);
+        if (a != b || (ta == tb && !isSymmetric(a)))
+            return P::general;
+    }
+    ...
+    P m = ps[h];                               // the middle factor
+    if (has(m, P::spd) && fullColumnRank(z, pz))
+        return P::spd;
+    ...
+\end{lstlisting}
+
+For \code{mul \%arg2, \%1, \%0}: the outer factors are \code{\%arg2}
+(\(X\T\), the parameter) and \code{\%0} (\(X\), a transpose of
+\code{\%arg2}); \code{leafOf} reduces both to \code{\%arg2} with opposite
+transposition, so the product has the form \(Z\T M Z\). The middle factor
+\code{\%1} is SPD. \code{fullColumnRank} accepts \(Z = X\) because \(X\) is
+\code{full_rank} \emph{and its sizes are dynamic}: the source comment
+(\srcref{lib/UlmLamDialect.cpp}{222}{236}) says that a full-rank matrix of
+unknown shape is taken to have full column rank, since the formula inverts
+\(X\T M\inv X\) and needs it. Hence \code{spd}.
+
+\Needspace{9\baselineskip}
+\paragraph{Where each fact came from}
+\begin{center}\small
+\begin{tabularx}{\linewidth}{@{}lL@{}}
+\toprule
+\(M\) is SPD & \Odecl{} (\code{Mat(:n, :n, :spd)}) \\
+\(X\) has full rank & \Odecl{} (\code{Mat(:n, :m, :full_rank)}) \\
+\(n \ge m\), i.e.\ full \emph{column} rank & \Onone{} at compile time: taken for granted because the sizes are dynamic; \Orun{} indirectly, if \(S\) is singular its Cholesky factorization fails \\
+\(M\inv\) is SPD & \Oinf{} from \(M\) SPD \\
+\(X\T M\inv X\) is SPD & \Oinf{} from the three facts above, by the palindrome rule \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The inferred fact is exactly as reliable as the facts it was inferred from.
+It is a theorem about real matrices, \emph{conditional on} the declarations.
+
+\begin{theory}[ (\FGs{1.10}, \FGs{5.1}, \FGs{5.2})]
+Computing result types bottom-up from operand types is type
+\emph{synthesis} in the sense of bidirectional typing,
+\FG{1.10}{Type inference beyond Hindley–Milner: bidirectional and
+constraint-based}. There are no type variables and no unification: one walk
+in program order suffices because SSA values are defined before they are
+used and the IR here has no cycles. The property sets with
+``absence means unknown'' form a lattice ordered by implication, and each
+op's rule is a sound transfer function on it: \FG{5.1}{Lattices, monotone
+frameworks and fixpoints (a sharper recap)} and \FG{5.2}{Abstract
+interpretation: Galois connections, widening, narrowing}.
+\Cref{sec:facts-lattice} develops both views.
+\end{theory}
+
+% ---------------------------------------------------------------------------
+\section{Kernel selection}
+\label{sec:gls-select}
+
+\begin{steps}
+\item[Input] the inferred IR: two products with inverses, with properties on every value.
+\item[Representation] each product becomes a sequence of \emph{leaves}: matrices (possibly transposed) and triangular solves.
+\item[Rule] factorize each inverted matrix once, by its properties; parenthesize each product by a dynamic program over kernels and flop counts; reuse a sub-product computed earlier, also transposed.
+\item[Output] \code{ulm_lamk} kernels on tensors (\texttt{5-selected.mlir}).
+\item[Theory] instruction selection by tiling with dynamic programming, \FG{4.5}{Instruction selection: tree/DAG tiling, SelectionDAG vs GlobalISel}; progressive lowering, \FG{3.3}{Progressive lowering and the dialect conversion framework}.
+\end{steps}
+
+The pass \code{ulm-lam-select-kernels} (class \code{Selector},
+\srcref{lib/UlmLamPasses.cpp}{318}{2265}) does three things for GLS.
+
+\paragraph{1. Factorizations from properties} Every inverted matrix is
+factorized once, directly after its definition (\code{factorise},
+\srcref{lib/UlmLamPasses.cpp}{855}{903}). The choice is read off the type:
+triangular: no factorization; \code{spd}: Cholesky (\code{potrf}, LAPACK's
+Cholesky factorization of a positive definite matrix); otherwise: LU
+factorization with partial pivoting (\code{getrf}). Results are memoized per
+matrix, so \code{\%1} and \code{\%4}, both \code{inverse \%arg3}, share one
+\code{potrf}. An inverse becomes solves: \(M\inv = L_1\invT L_1\inv\).
+
+\paragraph{2. The first product} \(X\T M\inv X\) becomes the leaves
+\(X\T,\ L_1\invT,\ L_1\inv,\ X\). A dynamic program over intervals of
+leaves (\code{solveChain}, \srcref{lib/UlmLamPasses.cpp}{1059}{1138})
+considers, for each interval, a \code{gemm} of two sub-intervals, a solve
+applied from the left or right in place, and the \emph{Gram} form \(Z\T Z\)
+when the left half is the transpose of the right half. Here the halves are
+\(X\T L_1\invT\) and \(L_1\inv X\), transposes of each other, so the
+product is \(W\T W\) with \(W = L_1\inv X\): one \code{trsm} (triangular
+solve with many right-hand sides, BLAS level 3, \(n^2 m\) flops) and one
+\code{syrk} (symmetric rank-\(k\) update, one triangle, \(m^2 n\) flops).
+The result \(S\) is SPD by its type, so it is factorized by \code{potrf}.
+
+\paragraph{3. The second product} \(S\inv X\T M\inv y\) becomes
+\(L_2\invT,\ L_2\inv,\ X\T,\ L_1\invT,\ L_1\inv,\ y\). The interval
+\(X\T L_1\invT\) is the transpose of \(W\), which the first product
+computed; the table of computed products is keyed by leaves and
+transposition, so it costs nothing and \(W\) is reused. What remains is
+\(z = L_1\inv y\) (\code{trsv}, triangular solve with one right-hand side),
+\(W\T z\) (\code{gemv}, matrix-vector product), and two \code{trsv} with
+\(L_2\).
+
+\paragraph{Output} After \code{ulm-lam-strip-properties} and
+\code{canonicalize} (\texttt{5-selected.mlir}; constants omitted):
+
+\begin{lstlisting}
+%result, %info = ulm_lamk.potrf uplo(lower) outs(%arg3 : tensor<?x?xf64>) -> tensor<?x?xf64>
+%0 = tensor.empty(%arg1, %arg1) : tensor<?x?xf64>
+%1 = tensor.empty(%arg0, %arg1) : tensor<?x?xf64>
+%2 = ulm_lamk.gecopy trans(trans) ins(%arg2 : tensor<?x?xf64>) outs(%1 : tensor<?x?xf64>) -> tensor<?x?xf64>
+%3 = ulm_lamk.trsm side(left) uplo(lower) trans(none) diag(non_unit) alpha(%cst_0)
+       ins(%result : tensor<?x?xf64>) outs(%2 : tensor<?x?xf64>) -> tensor<?x?xf64>
+%4 = ulm_lamk.syrk uplo(lower) trans(trans) alpha(%cst_0) beta(%cst)
+       ins(%3 : tensor<?x?xf64>) outs(%0 : tensor<?x?xf64>) -> tensor<?x?xf64>
+%result_1, %info_2 = ulm_lamk.potrf uplo(lower) outs(%4 : tensor<?x?xf64>) -> tensor<?x?xf64>
+%5 = ulm_lamk.trsv uplo(lower) trans(none) diag(non_unit)
+       ins(%result : tensor<?x?xf64>) outs(%arg4 : tensor<?x1xf64>) -> tensor<?x1xf64>
+%6 = tensor.empty(%arg1) : tensor<?x1xf64>
+%7 = ulm_lamk.gemv trans(trans) alpha(%cst_0) beta(%cst)
+       ins(%3, %5 : tensor<?x?xf64>, tensor<?x1xf64>) outs(%6 : tensor<?x1xf64>) -> tensor<?x1xf64>
+%8 = ulm_lamk.trsv uplo(lower) trans(none) diag(non_unit)
+       ins(%result_1 : tensor<?x?xf64>) outs(%7 : tensor<?x1xf64>) -> tensor<?x1xf64>
+%9 = ulm_lamk.trsv uplo(lower) trans(trans) diag(non_unit)
+       ins(%result_1 : tensor<?x?xf64>) outs(%8 : tensor<?x1xf64>) -> tensor<?x1xf64>
+return %9 : tensor<?x1xf64>
+\end{lstlisting}
+
+Each kernel is in destination-passing style (DPS)~\cite{dps}: the operand that BLAS
+overwrites is the \code{outs} operand, and on tensors the op returns the
+new value of it. \code{potrf} ``overwrites'' \code{\%arg3}, which is the
+caller's \(M\); on tensors that is harmless (a new value is returned), and
+bufferization will decide what it means for memory. \code{\%3}, the matrix
+\(W\), has two uses (\code{syrk} and \code{gemv}): one value, used twice.
+\code{gecopy trans(trans)} makes \(X\) (the transpose of \code{\%arg2})
+into a fresh row-major matrix that \code{trsm} can overwrite.
+
+Julia's \code{@code_lam} prints the same sequence in the user's terms:
+
+\begin{textout}
+gls(X::n×m full_rank, M::n×n spd, y::n)
+  potrf    L1 ← chol(M)                      M = L1 L1ᵀ, Cholesky
+  copy     T1 ← X
+  trsm     T1 ← L1⁻¹ T1
+  syrk     T2 ← T1ᵀ T1                       one triangle only
+  potrf    L2 ← chol(T2)                     T2 = L2 L2ᵀ, Cholesky
+  trsv     T3 ← L1⁻¹ y
+  gemv     T4 ← T1ᵀ T3
+  trsv     T4 ← L2⁻¹ T4
+  trsv     T4 ← L2⁻ᵀ T4
+  return T4
+if a factorisation fails, the call throws InfoError with
+  info 1:  Cholesky factorisation of M: not positive definite
+  info 2:  Cholesky factorisation of a computed matrix: not positive definite
+\end{textout}
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[font=\sffamily\small,
+  v/.style={draw=accent,fill=accent!6,rounded corners=2pt,minimum height=0.75cm,
+    align=center,inner sep=3pt},
+  inp/.style={v,fill=white},
+  k/.style={font=\sffamily\scriptsize,text=accent!70!black},
+  arr/.style={-{Stealth[length=1.8mm]},draw=accent!80!black,semithick}]
+  \node[inp] (X) at (0,0) {\(X\)};
+  \node[inp] (M) at (3.6,0) {\(M\)};
+  \node[inp] (y) at (7.2,0) {\(y\)};
+  \node[v,fill=oinf!12,draw=oinf] (W) at (0,-1.5) {\(W = L_1\inv X\)};
+  \node[v] (L1) at (3.6,-1.5) {\(L_1\)};
+  \node[v] (z) at (7.2,-1.5) {\(z = L_1\inv y\)};
+  \node[v] (S) at (0,-3) {\(S = W\T W\)};
+  \node[v] (r) at (7.2,-3) {\(r = W\T z\)};
+  \node[v] (L2) at (0,-4.5) {\(L_2\)};
+  \node[v] (b) at (7.2,-4.5) {\(\beta = L_2\invT L_2\inv r\)};
+  \draw[arr] (X) -- node[k,right] {copy, trsm} (W);
+  \draw[arr] (M) -- node[k,right] {potrf} (L1);
+  \draw[arr] (y) -- node[k,right] {copy, trsv} (z);
+  \draw[arr] (L1) -- (W);
+  \draw[arr] (L1) -- (z);
+  \draw[arr] (W) -- node[k,right] {syrk} (S);
+  \draw[arr] (S) -- node[k,right] {potrf} (L2);
+  \draw[arr,draw=oinf,very thick] (W.south east) -- (r.north west);
+  \draw[arr] (z) -- node[k,right] {gemv} (r);
+  \draw[arr] (r) -- node[k,right] {trsv, trsv} (b);
+  \draw[arr] (L2) -- (b);
+\end{tikzpicture}
+\caption{Values and dependences of the selected kernels. \(W\) (green) has
+two uses; \(L_1\) has two uses. Each value is computed once.}
+\label{fig:gls-dag}
+\end{figure}
+
+\begin{theory}[ (\FGs{4.5}, \FGs{3.3})]
+Kernel selection is instruction selection with BLAS and LAPACK as the
+instruction set: leaves are operands, kernels are tiles that cover an
+interval of the product, and the dynamic program picks the cheapest tiling,
+as in tree tiling with dynamic programming,
+\FG{4.5}{Instruction selection: tree/DAG tiling, SelectionDAG vs
+GlobalISel}. The interval structure is that of the matrix chain problem
+(generalized to solves and transposes by Barthels et al.~\cite{gmc}). The
+pass replaces one dialect by another in a single step and keeps the
+structure needed later (DPS, flags), which is \emph{progressive lowering},
+\FG{3.3}{Progressive lowering and the dialect conversion framework}.
+It does \emph{not} use MLIR's dialect conversion framework: it is a custom
+C++ traversal (\cref{sec:kernels-select}).
+\end{theory}
+
+\begin{limit}
+The selected sequence equals the formula \emph{over the real numbers}. In
+floating point it is a different computation with different rounding:
+\(W\T W\) is not bitwise \((X\T M\inv) X\), and its accuracy depends on the
+condition number of \(W\) squared. \Cref{sec:gls-numbers} shows a
+difference in the last bit; \cref{sec:kernels-fp} shows a case where the
+two differ completely.
+\end{limit}
+
+% ---------------------------------------------------------------------------
+\section{From values to memory: bufferization, workspace and \texttt{info}}
+\label{sec:gls-storage}
+
+\begin{steps}
+\item[Input] kernels on tensors in DPS; read-only arguments marked \code{ulm_lam.in}.
+\item[Representation] after bufferization: kernels on \code{memref}s, with no results.
+\item[Rule] One-Shot Bufferize writes a kernel's result into the buffer of its \code{outs} operand unless that buffer is read-only or still read later; then it copies first.
+\item[Output] \texttt{6-bufferized.mlir}: three copies, one workspace, an \code{info} result.
+\item[Theory] \FG{10.3}{Bufferization and destination-passing style}; \FG{2.7}{Value semantics vs reference/memory semantics in IRs}.
+\end{steps}
+
+The core of the bufferized function (the workspace protocol at its start
+and the \code{scf.if} nesting of the \code{info} checks are left out; see
+\cref{sec:storage-workspace} for both):
+
+\begin{lstlisting}
+%view = memref.view %25[%c0][%arg0, %arg0] : memref<?xi8> to memref<?x?xf64>
+memref.copy %arg3, %view : memref<?x?xf64> to memref<?x?xf64>          // copy of M
+%info = ulm_lamk.potrf uplo(lower) outs(%view : memref<?x?xf64>)        // L1 in the copy
+...                                                                     // if info == 0:
+%view_1 = memref.view %25[%4][%arg1, %arg1] : memref<?xi8> to memref<?x?xf64>
+%view_2 = memref.view %25[%9][%arg0, %arg1] : memref<?xi8> to memref<?x?xf64>
+ulm_lamk.gecopy trans(trans) ins(%arg2 : memref<?x?xf64>) outs(%view_2 : memref<?x?xf64>)
+ulm_lamk.trsm side(left) uplo(lower) trans(none) diag(non_unit) alpha(%cst)
+    ins(%view : memref<?x?xf64>) outs(%view_2 : memref<?x?xf64>)       // W
+ulm_lamk.syrk uplo(lower) trans(trans) alpha(%cst) beta(%cst_0)
+    ins(%view_2 : memref<?x?xf64>) outs(%view_1 : memref<?x?xf64>)     // S
+%info_3 = ulm_lamk.potrf uplo(lower) outs(%view_1 : memref<?x?xf64>)   // L2
+...                                                                     // if info_3 == 0:
+%view_4 = memref.view %25[%13][%arg0] : memref<?xi8> to memref<?x1xf64>
+memref.copy %arg4, %view_4 : memref<?x1xf64> to memref<?x1xf64>        // copy of y
+ulm_lamk.trsv ... ins(%view : memref<?x?xf64>) outs(%view_4 : memref<?x1xf64>)        // z
+ulm_lamk.gemv trans(trans) ... ins(%view_2, %view_4 : ...) outs(%arg5 : memref<?x1xf64>)
+ulm_lamk.trsv uplo(lower) trans(none) ... ins(%view_1 : ...) outs(%arg5 : memref<?x1xf64>)
+ulm_lamk.trsv uplo(lower) trans(trans) ... ins(%view_1 : ...) outs(%arg5 : memref<?x1xf64>)
+\end{lstlisting}
+
+\paragraph{Why three copies} \code{potrf} overwrites its matrix, \code{trsm}
+and \code{trsv} their right-hand sides. \(M\), \(X\) and \(y\) are
+\code{ulm_lam.in}, so \code{ulm-lam-results-to-out-params} gave them
+\code{bufferization.writable = false}
+(\srcref{lib/UlmLamResultsToOutParams.cpp}{344}{368}), and One-Shot
+Bufferize must not write into them: it copies \(M\) and \(y\). For \(X\)
+the copy was already in the IR (\code{gecopy}, a transposing copy that
+\code{trsm} then overwrites), so no further copy is needed. With
+\code{InOut(...)} parameters the caller allows overwriting;
+\code{examples/gls/check.sh} verifies that \code{potrf} then works on the
+caller's \(M\) and only \(X\) is copied.
+
+\paragraph{One value, two uses, one buffer} \(W\) lives in \code{\%view_2},
+written once by \code{trsm} and read by \code{syrk} and \code{gemv}. SSA
+use counts are not copies: a value with two uses needs a second buffer only
+if one use would overwrite it while the other still reads it.
+
+\paragraph{The result} \(\beta\) is computed directly in the caller's
+output buffer \code{\%arg5}: \code{gemv} writes it, the two \code{trsv}
+update it in place.
+
+\paragraph{The workspace} All temporaries are views of one byte buffer
+\code{\%25} at offsets computed from \(n\) and \(m\), each rounded up to 64
+bytes (\cref{fig:workspace}). The caller can pass that buffer, query its size
+first (LAPACK's \code{lwork} convention), or let the function allocate it.
+
+\paragraph{\code{info}} Each factorization is a numbered check. If
+\code{potrf} reports failure, the rest of the block does not run and the
+function returns the check's number. In C++ this is the return value of
+\code{gls}; in Julia, an \code{InfoError}.
+
+\begin{theory}[ (\FGs{10.3}, \FGs{2.7}, \FGs{1.4})]
+Tensors have value semantics, memrefs reference semantics,
+\FG{2.7}{Value semantics vs reference/memory semantics in IRs}.
+Bufferization chooses, for every DPS result, between reusing the
+destination's buffer and copying, \FG{10.3}{Bufferization and
+destination-passing style}. The in-place condition (no other live reader of
+the old value, and the buffer may be written) is a uniqueness condition, as
+\FG{1.4}{Uniqueness types vs linear types} explains; here it is decided by
+an analysis, not by a type system. \Cref{ch:storage} goes into detail.
+\end{theory}
+
+% ---------------------------------------------------------------------------
+\section{The kernel sequence in C++}
+\label{sec:gls-kernels}
+
+\code{convert-ulm-lamk-to-ulmblas} lowers the memref program to the EmitC
+dialect, and \code{mlir-translate --mlir-to-cpp} prints C++. With the
+Julia backend the calls go to CBLAS (the C interface to BLAS) and LAPACK
+through Julia's libblastrampoline, which forwards them to OpenBLAS here. The
+calls of \texttt{7-gls.cpp}, in order (\code{v1} \(=n\), \code{v2} \(=m\),
+\code{v3} \(=X\T\) row-major, \code{v4} \(=M\), \code{v5} \(=y\),
+\code{v6} \(=\beta\)):
+
+\begin{lstlisting}[style=cpp]
+ulm_lam_copy(v31, v4, v32);                                          // M -> workspace
+int64_t v33 = ulm_lam_cblas::potrf<std::ptrdiff_t>(true, v1, v31, v1, 1);
+ulm_lam_gecopy(v1, v2, v3, 1, v1, v41, v2, 1);                       // X (transposing copy)
+(void)ulm_lam_cblas::trtrs<std::ptrdiff_t>(
+    true, false, false, false, v1, v2, v31, v1, 1, v41, v2, 1);      // W = L1^-1 X
+ulm_lam_cblas::sylrk<std::ptrdiff_t>(v2, v1, v9, v41, 1, v2,
+                                     v10, v39, v2, 1);               // S = W^T W (lower)
+int64_t v42 = ulm_lam_cblas::potrf<std::ptrdiff_t>(true, v2, v39, v2, 1);
+ulm_lam_copy(v45, v5, v46);                                          // y -> workspace
+ulm_lam_cblas::trlsv<std::ptrdiff_t>(v1, false, v31, v1, 1, v45, 1);  // z = L1^-1 y
+ulm_lam_cblas::gemv<std::ptrdiff_t>(v2, v1, v9, v41, 1, v2,
+                                    v45, 1, v10, v6, 1);             // beta = W^T z
+ulm_lam_cblas::trlsv<std::ptrdiff_t>(v2, false, v39, v2, 1, v6, 1);   // beta = L2^-1 beta
+ulm_lam_cblas::trusv<std::ptrdiff_t>(v2, false, v39, 1, v2, v6, 1);   // beta = L2^-T beta
+\end{lstlisting}
+
+Two details show what lowering does with the remaining structure. The
+transposition flags are gone: a transposed operand is the same pointer with
+swapped strides (\code{v39, 1, v2} versus \code{v39, v2, 1}), so
+\(L_2\T\) is passed as an \emph{upper} triangular matrix to
+\code{trusv}. And the matrix properties are gone entirely; what is left of
+them is the choice of routines and their \code{uplo} arguments.
+
+\begin{center}\small
+\begin{tabularx}{\linewidth}{@{}lllL@{}}
+\toprule
+\textbf{Kernel} & \textbf{Library} & \textbf{Flops} & \textbf{Computes} \\
+\midrule
+\code{potrf} & LAPACK & \(n^3/3\) & \(M = L_1 L_1\T\), in a copy of \(M\) \\
+\code{trsm} (\code{trtrs}) & BLAS 3 & \(n^2 m\) & \(W = L_1\inv X\), in a copy of \(X\) \\
+\code{syrk} & BLAS 3 & \(n m^2\) & \(S = W\T W\), lower triangle \\
+\code{potrf} & LAPACK & \(m^3/3\) & \(S = L_2 L_2\T\), in place \\
+\code{trsv} & BLAS 2 & \(n^2\) & \(z = L_1\inv y\), in a copy of \(y\) \\
+\code{gemv} & BLAS 2 & \(2nm\) & \(\beta \leftarrow W\T z\) \\
+\code{trsv}, \code{trsv} & BLAS 2 & \(2m^2\) & \(\beta \leftarrow L_2\invT L_2\inv \beta\) \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+% ---------------------------------------------------------------------------
+\section{A numerical example}
+\label{sec:gls-numbers}
+
+Small inputs make every step checkable by hand. Take \(n=4\), \(m=2\),
+\[
+X=\begin{pmatrix}1&0\\1&1\\1&2\\1&3\end{pmatrix},\quad
+M=\begin{pmatrix}4&2&0&0\\2&5&2&0\\0&2&5&2\\0&0&2&5\end{pmatrix},\quad
+y=\begin{pmatrix}1\\2\\4\\4\end{pmatrix}.
+\]
+\(M\) is SPD (eigenvalues between 1.58 and 8.13) with Cholesky factor
+\(L_1\) = 2 on the diagonal and 1 below it, so every step up to \(S\) is
+exact in binary floating point:
+\[
+W = L_1\inv X = \begin{pmatrix}1/2&0\\1/4&1/2\\3/8&3/4\\5/16&9/8\end{pmatrix},\quad
+S = W\T W = \begin{pmatrix}141/256 & 97/128\\ 97/128 & 133/64\end{pmatrix},\quad
+X\T M\inv y = \begin{pmatrix}363/256\\375/128\end{pmatrix}.
+\]
+
+\paragraph{Expected} In exact rational arithmetic,
+\[
+  \beta = \Bigl(\frac{93}{73},\ \frac{69}{73}\Bigr) = (1.273972602739726\ldots,\ 0.945205479452054\ldots).
+\]
+
+\paragraph{Obtained} \code{examples/gls.jl} prints:
+
+\begin{textout}
+==== exact β (rational): Rational{BigInt}[93//73, 69//73]
+==== exact β (Float64):  [1.273972602739726, 0.9452054794520548]
+==== ulm.lam β: [1.2739726027397262, 0.9452054794520546]
+==== Julia expert  (X'*(M\X)) \ (X'*(M\y)): [1.2739726027397262, 0.9452054794520547]
+==== Julia formula inv(X'*inv(M)*X)*X'*inv(M)*y: [1.2739726027397262, 0.9452054794520547]
+==== max abs error vs exact: 2.220446049250313e-16
+\end{textout}
+
+ulm.lam's result differs from the correctly rounded \(\beta\) by one unit
+in the last place in each component, and from Julia's two evaluations in the
+second component by one unit. All three are correct to working accuracy;
+they differ because they round differently, not because one is wrong.
+
+\paragraph{Failing and rejected inputs} The same program with inputs that
+violate its assumptions (all from \code{outputs/gls.out}):
+
+\begin{center}\small
+\begin{tabularx}{\linewidth}{@{}P{4.6cm}P{5.3cm}L@{}}
+\toprule
+\textbf{Input} & \textbf{Result} & \textbf{Origin of the check} \\
+\midrule
+\(M_{33} = -1\): symmetric, indefinite & \code{InfoError: gls: info 1: Cholesky factorisation of v4: not positive definite} & \Orun: \code{potrf} of \(M\) \\
+\(X\) with two equal columns, declared \code{full_rank} & \code{InfoError: gls: info 2: Cholesky factorisation of a computed matrix: not positive definite} & \Orun: \code{potrf} of \(S\) \\
+\(y\) of length 3 & \code{LamError: gls: y: size :n = 3, but 4 from an earlier argument} & \Orun: the Julia runtime compares sizes before the call \\
+\(M_{12} = 100\) (Julia's upper triangle), declared \code{spd} & \code{InfoError: ... info 1 ...} & \Orun, by luck: \code{potrf} reads the triangle that was changed \\
+\(M_{21} = 100\) (Julia's lower triangle), declared \code{spd} & \(\beta\) of \code{Symmetric(M, :U)}; no error & \Onone: symmetry is never checked, one triangle is ignored \\
+\code{Mat(:n,:m) * Mat(:n,:m)} in a \code{@lam} body & \code{LamError: product of nxm and nxm: m columns but n rows} & at trace time, by the frontend (\cref{ch:shapes}) \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Two remarks. The messages name \code{v4}, the fourth C parameter, where
+\code{@code_lam} says \code{M}: the description comes from the C++
+interface comment. And the rank-deficient \(X\) is caught only because
+\(S\) became exactly singular here. A nearly rank-deficient \(X\) can pass
+the factorization and give an inaccurate \(\beta\), or fail although \(X\)
+has full rank (\cref{sec:kernels-fp}).
+
+% ---------------------------------------------------------------------------
+\section{The chapter in one table}
+\label{sec:gls-summary}
+
+\begin{center}\small
+\begin{tabularx}{\linewidth}{@{}P{3.1cm}P{4.6cm}P{3.3cm}L@{}}
+\toprule
+\textbf{Step} & \textbf{MLIR mechanism} & \textbf{Theory} & \textbf{FG} \\
+\midrule
+tracing & text emitted by overloaded Julia operators & tracing eDSL & \FGs{3.7} \\
+facts on matrices & builtin tensor type with an attribute in its encoding & refinement types & \FGs{1.7} \\
+normal form & \code{OpRewritePattern}s, greedy driver & rewriting, termination & \FGs{3.4}, \FGs{3.5} \\
+\(X\T M\inv X\) is SPD & \code{InferTypeOpInterface} per op & type inference; abstract interpretation & \FGs{1.10}, \FGs{5.2} \\
+kernel selection & custom pass, DP over leaves & instruction selection & \FGs{4.5}, \FGs{3.3} \\
+copies, in place & DPS ops, One-Shot Bufferize & value vs reference semantics; uniqueness & \FGs{10.3}, \FGs{2.7}, \FGs{1.4} \\
+failed factorization & \code{info} results, \code{scf.if} & run-time check & --- \\
+C++ & dialect conversion to EmitC & lowering, legalization & \FGs{3.3}, \FGs{4.6} \\
+\bottomrule
+\end{tabularx}
+\end{center}

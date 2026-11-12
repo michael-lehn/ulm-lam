@@ -1,0 +1,91 @@
+% app-repro.tex
+\chapter{Reproducing the Examples}
+\label[appendix]{app:repro}
+
+Everything in this companion that is shown as compiler or program output
+was produced by one script, \code{examples/run.sh}, at commit
+\href{\repo/tree/\commit}{\texttt{\shortcommit}} (\texttt{\commit}) of
+ulm.lam. Its outputs are kept in \code{outputs/} next to this document.
+
+\section{Commands}
+
+The companion was added to the repository after commit
+\texttt{\shortcommit}, and later commits change the compiler. To run the
+examples against the compiler this text describes, check out that commit
+separately and point the script at it (from the root of the repository):
+
+\begin{lstlisting}[style=sh]
+git worktree add ../ulm-lam-4185542 4185542
+make -C ../ulm-lam-4185542 plugin tool check   # dialects, passes, ulm-lam-opt; lit tests
+julia --project=../ulm-lam-4185542/julia/UlmLam -e 'using Pkg; Pkg.instantiate()'
+ULM_LAM_ROOT=$PWD/../ulm-lam-4185542 doc/field-guide-companion/examples/run.sh
+cd doc/field-guide-companion && latexmk        # this document (LuaLaTeX)
+\end{lstlisting}
+
+Without \code{ULM_LAM_ROOT} the script uses the compiler of the current
+checkout; \code{outputs/versions.out} records which commit it ran on.
+
+\texttt{run.sh} runs:
+\begin{itemize}
+\item \code{examples/gls.jl}: the GLS example of \cref{ch:gls} in Julia,
+  with the traced IR, exact and computed \(\beta\), \code{@code_lam}, and the
+  failing inputs (\code{outputs/gls.out}); then \code{ulm-lam-opt} for the
+  intermediate stages that the compile script does not keep
+  (\code{outputs/gls/1-traced.mlir} to \texttt{7-gls.cpp});
+\item \code{examples/variants.jl}: dropped and assumed properties, the
+  loop \code{iterate}, the shared product, the non-symmetric \(M\)
+  (\code{outputs/variants.out}, \code{outputs/iterate-*.mlir});
+\item \code{examples/speculate.jl}: the zero-trip loop
+  (\code{outputs/speculate.out});
+\item \code{examples/conditioning.jl}: nearly rank-deficient \(X\)
+  (\code{outputs/conditioning.out});
+\item \code{ulm-lam-opt} on \code{examples/verify/v*.mlir}: accepted and
+  rejected IR (\code{outputs/verify.out}, \texttt{dims.out},
+  \texttt{dead.out});
+\item \code{ulm-lam-opt} on \code{test/select/runtime_order.mlir}
+  (\code{outputs/runtime_order.mlir}).
+\end{itemize}
+
+\section{Versions}
+
+From \code{outputs/versions.out}:
+
+\begin{textout}
+ulm-lam commit: 41855425a8b9ea4ee279fd2ea4b31b45b53e1983
+Homebrew LLVM version 23.1.4
+julia version 1.13.3
+BLAS: LBTConfig([ILP64] libopenblas64_p-r0.3.34.dylib)
+Homebrew clang version 23.1.4
+Python 3.15.2
+ProductName: macOS  ProductVersion: 26.6  (arm64)
+\end{textout}
+
+The document was built with LuaHBTeX 1.24.0 (TeX Live 2026) and latexmk
+4.87.
+
+\section{The project's own checks}
+
+At the same commit and with the same tools, the project's test suites
+pass: \code{make check} (10 lit/FileCheck tests of the passes),
+\code{examples/gls/check.sh} (10 checks of the GLS derivation and its
+bufferization, including the \code{InOut} variant), \code{make stages} (6
+checks), the Julia tests (23 tests for each of the three backends, 139
+vector-space expressions, 19 robustness and 11 Float32 tests, 6 frontend
+and \code{@code_lam} tests) and the Python tests (47).
+
+\section{Files of this companion}
+
+\begin{center}\small
+\begin{tabularx}{\linewidth}{@{}lL@{}}
+\toprule
+\texttt{ulm-lam-companion.tex} & main file; chapters in \texttt{ch*.tex}, \texttt{app-repro.tex}, \texttt{references.tex} \\
+\texttt{preamble.tex}, \texttt{companion.lua} & layout; inline code \\
+\texttt{latexmkrc} & LuaLaTeX build \\
+\code{examples/} & the scripts and IR files above \\
+\code{outputs/} & their recorded outputs \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The Field Guide links point to \texttt{\FGfile} in the directory of this
+PDF; copy the Field Guide there to make them work.

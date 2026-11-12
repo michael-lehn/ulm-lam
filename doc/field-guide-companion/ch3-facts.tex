@@ -1,0 +1,342 @@
+% ch3-facts.tex
+\chapter{Assumed, Verified, Inferred, Checked: Where Facts Come From}
+\label{ch:facts}
+
+\begin{answer}
+ulm.lam proves nothing about the entries of a matrix. Facts enter in two
+places only, the parameter types and \code{assume}, and are trusted there.
+Inference rules derive new facts from them; these are theorems about real
+matrices, valid if the declarations are. Verifiers check that the IR is
+consistent with the rules, never with the data. At run time the Julia (or
+Python) runtime checks the array sizes, and each factorization checks the
+one fact it depends on: \code{potrf} detects a matrix that is not positive
+definite in floating point, \code{getrf} an exactly singular one. Symmetry
+of an input, full column rank and conditioning are not checked.
+\end{answer}
+
+% ---------------------------------------------------------------------------
+\section{The facts and how they imply each other}
+\label{sec:facts-lattice}
+
+A property set is a conjunction of atoms. Its meaning is fixed by one C++
+function, \code{closure} (\srcref{lib/UlmLamDialect.cpp}{97}{123}), which
+adds everything that the given atoms imply (\cref{fig:implications}).
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[font=\sffamily\small,
+  p/.style={draw=accent,fill=accent!6,rounded corners=2pt,inner sep=3pt,minimum height=0.6cm},
+  c/.style={draw=accent,circle,fill=white,inner sep=1.2pt,font=\sffamily\scriptsize},
+  arr/.style={-{Stealth[length=1.8mm]},draw=accent!80!black,semithick}]
+  \node[p] (id) at (0,0) {identity};
+  \node[p] (spd) at (-4.0,-1.4) {spd};
+  \node[p] (perm) at (0.6,-1.4) {permutation};
+  \node[p] (tri) at (3.6,-1.4) {lower\_tri, upper\_tri};
+  \node[p] (ud) at (3.9,-2.8) {unit\_diag};
+  \node[p] (spsd) at (-5.4,-2.8) {spsd};
+  \node[p] (ns) at (-2.6,-2.8) {non\_singular};
+  \node[p] (orth) at (0.6,-2.8) {orthogonal};
+  \node[p] (sym) at (-5.4,-4.2) {symmetric};
+  \node[p] (fr) at (-0.4,-4.2) {full\_rank};
+  \node[p] (sq) at (-3.8,-5.6) {square};
+  \node[c] (and) at (-1.4,-5.6) {\(\wedge\)};
+  \draw[arr] (id) -- (spd); \draw[arr] (id) -- (perm); \draw[arr] (id) -- (tri);
+  \draw[arr] (id) -- (ud);
+  \draw[arr] (spd) -- (spsd); \draw[arr] (spd) -- (ns);
+  \draw[arr] (spsd) -- (sym); \draw[arr] (sym) -- (sq);
+  \draw[arr] (ns) -- (sq); \draw[arr] (ns) -- (fr);
+  \draw[arr] (perm) -- (orth); \draw[arr] (orth) -- (fr);
+  \draw[arr] (sq) -- (and); \draw[arr] (fr) -- (and);
+  \draw[arr] (and) -- (ns);
+\end{tikzpicture}
+\caption{The implications applied by \code{closure}. The circle is a
+conjunction: square and full rank imply non-singular. A static square shape
+adds \code{square}. \code{lower_tri} together with \code{upper_tri} is
+printed as \code{diagonal}.}
+\label{fig:implications}
+\end{figure}
+
+Three conventions make this a sound basis for reasoning:
+\begin{itemize}
+\item \textbf{Absence means unknown.} A set without \code{spd} says nothing
+  about definiteness; it does not say ``indefinite''. The empty set
+  (printed as no encoding) means ``some matrix''.
+\item \textbf{Dropping a fact is always sound.} A value with
+  \code{\{spd\}} may be used where \code{\{symmetric\}} or \code{\{\}} is
+  expected. Rewrites use this to keep result types unchanged when they find
+  a better-typed replacement (they insert an \code{assume} that only drops
+  facts, \code{replaceKeepingType},
+  \srcref{lib/UlmLamDialect.cpp}{567}{576}).
+\item \textbf{Two bits are not facts about the value.} \code{lower_stored}
+  and \code{upper_stored} say that only one triangle of the \emph{memory}
+  is meaningful. They are never inferred and never propagated to a result,
+  and dropping them would be wrong; the comment in
+  \srcref{include/ulm_lam/UlmLamAttrs.td}{10}{34} spells this out.
+\end{itemize}
+
+\begin{theory}[ (\FGs{5.1}, \FGs{5.2})]
+The property sets, ordered by implication, form a finite lattice; ``absence
+means unknown'' makes each set an over-approximation of the matrices it
+describes, which is the abstraction of~\cite{cousot} and
+\FG{5.2}{Abstract interpretation: Galois connections, widening, narrowing}.
+\code{closure} plays the role of a reduction (it adds what the other atoms
+imply, without changing the set of matrices described), and each op's rule
+is a sound abstract transfer function. Because a function without loops is
+a DAG (directed acyclic graph) of SSA values, one pass in program order
+computes the result; no fixpoint iteration
+(\FG{5.1}{Lattices, monotone frameworks and fixpoints (a sharper recap)}) is
+needed. Loops are the exception, discussed next.
+\end{theory}
+
+\paragraph{Loops: facts are re-declared, not inferred} A loop-carried
+matrix enters the loop body as a block argument. The Julia frontend gives
+every loop-carried value a type without properties (\code{plainvalue} in
+\code{loop}, \srcref{julia/UlmLam/src/frontend.jl}{408}{434}), and
+\code{ulm-lam-infer-properties} refines op results only, not block
+arguments. A fact that holds in every iteration therefore has to be
+re-declared, as the Kalman filter in the README does:
+\begin{lstlisting}[style=jl]
+loop(steps, x0, P0) do i, x, P
+    P = assume(P, :symmetric)
+    ...
+\end{lstlisting}
+Proving that \(P\) stays symmetric would need a fixpoint over the loop: start
+from the facts of \(P_0\), apply the body's transfer functions, and
+intersect with the facts at the loop head until nothing changes. That is
+exactly the iterative dataflow of \FGs{5.1}; ulm.lam does not implement it
+and asks the programmer instead.
+
+% ---------------------------------------------------------------------------
+\section{Declared facts: parameters and \texttt{assume}}
+\label{sec:facts-declared}
+
+\begin{steps}
+\item[Input] \code{assume(x, :spd)} in Julia (\code{lam.assume(x, "spd")} in Python).
+\item[Representation] \code{\%y = ulm_lam.assume \%x : tensor<...> -> tensor<..., #ulm_lam.props<spd>>}.
+\item[Rule] none: the result has the properties of its type. The verifier only checks that shape and element type are unchanged.
+\item[Output] a value that later rules treat as SPD.
+\item[Theory] an unchecked cast into a refinement type; the trusted boundary of \FG{1.7}{Refinement types}.
+\end{steps}
+
+The ODS description (\srcref{include/ulm_lam/UlmLamOps.td}{135}{154}) says:
+``Properties the operand does not have are \emph{assertions}: with
+\code{checked} they are verified at run time [\ldots], otherwise trusted.
+This is the only op that may add facts that inference cannot derive.'' At
+this commit the \code{checked} variant is not implemented
+(\cref{sec:infra-analogy}); the Julia docstring of \code{assume}
+(\srcref{julia/UlmLam/src/frontend.jl}{351}{357}) states the actual
+behavior: ``Trusted; a factorisation that finds it wrong returns
+info \(>0\) (\code{InfoError}).''
+
+\paragraph{What a declaration changes} The same GLS formula with different
+declarations (\code{outputs/variants.out}, shortened):
+
+\begin{textout}
+gls_nofr(X::n×m, M::n×n spd, y::n)                 # X without :full_rank
+  potrf    L1 ← chol(M)
+  copy     T1 ← X
+  trsm     T1 ← L1⁻¹ T1
+  syrk     T2 ← T1ᵀ T1                       one triangle only
+  symm.    T2 ← sym(T2)                      copy one triangle to the other
+  getrf    LU1 ← lu(T2)                      P T2 = L U, LU
+  ...
+gls_assume(X::n×m, M::n×n spd, y::n)               # S = assume(X' * inv(M) * X, :spd)
+  potrf    L1 ← chol(M)
+  copy     T1 ← X
+  trsm     T1 ← L1⁻¹ T1
+  syrk     T2 ← T1ᵀ T1                       one triangle only
+  potrf    L2 ← chol(T2)                     T2 = L2 L2ᵀ, Cholesky
+  ...
+\end{textout}
+
+Without \code{full_rank}, \(S = X\T M\inv X\) can only be inferred SPSD, so
+\(S\inv\) is not mapped to Cholesky: kernel selection completes the
+symmetric matrix (\code{sycomplete}) and factorizes it by LU. With the
+assumption \(S\) is SPD again and the Cholesky path returns. All variants
+compute the same \(\beta\) for the example data; they differ in cost and in
+what they check.
+
+\paragraph{A false declaration} \(M\) declared SPD but not symmetric
+(\(M_{21}=100\) in Julia's lower triangle, \code{outputs/variants.out}):
+
+\begin{textout}
+ulm.lam: [1.2739726027397262, 0.9452054794520546]
+Julia with Symmetric(Mns, :U): [1.2739726027397262, 0.9452054794520547]
+Julia with Mns as given:       [1.2726368159203976, 0.9552238805970151]
+\end{textout}
+
+\code{potrf} reads one triangle (in Julia's terms the upper one: the IR
+holds the transpose) and never looks at the other, so ulm.lam computes the
+GLS estimate for the symmetric matrix that the upper triangle defines. No
+error is reported; the result is the answer to a different problem. The
+origin of symmetry is \Odecl{} and its check is \Onone.
+
+\begin{limit}
+An assumption is not a run-time check. \code{assume(A, :spd)} and the
+parameter type \code{Mat(:n, :n, :spd)} make the compiler \emph{act} on SPD;
+they do not test it. A Cholesky factorization of \(A\) does test positive
+definiteness of the stored triangle, as a side effect of computing the
+factor. Whether such a factorization happens depends on the formula: a
+matrix that is declared SPD but only multiplied (\(A x\)) is never tested.
+\end{limit}
+
+% ---------------------------------------------------------------------------
+\section{Inferred facts: the rules}
+\label{sec:facts-inferred}
+
+\Cref{tab:rules} lists every inference rule, read from
+\srcref{lib/UlmLamDialect.cpp}{192}{357} and
+\srcref{lib/UlmLamDialect.cpp}{900}{939}. All are facts of linear algebra
+over \(\R\); each is applied to the \emph{closures} of the operand sets.
+
+\begin{table}[h]
+\centering\small
+\begin{tabularx}{\linewidth}{@{}P{3.0cm}L@{}}
+\toprule
+\textbf{Op} & \textbf{Result facts} \\
+\midrule
+\code{mul} \(F_1\cdots F_k\) & the facts shared by all factors among
+  \code{lower_tri}, \code{upper_tri}, \code{unit_diag}, \code{orthogonal},
+  \code{permutation}, \code{non_singular}, \code{identity}; \code{zero} if
+  any factor is zero; \code{full_rank} for \(NA\) or \(AN\) with \(N\)
+  non-singular and \(A\) full rank (two factors); and the palindrome rule:
+  \(Z\T Z\) SPSD (SPD if \(Z\) has full column rank),
+  \(Z\T M Z\) symmetric / SPSD / SPD if \(M\) is \\
+\code{add} \(A_1+\cdots+A_k\) & the facts shared by all terms among
+  \code{symmetric}, \code{spsd}, \code{lower_tri}, \code{upper_tri}; SPD if
+  all are SPSD and one is SPD \\
+\code{scale} \(\alpha A\) & triangularity, symmetry, zero; SPD/SPSD if
+  \(\alpha\) is a \emph{constant} \(>0\); rank facts if \(\alpha\ne 0\);
+  zero if \(\alpha = 0\) \\
+\code{transpose} & everything, with \code{lower_tri} and \code{upper_tri}
+  exchanged; storage bits dropped \\
+\code{inverse} & triangularity, unit diagonal, symmetric, SPD, orthogonal,
+  permutation, identity, non-singular, full rank, square \\
+\code{identity} & \code{identity} \\
+\code{assume} & the properties of its result type (declared) \\
+\midrule
+\code{ulm_lamk.trsm} & \code{full_rank} if the right-hand side has full rank \\
+\code{ulm_lamk.syrk} & \code{spsd}; \code{ulm_lamk.gemmtr}: \code{symmetric} \\
+other kernels & nothing (\code{potrf}'s result holds a factor, not the matrix) \\
+\bottomrule
+\end{tabularx}
+\caption{The inference rules of ulm.lam at commit \texttt{\shortcommit}.}
+\label{tab:rules}
+\end{table}
+
+Two of the rules show how much depends on details:
+\begin{itemize}
+\item \code{scale} keeps SPD only for a positive \emph{constant}. For a
+  scalar known only at run time (\code{Float} parameter), the sign is
+  unknown, so \(\sigma^2 K\) loses SPD. This is why the README writes
+  \code{assume(K + s2 * I, :spd)} for a Gaussian process.
+\item The palindrome rule compares operands by \emph{identity}, not by
+  value: \(X\T M\inv X\) is recognized because both outer factors are the
+  same SSA value, once transposed. Two different values that happen to hold
+  equal matrices are not recognized. The interface description says so
+  (``Operand \emph{identity} matters, not only operand properties'',
+  \srcref{include/ulm_lam/UlmLamInterfaces.td}{11}{27}).
+\end{itemize}
+
+\paragraph{Why inferred facts matter} They choose the kernels.
+\Cref{tab:variants} summarizes \code{outputs/variants.out}.
+
+\begin{table}[h]
+\centering\small
+\begin{tabularx}{\linewidth}{@{}P{3.6cm}P{3.0cm}L@{}}
+\toprule
+\textbf{Declarations} & \textbf{Inferred for \(S\)} & \textbf{Kernels for \(M\inv\) and \(S\inv\)} \\
+\midrule
+\(X\) full rank, \(M\) SPD & SPD & \code{potrf}, \code{potrf}; \code{syrk} for \(S\) \\
+\(X\) general, \(M\) SPD & SPSD & \code{potrf}; \code{syrk}, \code{sycomplete}, \code{getrf} \\
+\(X\) full rank, \(M\) symmetric & symmetric & \code{getrf}, \code{getrf}; \code{gemmtr} for \(S\) \\
+\(X\) full rank, \(M\) general & none & \code{getrf}, \code{getrf}; \code{gemm} for \(S\) \\
+\(X\) general, \(M\) SPD, \code{assume(S, :spd)} & SPD (declared) & \code{potrf}, \code{potrf}; \code{syrk} \\
+\bottomrule
+\end{tabularx}
+\caption{The same formula under different declarations.}
+\label{tab:variants}
+\end{table}
+
+\begin{limit}
+Property inference is not a general theorem prover. It applies a fixed set
+of rules, each local to one op, to a fixed vocabulary of fifteen atoms.
+It cannot use facts about sizes (\(n \ge m\)), cannot relate two different
+values, and cannot prove anything that needs algebra across ops, for example
+that \(A + A\T\) is symmetric (\code{add} only keeps facts that all terms
+share). Where a rule does not apply, the fact is unknown, and the program is
+still compiled, just with more general kernels.
+\end{limit}
+
+% ---------------------------------------------------------------------------
+\section{Facts established by analyses}
+\label{sec:facts-analysis}
+
+Some facts are not about matrices but about the program. They are found by
+analyses that inspect the IR:
+
+\begin{itemize}
+\item \textbf{Which size a dynamic dimension has.} \code{dimOf}
+  (\srcref{lib/UlmLamDialect.cpp}{1269}{1357}) follows a value back through
+  ulm.lam ops, DPS destinations, loops, branches and calls to the function
+  parameter that \code{ulm_lam.dims} names. \Cref{sec:shapes-dims}.
+\item \textbf{Whether an earlier product may be reused.} Kernel selection
+  reuses \(W\) only if its definition properly dominates the use
+  (\code{dom.properlyDominates}, \srcref{lib/UlmLamPasses.cpp}{1080}{1091}).
+\item \textbf{Whether an op is loop invariant.} LICM moves an op out of a
+  loop if its operands are defined outside and it is pure
+  (\cref{sec:effects-licm}).
+\item \textbf{Whether a write may be in place.} One-Shot Bufferize's
+  read-after-write conflict analysis (\cref{ch:storage}).
+\end{itemize}
+
+These are \Oana{} facts: derived from the program text, sound for all
+inputs, and independent of the matrix entries.
+
+% ---------------------------------------------------------------------------
+\section{Facts checked at run time}
+\label{sec:facts-runtime}
+
+\begin{itemize}
+\item \textbf{Array sizes}, in the Julia runtime before the C call
+  (\code{bind_sizes!}, \srcref{julia/UlmLam/src/runtime.jl}{326}{339}):
+  every run-time size symbol must have one value across all arguments, and
+  every fixed size must match. The generated C function takes the sizes as
+  arguments and does not check them.
+\item \textbf{Positive definiteness}, by \code{potrf}: LAPACK reports
+  \(\mathrm{info}=i>0\) if the leading minor of order \(i\) is not
+  positive definite \emph{in floating point}. The compiled function returns
+  the number of the check (\cref{sec:effects-info}).
+\item \textbf{Exact singularity}, by \code{getrf}: \(\mathrm{info}=i>0\)
+  if \(U_{ii}\) is exactly zero. A nearly singular matrix passes.
+\item \textbf{Workspace size}, if the caller provides the workspace:
+  \(\mathrm{info} = -i\) when it is too small.
+\end{itemize}
+
+What is not checked anywhere: that a matrix declared symmetric (or SPD) is
+symmetric; that \(X\) has full column rank or that \(n\ge m\); that a
+declared triangular matrix has zeros in its other triangle (the kernels
+never read it); the conditioning of anything.
+
+% ---------------------------------------------------------------------------
+\section{Three ways to know that a matrix is SPD}
+\label{sec:facts-three}
+
+The task statement of this companion contrasts three situations. With the
+GLS example they are:
+
+\begin{center}\small
+\begin{tabularx}{\linewidth}{@{}P{3.2cm}P{3.6cm}L@{}}
+\toprule
+\textbf{Situation} & \textbf{Origin} & \textbf{Consequence if the fact is false} \\
+\midrule
+\code{M::Mat(:n, :n, :spd)} & \Odecl{}, trusted & \code{potrf} of \(M\) fails (\code{info 1}) if \(M\) is not positive definite; wrong \(\beta\), no error, if \(M\) is not symmetric \\
+\(S = X\T M\inv X\) is SPD & \Oinf{} from \(M\) SPD and \(X\) full column rank & cannot be false over \(\R\) if the premises hold; in floating point \code{potrf} of \(S\) may still fail (\cref{sec:kernels-fp}) \\
+\code{potrf} returns \(\mathrm{info}>0\) & \Orun{} & the call returns \code{info}; Julia throws \code{InfoError}; outputs unspecified \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The first is an assumption, the second a conditional theorem, the third a
+measurement. Only the third looks at numbers, and only at the numbers that
+the chosen kernels happen to factorize.

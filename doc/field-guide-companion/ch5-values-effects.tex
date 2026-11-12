@@ -1,0 +1,262 @@
+% ch5-values-effects.tex
+\chapter{Values, Uses and Effects}
+\label{ch:values}
+
+\begin{answer}
+An SSA (static single assignment) value in ulm.lam may be used any number
+of times; using it twice means reading one matrix twice, not copying it.
+Rewrites that would duplicate a \emph{computation} check that the value
+has a single use. Whether an operation may be removed, moved out of a loop or
+merged with another is decided by MLIR's generic passes from per-op effect
+declarations: all \code{ulm_lam} ops are \code{Pure}, \code{ulm_lamk} ops
+have no effects on tensors and read/write effects on memrefs, and a call of
+an external function may do anything. Moving a pure op out of a loop is
+sound for the declared facts. If a declaration is false, the move becomes
+visible: a factorization hoisted out of a loop that runs zero times can
+still report failure.
+\end{answer}
+
+% ---------------------------------------------------------------------------
+\section{One value, several uses}
+\label{sec:values-uses}
+
+In \cref{fig:gls-dag}, \(W = L_1\inv X\) has two uses and \(L_1\) has two
+uses. Each is computed once and stored once (\cref{sec:gls-storage}).
+Nothing in MLIR restricts how often an SSA value is used, and nothing in
+ulm.lam needs a restriction.
+
+The restriction appears where a rewrite would copy an \emph{expression}
+into several places. \code{Flatten} merges an inner product into the outer
+one only if the inner product has no other use
+(\srcref{lib/UlmLamDialect.cpp}{578}{602}):
+
+\begin{lstlisting}[style=cpp]
+for (Value v : op->getOperands()) {
+    auto inner = v.template getDefiningOp<OpT>();
+    if (inner && inner->hasOneUse()) {           // mul(a, mul(b, c)) -> mul(a, b, c)
+        llvm::append_range(operands, inner->getOperands());
+        changed = true;
+    } else {
+        operands.push_back(v);
+    }
+}
+\end{lstlisting}
+
+If \(P = AB\) is used in \(PC\) and in \(P + C\), flattening \(PC\) into
+\(ABC\) would compute \(AB\) a second time for the sum. With the check,
+\(P\) stays a value of its own. \code{examples/variants.jl} has exactly
+this program (\code{shared}); \code{@code_lam} shows \(AB\) computed once:
+
+\begin{textout}
+shared(A::n×k, B::k×n, C::n×n)
+  gemm     T1 ← A B
+  gemm     T2 ← T1 C
+  copy     T3 ← T1
+  axpy     T3 ← T3 + C
+  return T2, T3
+\end{textout}
+
+(The copy has another reason: the sum is accumulated in place into a new
+matrix that is returned in Julia's column-major layout, so \(T_1\) is
+copied there transposed before \(C\) is added. It is not a copy for the
+second use; \(T_1\) is read, not overwritten, by the first.)
+\code{PushTranspose}, which turns \((ABC)\T\) into \(C\T B\T A\T\), has the
+same one-use condition (\srcref{lib/UlmLamDialect.cpp}{641}{677}).
+
+\begin{theory}[ (\FGs{1.1}, \FGs{2.7})]
+In the terms of \FG{1.1}{Structural rules and substructural type systems},
+SSA values obey both \emph{contraction} (a value may be used twice) and
+\emph{weakening} (a value may be unused): MLIR's value discipline is the
+ordinary, non-substructural one. That is safe because tensors have value
+semantics, \FG{2.7}{Value semantics vs reference/memory semantics in IRs}:
+a use can never observe another use. The one-use checks above are not a
+typing rule; they are a cost side condition on rewrites, so that a rewrite
+never duplicates work.
+\end{theory}
+
+\begin{limit}
+An SSA value with several uses does not imply several copies of its
+storage. Copies are made by bufferization, and only when a use would
+\emph{overwrite} storage that another use still reads (\cref{ch:storage}).
+Conversely, linear types (\FGs{1.2}) would restrict the number of uses;
+nothing in MLIR or ulm.lam does.
+\end{limit}
+
+% ---------------------------------------------------------------------------
+\section{Effects decide what may move}
+\label{sec:effects}
+
+\begin{steps}
+\item[Input] an op inside a loop, or an op whose results are unused.
+\item[Representation] the op's \code{MemoryEffectOpInterface}: the trait \code{Pure} (no effects, speculatable), or a \code{getEffects} method.
+\item[Rule] generic passes: DCE (dead code elimination) removes ops without effects whose results are unused; LICM (loop-invariant code motion) hoists pure ops whose operands are defined outside the loop; CSE merges identical pure ops.
+\item[Output] the program with ops removed, moved or merged.
+\item[Theory] \FG{1.6}{Effect systems and algebraic effects}; \FG{3.2}{Traits and interfaces}.
+\end{steps}
+
+\paragraph{The declarations}
+\begin{itemize}
+\item Every \code{ulm_lam} op is \code{Pure} (the base class
+  \code{UlmLam_Op}, \srcref{include/ulm_lam/UlmLamOps.td}{23}{35}). They
+  are mathematical functions of their operands.
+\item \code{ulm_lamk} ops implement \code{getEffects} with
+  \code{dpsEffects} (\srcref{lib/UlmLamDialect.cpp}{808}{824}): memref
+  operands are read, DPS destinations are also written; ``Tensor operands
+  have value semantics (no effects).'' The same op is effect-free on tensors
+  and effectful on memrefs.
+\item \code{ulm_lamk.call} calls a function written in Julia or C; it adds
+  a read and a write of the default resource, i.e.\ of any memory
+  (\srcref{lib/UlmLamDialect.cpp}{1150}{1160}): ``the call is never
+  hoisted, duplicated or removed''.
+\end{itemize}
+
+\paragraph{Removing} On tensors, a kernel whose results are unused is dead,
+even a factorization with its \code{info}: in \code{v12-dead-potrf.mlir}
+the canonicalizer erases the tensor \code{potrf} and keeps the memref one
+(\code{outputs/dead.out}):
+
+\begin{textout}
+func.func @f(%arg0: tensor<4x4xf64>, %arg1: memref<4x4xf64>) -> tensor<4x4xf64> {
+  %info = ulm_lamk.potrf uplo(lower) outs(%arg1 : memref<4x4xf64>)
+  return %arg0 : tensor<4x4xf64>
+}
+\end{textout}
+
+A run-time check that is a by-product of a computation lives only as long
+as the computation is needed. On tensors this is correct by construction:
+\code{info} is an ordinary result, and an unused result is not observable.
+
+% ---------------------------------------------------------------------------
+\section{Moving a factorization out of a loop}
+\label{sec:effects-licm}
+
+The loop in \code{examples/variants.jl} applies \(M\inv\) in every step:
+
+\begin{lstlisting}[style=jl]
+@lam function iterate(M::Mat(:n, :n, :spd), x0::Vec(:n), steps::Index)
+    loop(steps, x0) do i, x
+        (inv(M) * x,)
+    end
+end
+\end{lstlisting}
+
+The traced IR has the inverse inside the loop body; after normalization,
+inference and \code{loop-invariant-code-motion} it is outside
+(\code{outputs/iterate-traced.mlir}, \code{outputs/iterate-licm.mlir}):
+
+\begin{lstlisting}
+// traced
+%v4 = scf.for %v5 = %v2 to %p.steps step %v3 iter_args(%v6 = %p.x0) -> (tensor<?x1xf64>) {
+  %v7 = ulm_lam.inverse %v1 : tensor<?x?xf64> -> tensor<?x?xf64>
+  %v8 = ulm_lam.mul %v7, %v6 : tensor<?x?xf64>, tensor<?x1xf64> -> tensor<?x1xf64>
+  scf.yield %v8 : tensor<?x1xf64>
+}
+// after LICM
+%0 = ulm_lam.inverse %arg1 : ... -> tensor<?x?xf64, #ulm_lam.props<square, symmetric, spd, ...>>
+%1 = scf.for %arg4 = %c0 to %arg3 step %c1 iter_args(%arg5 = %arg2) -> (tensor<?x1xf64>) {
+  %2 = ulm_lam.mul %0, %arg5 : ...
+  scf.yield %2 : tensor<?x1xf64>
+}
+\end{lstlisting}
+
+LICM moved \code{inverse} because its operand is defined outside the loop
+and the op is \code{Pure}. Kernel selection then factorizes \(M\) once,
+before the loop; the loop body is two \code{trsv}
+(\code{outputs/iterate-selected.mlir}). Kernel selection would place the
+factorization there even without LICM, because it factorizes a matrix
+directly after its definition (\cref{sec:gls-select}); two independent
+mechanisms agree.
+
+% ---------------------------------------------------------------------------
+\section{Speculation and a false declaration}
+\label{sec:effects-speculation}
+
+\code{Pure} in MLIR means \code{NoMemoryEffect} \emph{and}
+\code{AlwaysSpeculatable}: the op may be executed even on paths where the
+original program would not execute it. For \code{ulm_lam.inverse} of an SPD
+matrix this is harmless: the inverse exists, and computing its
+factorization early changes nothing observable. For an \(M\) that is
+declared SPD but is not, it changes the outcome
+(\code{examples/speculate.jl}, \code{outputs/speculate.out}):
+
+\begin{textout}
+steps = 0: InfoError: iterate: info 1: Cholesky factorisation of v2: not positive definite
+steps = 1: InfoError: iterate: info 1: Cholesky factorisation of v2: not positive definite
+\end{textout}
+
+With \code{steps = 0} the formula never applies \(M\inv\); its value is
+\(x_0\). The compiled function factorizes \(M\) before the loop and reports
+the failure anyway. Relative to the declared facts (\(M\) is SPD) the
+transformation is exact; relative to the actual input it is not.
+
+\begin{theory}[ (\FGs{1.6}, \FGs{3.2})]
+\FG{1.6}{Effect systems and algebraic effects} explains why compilers need
+effect information~\cite{effects}: a computation without effects may be removed, hoisted
+or merged. MLIR attaches that information to op classes and instances
+through traits and interfaces, \FG{3.2}{Traits and interfaces}, and LICM,
+CSE and DCE are written once against them. The example shows the other
+half of the contract: correctness depends on the declarations being honest
+\emph{for the inputs that occur}. \code{ulm_lam.inverse} is pure on the
+domain where the inverse exists; the domain is guaranteed only by a
+declaration.
+\end{theory}
+
+\begin{limit}
+Failure is not modeled as an effect. In an effect system,
+``may fail'' would be an effect like ``may raise'', and a may-fail
+operation would not be speculatable. In ulm.lam the possibility of failure
+is outside the \code{ulm_lam} level entirely (the ops are total over the
+declared domain); it appears at the \code{ulm_lamk} level as an ordinary
+result value, \code{info}, and only \code{ulm-lam-info} turns it into
+control flow (\cref{sec:effects-info}).
+\end{limit}
+
+% ---------------------------------------------------------------------------
+\section{Failure as a value, then as control flow}
+\label{sec:effects-info}
+
+\code{ulm_lamk.potrf} returns \code{info} as an \code{i64} result. After
+bufferization, \code{ulm-lam-info} (\srcref{lib/UlmLamInfo.cpp}{1}{41})
+numbers every check of a function and rewrites the rest of the block into
+an \code{scf.if}:
+
+\begin{lstlisting}
+%info = ulm_lamk.potrf ... outs(%A)
+%code = arith.select (%info != 0), k, 0
+%s = scf.if (%code == 0) -> i64 { <rest>; yield <status of rest> }
+                         else { yield %code }
+\end{lstlisting}
+
+(This listing is the schematic from the pass's header comment.) A loop
+carries the status, so the iterations after a failure do nothing. The
+function returns the status; outputs after a failure are unspecified, as in
+LAPACK. The descriptions of the checks go into the function attribute
+\code{ulm_lam.info} and from there into the C++ interface comment and
+Julia's \code{InfoError}.
+
+\begin{theory}
+This is error handling by explicit status passing: every operation that can
+fail returns a code, and the compiler threads it through the rest of the
+computation. An exception or an algebraic effect with a handler
+(\FGs{1.6}) would express the same thing with a non-local exit;
+\code{scf.if} nesting is how a structured IR without exceptions encodes it.
+\end{theory}
+
+% ---------------------------------------------------------------------------
+\section{Regions in MLIR and regions in memory management}
+\label{sec:values-regions}
+
+ulm.lam's IR contains MLIR \emph{regions}: the body of \code{scf.for}, the
+branches of \code{scf.if}, the body of every \code{func.func}. These are
+nested blocks of code with lexical scoping of SSA values,
+\FG{2.6}{Regions and structured control flow in the IR}.
+
+\begin{limit}
+MLIR regions are not the regions of region-based memory management,
+\FG{1.5}{Region types and lifetimes}, where a region is a pool of memory
+whose lifetime the type system tracks. The closest thing in ulm.lam is the
+workspace (\cref{sec:storage-workspace}): one block of memory per call, from
+which all temporaries are carved and which is released (or kept by the
+caller) at the end. That is an arena with a lifetime of one call, managed
+by a pass and a calling convention, not by types.
+\end{limit}

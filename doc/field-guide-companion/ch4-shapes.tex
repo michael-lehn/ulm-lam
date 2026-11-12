@@ -1,0 +1,169 @@
+% ch4-shapes.tex
+\chapter{Matrix Dimensions: Static, Named, Checked at Run Time}
+\label{ch:shapes}
+
+\begin{answer}
+Dimensions are checked at three levels, by three different mechanisms.
+Static sizes are part of the MLIR tensor type and are checked by op
+verifiers. Run-time sizes are \emph{named} in the Julia (or Python)
+frontend, and the frontend checks at trace time that names agree, for
+example that the inner sizes of a product are the same symbol. In MLIR the
+names survive only as the argument attribute \code{ulm_lam.dims}, which an
+analysis uses to find the size of each dimension, but which no verifier uses
+to check agreement. When the compiled function is called, the Julia runtime
+binds each name to one integer and rejects arrays that disagree. The
+generated C function trusts the sizes it receives.
+\end{answer}
+
+% ---------------------------------------------------------------------------
+\section{Static sizes: checked by the verifier}
+\label{sec:shapes-static}
+
+With \code{Mat(40, 6, :full_rank)} the sizes become part of the type,
+\code{tensor<6x40xf64, ...>}, and every op verifier compares them
+(\cref{sec:infra-verify}): \code{factor 0 has 4 columns but factor 1 has 5
+rows}. This is ordinary type checking with sizes in the types. The test
+suite compiles a static GLS (\code{gls_static}) next to the dynamic one; the
+derivation is the same, and the costs are exact instead of estimated
+(\cref{sec:orders-cost}).
+
+% ---------------------------------------------------------------------------
+\section{Run-time sizes: anonymous in MLIR}
+\label{sec:shapes-anon}
+
+A dynamic dimension is written \code{?}. Two \code{?} are not known to be
+equal or different, so the verifier accepts any product of two
+\code{tensor<?x?xf64>} (\code{v2} in \cref{sec:infra-verify}). This is
+MLIR's builtin type system, and it is deliberately weak: a \code{?} is ``an
+\code{index} value that you can ask for with \code{tensor.dim}'', not a
+symbol.
+
+% ---------------------------------------------------------------------------
+\section{Named sizes: the frontend checks, MLIR records}
+\label{sec:shapes-dims}
+
+\begin{steps}
+\item[Input] \code{Mat(:n, :m)}, \code{Mat(:n, :n)}, \code{Vec(:n)}: the same symbol means the same size.
+\item[Representation] in Julia, the symbols themselves (\code{MatType.rows}, \code{.cols}); in MLIR, \code{index} parameters \code{\%s.n}, \code{\%s.m} and \code{ulm_lam.dims = [1, 0]} on each matrix parameter.
+\item[Rule] at trace time, products and sums compare symbols; in MLIR, \code{dimOf} maps each dynamic dimension to an \code{index} value.
+\item[Output] a \code{LamError} at trace time, or IR in which every \code{tensor.empty} gets its sizes from the parameters.
+\item[Theory] named symbolic dimensions, \FG{10.4}{Symbolic and dynamic shapes}; indexed types, \FG{1.8}{Dependent and indexed types}.
+\end{steps}
+
+\paragraph{At trace time} The overloaded \code{*} compares
+\code{ta.cols == tb.rows}, where both may be symbols
+(\cref{sec:gls-trace}). So the frontend rejects
+\begin{lstlisting}[style=jl]
+@lam bad(A::Mat(:n, :m), B::Mat(:n, :m)) = A * B
+\end{lstlisting}
+with \code{LamError: product of nxm and nxm: m columns but n rows}
+(\code{outputs/gls.out}). The check is syntactic equality of names: a
+product of \code{Mat(:n, :m)} and \code{Mat(:m, :k)} has the type
+\code{Mat(:n, :k)}, and no arithmetic on sizes is ever needed, because
+matrix algebra only ever equates dimensions.
+
+\paragraph{In MLIR} The names become positions. The function gets one
+\code{index} parameter per distinct symbol, and each matrix parameter says
+which of them its dynamic dimensions are:
+
+\begin{lstlisting}
+func.func @gls(%s.n: index, %s.m: index,
+    %p.X: tensor<?x?xf64, ...> {ulm_lam.in, ulm_lam.dims = [1, 0]}, ...
+\end{lstlisting}
+
+The function \code{dimOf} (\srcref{lib/UlmLamDialect.cpp}{1269}{1357})
+answers ``which \code{index} value is dimension \(i\) of this matrix?'' for
+any value in the pipeline: for a parameter, from \code{ulm_lam.dims}; for a
+product, from its first or last factor; for a transpose, from the other
+dimension of its operand; for a DPS kernel, from its destination; for a
+loop result, from its initial value; and so on. Kernel selection uses it to
+size every new matrix (\code{tensor.empty(\%arg0, \%arg1)} in
+\cref{sec:gls-select}) and to emit the run-time cost formulas of
+\cref{ch:orders}. Without the attribute it gives up (\code{outputs/dims.out}):
+
+\begin{textout}
+v2-mul-dynamic.mlir:2:8: error: ulm-lam-select-kernels: unknown size of a dynamic dimension (missing ulm_lam.dims?)
+\end{textout}
+
+\paragraph{What MLIR does not check} \code{ulm_lam.dims} is used to
+\emph{find} sizes, not to \emph{check} them. In \code{v11-dims-mismatch.mlir}
+\(A\) is \(n\times k\) and \(B\) is \(n\times k\), so \(AB\) needs \(k=n\):
+
+\begin{lstlisting}
+func.func @f(%n: index, %k: index,
+    %a: tensor<?x?xf64> {ulm_lam.in, ulm_lam.dims = [0, 1]},
+    %b: tensor<?x?xf64> {ulm_lam.in, ulm_lam.dims = [0, 1]})
+    -> (tensor<?x?xf64> {ulm_lam.out, ulm_lam.dims = [0, 1]}) {
+  %p = ulm_lam.mul %a, %b : tensor<?x?xf64>, tensor<?x?xf64> -> tensor<?x?xf64>
+  return %p : tensor<?x?xf64>
+}
+\end{lstlisting}
+
+The verifier accepts it, and kernel selection emits
+\code{ulm_lamk.gemm ... ins(\%arg2, \%arg3 ...) outs(\%0 ...)} with
+\code{\%0 = tensor.empty(\%arg0, \%arg1)} (\code{outputs/dims.out}). If
+this IR were compiled and called with \(k \ne n\), the BLAS call would read
+outside \(B\). The Julia frontend never produces such IR, because it
+rejects the program at trace time; hand-written IR is not protected.
+
+% ---------------------------------------------------------------------------
+\section{At the call: binding names to integers}
+\label{sec:shapes-runtime}
+
+When the compiled function is called, \code{bind_sizes!}
+(\srcref{julia/UlmLam/src/runtime.jl}{326}{339}) walks the arguments and
+binds each symbol to the size it finds:
+
+\begin{lstlisting}[style=jl]
+for (d, v) in ((t.rows, r), (t.cols, c))
+    if d isa Symbol
+        get!(env, d, v) == v ||
+            throw(LamError("$(what()): size :$d = $v, but $(env[d]) from an earlier argument"))
+    elseif d != v
+        throw(LamError("$(what()): expected $t, got $r x $c"))
+    end
+end
+\end{lstlisting}
+
+The first argument that mentions \code{:n} fixes it; every later
+occurrence must agree: \code{LamError: gls: y: size :n = 3, but 4 from an
+earlier argument}. The sizes are then passed to C as \code{size_t}. The C
+function is called only with consistent sizes, but it does not know that:
+called directly from C with inconsistent sizes, it reads or writes out of
+bounds.
+
+\begin{theory}[ (\FGs{1.8}, \FGs{10.4}, \FGs{6.1})]
+Types indexed by size variables, with equality as the only relation, are
+the simplest case of \FG{1.8}{Dependent and indexed types}~\cite{dml}: \code{Mat(:n,
+:m)} is like a type \(\mathsf{Mat}\ n\ m\) indexed by \(n,m\), and the
+product has type \(\mathsf{Mat}\ n\ m \to \mathsf{Mat}\ m\ k \to
+\mathsf{Mat}\ n\ k\). In ulm.lam this discipline lives in the Julia frontend
+(checked at trace time) and in the Julia runtime (checked at the call);
+MLIR keeps named dimensions only as data for an analysis.
+\FG{10.4}{Symbolic and dynamic shapes} describes the same split between
+anonymous dynamic dimensions (MLIR's \code{?}) and named symbolic ones
+(here: \code{:n}), and \FG{6.1}{Symbolic compile-time parameters} the
+general idea of values that are unknown but constrained.
+\end{theory}
+
+\begin{limit}
+A shape parameter in a type is not a dependent type system. There is no
+type-level computation, no proof that sizes agree inside MLIR, and no
+constraint between sizes other than equality of names. In particular the
+fact \(n \ge m\), which full \emph{column} rank needs, cannot be stated:
+\code{fullColumnRank} assumes it for dynamic sizes
+(\cref{sec:gls-infer}), and nothing checks it before \code{potrf} of \(S\)
+fails or succeeds.
+\end{limit}
+
+\paragraph{A hypothetical extension} \emph{(Not in ulm.lam.)} Stating size
+constraints would close that gap:
+\begin{lstlisting}[style=jl]
+# schematic, not existing ulm.lam syntax
+@lam function gls(X::Mat(:n, :m, :full_rank), M::Mat(:n, :n, :spd), y::Vec(:n);
+                  require = (:n >= :m))
+\end{lstlisting}
+The frontend would add the constraint to the function (an attribute, or an
+assumption op as in MLIR's \code{shape} dialect), \code{fullColumnRank} could
+use it instead of assuming it, and the runtime would check it with the other
+sizes. This is the ``symbolic shape with constraints'' of \FGs{10.4}.

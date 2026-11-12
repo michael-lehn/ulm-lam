@@ -261,6 +261,7 @@ showcases torch` runs the Python showcases.
 | `examples/` | design stages, loops, workspaces, run-time sizes, inverses, Linnea's versions of the problems, the cluster runs |
 | `python/examples/`, `julia/examples/` | the showcases |
 | `doc/` | the design document |
+| `doc/field-guide-companion/` | ulm.lam read against the theory of *Modern Compiler Concepts: A Field Guide*: which facts its types carry, where each one is assumed, verified, inferred or checked at run time, and what MLIR provides versus what ulm.lam implements (LuaLaTeX; examples and their outputs included) |
 
 ## What is open
 

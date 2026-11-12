@@ -1,0 +1,42 @@
+### v1-mul-static.mlir
+v1-mul-static.mlir:2:8: error: 'ulm_lam.mul' op factor 0 has 4 columns but factor 1 has 5 rows
+  %p = ulm_lam.mul %a, %b : tensor<3x4xf64>, tensor<5x2xf64> -> tensor<3x2xf64>
+       ^
+v1-mul-static.mlir:2:8: note: see current operation: %0 = "ulm_lam.mul"(%arg0, %arg1) : (tensor<3x4xf64>, tensor<5x2xf64>) -> tensor<3x2xf64>
+### v2-mul-dynamic.mlir
+accepted
+### v3-square-props.mlir
+v3-square-props.mlir:1:53: error: #ulm_lam.props: square property on a 3x4 tensor
+func.func @f(%a: tensor<3x4xf64, #ulm_lam.props<spd>>) {
+                                                    ^
+### v4-zero-fullrank.mlir
+v4-zero-fullrank.mlir:1:68: error: #ulm_lam.props: zero contradicts full rank
+func.func @f(%a: tensor<?x?xf64, #ulm_lam.props<zero, non_singular>>) {
+                                                                   ^
+### v5-inverse-nonsquare.mlir
+v5-inverse-nonsquare.mlir:2:8: error: 'ulm_lam.inverse' op operand is not square
+  %i = ulm_lam.inverse %a : tensor<3x4xf64> -> tensor<3x4xf64>
+       ^
+v5-inverse-nonsquare.mlir:2:8: note: see current operation: %0 = "ulm_lam.inverse"(%arg0) : (tensor<3x4xf64>) -> tensor<3x4xf64>
+### v6-overclaim.mlir
+v6-overclaim.mlir:3:8: error: 'ulm_lam.mul' op inferred type(s) 'tensor<3x3xf64, #ulm_lam.props<spsd>>' are incompatible with return type(s) of operation 'tensor<3x3xf64, #ulm_lam.props<spd>>'
+  %g = ulm_lam.mul %at, %a : tensor<3x4xf64>, tensor<4x3xf64> -> tensor<3x3xf64, #ulm_lam.props<spd>>
+       ^
+v6-overclaim.mlir:3:8: error: 'ulm_lam.mul' op failed to infer returned types
+  %g = ulm_lam.mul %at, %a : tensor<3x4xf64>, tensor<4x3xf64> -> tensor<3x3xf64, #ulm_lam.props<spd>>
+       ^
+v6-overclaim.mlir:3:8: note: see current operation: %1 = "ulm_lam.mul"(%0, %arg0) : (tensor<3x4xf64>, tensor<4x3xf64>) -> tensor<3x3xf64, #ulm_lam.props<spd>>
+### v7-overclaim-ok.mlir
+accepted
+### v8-assume.mlir
+accepted
+### v9-gemm.mlir
+v9-gemm.mlir:3:8: error: 'ulm_lamk.gemm' op shapes of op(A), op(B) and C do not match
+  %r = ulm_lamk.gemm trans_a(none) trans_b(none) alpha(%one) beta(%one) ins(%a, %b : tensor<3x4xf64>, tensor<3x2xf64>) outs(%c : tensor<3x2xf64>) -> tensor<3x2xf64>
+       ^
+v9-gemm.mlir:3:8: note: see current operation: %1 = "ulm_lamk.gemm"(%0, %arg0, %arg1, %0, %arg2) <{trans_a = #ulm_lamk<trans none>, trans_b = #ulm_lamk<trans none>}> : (f64, tensor<3x4xf64>, tensor<3x2xf64>, f64, tensor<3x2xf64>) -> tensor<3x2xf64>
+### v10-gemm-dps.mlir
+v10-gemm-dps.mlir:3:8: error: 'ulm_lamk.gemm' op result 0 must have the type of its init
+  %r = ulm_lamk.gemm trans_a(none) trans_b(none) alpha(%one) beta(%one) ins(%a, %b : tensor<3x4xf64>, tensor<4x2xf64>) outs(%c : tensor<3x2xf64>) -> tensor<3x2xf32>
+       ^
+v10-gemm-dps.mlir:3:8: note: see current operation: %1 = "ulm_lamk.gemm"(%0, %arg0, %arg1, %0, %arg2) <{trans_a = #ulm_lamk<trans none>, trans_b = #ulm_lamk<trans none>}> : (f64, tensor<3x4xf64>, tensor<4x2xf64>, f64, tensor<3x2xf64>) -> tensor<3x2xf32>

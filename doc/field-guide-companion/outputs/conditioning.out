@@ -1,0 +1,4 @@
+ε = 0.01  cond(L⁻¹X) = 148.0  rel.err ulm.lam = 2.66e-13  rel.err QR = 2.54e-15
+ε = 1.0e-5  cond(L⁻¹X) = 146000.0  rel.err ulm.lam = 1.45e-6  rel.err QR = 1.13e-12
+ε = 1.0e-7  cond(L⁻¹X) = 1.46e7  rel.err ulm.lam = 0.0249  rel.err QR = 4.86e-10
+ε = 1.0e-9  cond(L⁻¹X) = 1.46e9  ulm.lam: InfoError: gls: info 2: Cholesky factorisation of a computed matrix: not positive definite  rel.err QR = 4.74e-8

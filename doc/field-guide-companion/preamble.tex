@@ -1,0 +1,211 @@
+% preamble.tex -- shared preamble of ulm-lam-companion.tex (LuaLaTeX)
+
+\usepackage[a4paper,inner=2.6cm,outer=2.4cm,top=2.6cm,bottom=2.8cm,headheight=14pt]{geometry}
+
+% ---------------------------------------------------------------- fonts
+\usepackage{amsmath}
+\usepackage{fontspec}
+\usepackage{unicode-math}
+\setmainfont{Libertinus Serif}
+\setsansfont{Libertinus Sans}
+\setmathfont{Libertinus Math}
+\setmonofont{JuliaMono}[Scale=MatchLowercase]
+
+% ------------------------------------------- paragraphs: no indent, \medskip
+\usepackage[skip=\medskipamount]{parskip}
+
+% ---------------------------------------------------------------- packages
+\usepackage[dvipsnames]{xcolor}
+\usepackage{microtype}
+\usepackage{booktabs,tabularx,array,xltabular}
+\usepackage{enumitem}
+\usepackage{needspace}
+\usepackage{listings}
+\usepackage[most]{tcolorbox}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,fit,calc,backgrounds,decorations.pathreplacing}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage[hyphens]{url}
+\usepackage[unicode,bookmarksnumbered,linktoc=all]{hyperref}
+\usepackage[nameinlink,capitalise,noabbrev]{cleveref}
+
+\definecolor{accent}{HTML}{1F5A96}
+\definecolor{metacolor}{HTML}{555555}
+\definecolor{bg}{gray}{0.95}      % code blocks
+\definecolor{ttbg}{gray}{0.92}    % inline typewriter text
+\definecolor{theorybg}{HTML}{EAF2FB}
+\definecolor{limitbg}{HTML}{FBF0E6}
+\definecolor{kw}{HTML}{1F4E9A}
+\definecolor{cm}{HTML}{6B6B6B}
+\definecolor{ty}{HTML}{2E6B30}
+\definecolor{st}{HTML}{8A3B12}
+\hypersetup{colorlinks=true,linkcolor=accent,urlcolor=accent!70!black,citecolor=accent,
+  pdftitle={ulm.lam and the Field Guide: A Companion},pdfauthor={}}
+
+\setlist{itemsep=2pt,topsep=3pt,parsep=0pt}
+\renewcommand{\arraystretch}{1.18}
+\emergencystretch=3em
+\raggedbottom
+
+% ---------------------------------------------------------------- headings
+\titleformat{\chapter}[display]
+  {\sffamily\bfseries\huge\raggedright}
+  {\large\color{accent}\MakeUppercase{\chaptertitlename}~\thechapter}{0.4em}{}
+\titlespacing*{\chapter}{0pt}{0pt}{1.8em}
+\titleformat{\section}
+  {\sffamily\bfseries\Large\raggedright}{\color{accent}\thesection}{0.8em}{}
+\titlespacing*{\section}{0pt}{2.0em plus 0.5em minus 0.3em}{0.5em}
+\titleformat{\subsection}
+  {\sffamily\bfseries\large\color{accent!85!black}\raggedright}{\thesubsection}{0.6em}{}
+\titlespacing*{\subsection}{0pt}{1.2em plus 0.3em}{0.3em}
+\titleformat{\paragraph}[runin]{\sffamily\bfseries}{}{0pt}{}[.]
+\titlespacing*{\paragraph}{0pt}{0.6em}{0.5em}
+\setcounter{secnumdepth}{2}
+% a run-in heading that ends in its own punctuation (a question)
+\newcommand{\qparagraph}[1]{\par\addvspace{0.6em}\noindent{\sffamily\bfseries #1}\enspace}
+\setcounter{tocdepth}{1}
+
+% ---------------------------------------------------------------- header
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[LE]{\small\sffamily\leftmark}
+\fancyhead[RO]{\small\sffamily\rightmark}
+\fancyfoot[C]{\small\sffamily\thepage}
+\renewcommand{\headrulewidth}{0.3pt}
+\renewcommand{\chaptermark}[1]{\markboth{\thechapter.\ #1}{}}
+\renewcommand{\sectionmark}[1]{\markright{\thesection\ #1}}
+\fancypagestyle{plain}{\fancyhf{}\fancyfoot[C]{\small\sffamily\thepage}\renewcommand{\headrulewidth}{0pt}}
+
+% ---------------------------------------------------------------- inline code
+% Grey background behind \texttt via lua-ul leaders: line spacing unchanged,
+% line breaks still possible.
+\usepackage{luacolor,lua-ul}
+\NewCommandCopy{\origtexttt}{\texttt}
+\DeclareRobustCommand{\texttt}[1]{\highLight[ttbg]{\origtexttt{#1}}}
+% \code{...}: inline code; write \% for % (see companion.lua)
+\directlua{companion = dofile("companion.lua")}
+\DeclareRobustCommand{\code}[1]{\texttt{\directlua{companion.code("\luaescapestring{\detokenize{#1}}")}}}
+\pdfstringdefDisableCommands{\def\code#1{#1}\def\texttt#1{#1}}
+
+% ---------------------------------------------------------------- notation
+\newcommand{\T}{^{\mkern-1.5mu\mathsf{T}}}
+\newcommand{\inv}{^{-1}}
+\newcommand{\invT}{^{-\mathsf{T}}}
+\newcommand{\R}{\mathbb{R}}
+
+% ---------------------------------------------------------------- links
+% The pinned commit of ulm.lam that this text describes.
+\newcommand{\commit}{41855425a8b9ea4ee279fd2ea4b31b45b53e1983}
+\newcommand{\shortcommit}{4185542}
+\newcommand{\repo}{https://github.com/michael-lehn/ulm-lam}
+% \srcref{path}{first line}{last line}: link to the lines at the pinned commit
+\newcommand{\srcref}[3]{\href{\repo/blob/\commit/#1\#L#2-L#3}{\code{#1:#2}}}
+% \srcfile{path}: link to a file at the pinned commit
+\newcommand{\srcfile}[1]{\href{\repo/blob/\commit/#1}{\code{#1}}}
+% Field Guide: \FG{1.7}{Refinement types} links to the named destination
+% section.1.7 of modern-compiler-concepts.pdf (the two PDFs side by side);
+% the printed text is the fallback.
+\newcommand{\FGfile}{modern-compiler-concepts.pdf}
+\newcommand{\FG}[2]{\href{\FGfile\#section.#1}{FG~§#1}~\emph{#2}}
+\newcommand{\FGs}[1]{\href{\FGfile\#section.#1}{FG~§#1}}
+\newcommand{\FGch}[2]{\href{\FGfile\#chapter.#1}{FG Chapter~#1}~\emph{#2}}
+\newcommand{\FGchs}[1]{\href{\FGfile\#chapter.#1}{FG Chapter~#1}}
+
+% ---------------------------------------------------------------- fact origins
+\definecolor{odecl}{HTML}{C0661A}
+\definecolor{over}{HTML}{1F5A96}
+\definecolor{oinf}{HTML}{2E7D32}
+\definecolor{oana}{HTML}{6A3D9A}
+\definecolor{orun}{HTML}{B3261E}
+\definecolor{onone}{HTML}{666666}
+\newcommand{\otag}[2]{\highLight[#1!14]{\textsf{\small\color{#1!80!black}#2}}}
+\newcommand{\Odecl}{\otag{odecl}{declared}}
+\newcommand{\Over}{\otag{over}{verified}}
+\newcommand{\Oinf}{\otag{oinf}{inferred}}
+\newcommand{\Oana}{\otag{oana}{analysis}}
+\newcommand{\Orun}{\otag{orun}{run time}}
+\newcommand{\Onone}{\otag{onone}{not established}}
+
+% ---------------------------------------------------------------- callouts
+\newtcolorbox{theory}[1][]{enhanced,breakable,colback=theorybg,colframe=accent,boxrule=0pt,
+  leftrule=2.5pt,arc=0pt,left=7pt,right=7pt,top=4pt,bottom=4pt,before skip=0.9em,after skip=0.9em,
+  before upper={\textbf{\sffamily\color{accent}Theory#1.}\ }}
+\newtcolorbox{limit}[1][]{enhanced,breakable,colback=limitbg,colframe=BurntOrange,boxrule=0pt,
+  leftrule=2.5pt,arc=0pt,left=7pt,right=7pt,top=4pt,bottom=4pt,before skip=0.9em,after skip=0.9em,
+  before upper={\textbf{\sffamily\color{BurntOrange!80!black}Not the same thing#1.}\ }}
+\newtcolorbox{answer}{enhanced,breakable,colback=white,colframe=accent!60,boxrule=0.5pt,
+  arc=1.5pt,left=7pt,right=7pt,top=4pt,bottom=4pt,before skip=0.6em,after skip=0.9em,
+  before upper={\textbf{\sffamily\color{accent}Answer.}\ }}
+
+% A step in the input / representation / rule / output / theory pattern.
+\newenvironment{steps}
+  {\par\begin{tcolorbox}[enhanced,colback=bg,colframe=bg,boxrule=0pt,arc=1.5pt,
+      left=6pt,right=6pt,top=3pt,bottom=3pt,before skip=0.6em,after skip=0.9em]
+   \begin{description}[font=\sffamily\bfseries\small,leftmargin=6.6em,labelwidth=6.2em,
+      labelsep=0.4em,style=sameline,itemsep=2pt,topsep=0pt]}
+  {\end{description}\end{tcolorbox}}
+
+% ---------------------------------------------------------------- listings
+\lstdefinelanguage{mlir}{
+  alsoletter={.,_,\%,\#,!,@},
+  morekeywords={func.func,return,func.call,scf.for,scf.if,scf.yield,arith.constant},
+  morekeywords=[2]{ulm_lam.mul,ulm_lam.add,ulm_lam.scale,ulm_lam.transpose,
+    ulm_lam.inverse,ulm_lam.identity,ulm_lam.assume,ulm_lamk.gemm,ulm_lamk.gemmtr,
+    ulm_lamk.symm,ulm_lamk.trmm,ulm_lamk.trsm,ulm_lamk.syrk,ulm_lamk.gemv,ulm_lamk.trsv,
+    ulm_lamk.potrf,ulm_lamk.getrf,ulm_lamk.getrs,ulm_lamk.gecopy,ulm_lamk.geaxpy,
+    ulm_lamk.gescal,ulm_lamk.sycomplete,ulm_lamk.call,memref.copy,memref.view,memref.alloc,
+    tensor.empty,bufferization.materialize_in_destination},
+  morekeywords=[3]{tensor,memref,f64,i32,i64,f32,index},
+  morecomment=[l]{//},
+  morestring=[b]",
+  sensitive=true}
+\lstdefinelanguage{tablegen}{
+  morekeywords={def,class,let,include,dag,string,list,code,bit,int},
+  morekeywords=[2]{ins,outs},
+  morecomment=[l]{//},
+  morestring=[b]",
+  sensitive=true}
+\lstdefinelanguage{julia}{
+  morekeywords={function,end,for,in,if,else,elseif,return,using,do,try,catch,let,const,struct,macro},
+  morekeywords=[2]{@lam,@code_lam,Mat,Vec,Index,inv,assume,loop},
+  morecomment=[l]{\#},
+  morestring=[b]",
+  sensitive=true}
+\lstdefinestyle{base}{
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{kw}\bfseries,
+  keywordstyle=[2]\color{kw},
+  keywordstyle=[3]\color{ty},
+  commentstyle=\color{cm}\itshape,
+  stringstyle=\color{st},
+  backgroundcolor=\color{bg},
+  frame=none,
+  xleftmargin=4pt, xrightmargin=4pt,
+  framexleftmargin=4pt, framexrightmargin=4pt,
+  aboveskip=6pt, belowskip=8pt,
+  columns=fullflexible, keepspaces=true,
+  showstringspaces=false, breaklines=true,
+  breakindent=2em, postbreak=\mbox{\textcolor{cm}{$\hookrightarrow$}\space},
+  upquote=true, tabsize=8, escapechar=`}
+\lstdefinestyle{mlir}{style=base,language=mlir}
+\lstdefinestyle{td}{style=base,language=tablegen}
+\lstdefinestyle{cpp}{style=base,language=C++}
+\lstdefinestyle{jl}{style=base,language=julia}
+\lstdefinestyle{txt}{style=base,language={}}
+\lstdefinestyle{sh}{style=base,language=bash}
+\lstset{style=mlir}
+
+% Tool output with Unicode (@code_lam: L1⁻ᵀ, ←): fvextra keeps the characters
+% in order (listings moves modifier letters such as ᵀ before the identifier).
+\usepackage{fvextra}
+\newenvironment{textout}
+  {\VerbatimEnvironment
+   \begin{tcolorbox}[enhanced,breakable,colback=bg,colframe=bg,boxrule=0pt,arc=0pt,
+      left=4pt,right=4pt,top=2pt,bottom=2pt,before skip=6pt,after skip=8pt]%
+   \begin{Verbatim}[fontsize=\footnotesize,breaklines,breakanywhere,breaksymbolleft={}]}
+  {\end{Verbatim}\end{tcolorbox}}
+
+% ---------------------------------------------------------------- tables
+\newcolumntype{L}{>{\raggedright\arraybackslash}X}
+\newcolumntype{P}[1]{>{\raggedright\arraybackslash}p{#1}}

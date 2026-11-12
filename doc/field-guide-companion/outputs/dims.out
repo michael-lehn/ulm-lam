@@ -1,0 +1,16 @@
+### v2-mul-dynamic.mlir through ulm-lam-select-kernels
+v2-mul-dynamic.mlir:2:8: error: ulm-lam-select-kernels: unknown size of a dynamic dimension (missing ulm_lam.dims?)
+  %p = ulm_lam.mul %a, %b : tensor<?x?xf64>, tensor<?x?xf64> -> tensor<?x?xf64>
+       ^
+v2-mul-dynamic.mlir:2:8: note: see current operation: %0 = "ulm_lam.mul"(%arg0, %arg1) : (tensor<?x?xf64>, tensor<?x?xf64>) -> tensor<?x?xf64>
+### v11-dims-mismatch.mlir through the selection pipeline
+module {
+  func.func @f(%arg0: index, %arg1: index, %arg2: tensor<?x?xf64> {ulm_lam.dims = [0, 1], ulm_lam.in}, %arg3: tensor<?x?xf64> {ulm_lam.dims = [0, 1], ulm_lam.in}) -> (tensor<?x?xf64> {ulm_lam.dims = [0, 1], ulm_lam.out}) {
+    %0 = tensor.empty(%arg0, %arg1) : tensor<?x?xf64>
+    %cst = arith.constant 1.000000e+00 : f64
+    %cst_0 = arith.constant 0.000000e+00 : f64
+    %1 = ulm_lamk.gemm trans_a(none) trans_b(none) alpha(%cst) beta(%cst_0) ins(%arg2, %arg3 : tensor<?x?xf64>, tensor<?x?xf64>) outs(%0 : tensor<?x?xf64>) -> tensor<?x?xf64>
+    return %1 : tensor<?x?xf64>
+  }
+}
+

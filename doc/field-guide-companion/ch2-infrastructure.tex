@@ -1,0 +1,365 @@
+% ch2-infrastructure.tex
+\chapter{MLIR Provides the Infrastructure, ulm.lam Provides the Meaning}
+\label{ch:infra}
+
+\begin{answer}
+MLIR~\cite{mlir} has an open, extensible type system. A dialect defines its own types,
+attributes and operations, and states the rules that they must satisfy;
+MLIR runs those rules at defined points and rejects IR that breaks them. MLIR
+does not come with any particular type \emph{discipline}: not linear types,
+not dependent types, not refinement types, not an effect system. Each of
+those needs a semantics and an enforcement mechanism that someone has to
+design and implement. In short: \emph{MLIR provides the infrastructure for
+representing domain-specific types and enforcing rules about operations.
+The meaning of those types, and the strength of the guarantees they provide,
+comes from the dialect and its implementation.}
+\end{answer}
+
+The Field Guide describes the infrastructure side in \FG{3.1}{Dialects and
+extensible operation sets} and \FG{3.2}{Traits and interfaces}, and the
+type disciplines in \FGch{1}{Types as Static Resource Reasoning}. This
+chapter shows, with ulm.lam, which of the two you are looking at in each
+case.
+
+% ---------------------------------------------------------------------------
+\section{Who provides what}
+\label{sec:infra-who}
+
+\begin{table}[h]
+\centering\small
+\begin{tabularx}{\linewidth}{@{}P{2.4cm}LL@{}}
+\toprule
+\textbf{Concern} & \textbf{MLIR provides} & \textbf{ulm.lam implements} \\
+\midrule
+types & builtin \code{tensor} and \code{memref} with an \emph{encoding}
+  slot; ODS (Operation Definition Specification, in TableGen) for new
+  types and attributes &
+  no new type; one attribute, \code{#ulm_lam.props<...>}, used as tensor
+  encoding \\
+operations & ODS: operands, results, type constraints, assembly format &
+  \code{ulm_lam}: 7 ops (\code{mul}, \code{add}, \code{scale},
+  \code{transpose}, \code{inverse}, \code{identity}, \code{assume});
+  \code{ulm_lamk}: 17 kernel ops and \code{call} \\
+verification & hooks (\code{verify()}, \code{verifyEncoding}), generated
+  operand checks, \code{InferTypeOpInterface}'s result check; run after
+  parsing and (by default) after each pass &
+  the rules: inner dimensions, squareness, contradictory properties, DPS
+  result types \\
+inference & \code{InferTypeOpInterface} and its compatibility hook
+  \code{isCompatibleReturnTypes} & the property rules (\code{mulProperties},
+  \ldots) and what ``compatible'' means \\
+effects & \code{MemoryEffectOpInterface}, the \code{Pure} trait; generic
+  passes (CSE, DCE, LICM) that consult them & which ops are pure; which
+  operands a kernel reads and writes \\
+rewriting & pattern classes, the greedy driver, the dialect conversion
+  framework & the normal form, kernel selection, the lowering to EmitC \\
+memory & One-Shot Bufferize; \code{DstBufferizableOpInterfaceExternalModel}
+  for DPS ops & DPS kernel ops and their bufferization models; the
+  workspace and \code{info} passes \\
+\bottomrule
+\end{tabularx}
+\caption{The division of labor between MLIR and ulm.lam.}
+\label{tab:infra-who}
+\end{table}
+
+Read the table column by column. Everything on the left is generic and
+knows nothing about matrices. Everything on the right is a decision of
+ulm.lam. When this text says that ``the compiler knows that \(S\) is SPD'',
+the knowledge is in the right column: MLIR stores the attribute, calls the
+inference hook and runs the verifier, but the meaning of \code{spd} and the
+rule that derives it are ulm.lam's C++.
+
+% ---------------------------------------------------------------------------
+\section{A property set as a tensor encoding}
+\label{sec:infra-props}
+
+\begin{steps}
+\item[Input] a type written as \code{tensor<?x?xf64, #ulm_lam.props<spd>>}.
+\item[Representation] a builtin \code{RankedTensorType} whose encoding is a \code{PropertiesAttr}, a 32-bit set of named facts.
+\item[Rule] \code{verifyEncoding}, called by MLIR whenever such a type is built or parsed.
+\item[Output] the type, or a diagnostic.
+\item[Theory] a refinement of the base type by a predicate, \FG{1.7}{Refinement types}.
+\end{steps}
+
+The declaration (\srcref{include/ulm_lam/UlmLamAttrs.td}{37}{77}, cases
+shortened):
+
+\begin{lstlisting}[style=td]
+def UlmLam_PropSquare     : I32BitEnumAttrCaseBit<"square",       0>;
+def UlmLam_PropSymmetric  : I32BitEnumAttrCaseBit<"symmetric",    1>;
+def UlmLam_PropSPSD       : I32BitEnumAttrCaseBit<"spsd",         2>;
+def UlmLam_PropSPD        : I32BitEnumAttrCaseBit<"spd",          3>;
+...
+def UlmLam_PropFullRank   : I32BitEnumAttrCaseBit<"full_rank",   12>;
+def UlmLam_PropLowerStored: I32BitEnumAttrCaseBit<"lower_stored",13>;
+def UlmLam_PropUpperStored: I32BitEnumAttrCaseBit<"upper_stored",14>;
+def UlmLam_PropDiagonal   : I32BitEnumAttrCaseGroup<"diagonal",
+                              [UlmLam_PropLowerTri, UlmLam_PropUpperTri]>;
+...
+// Used as a builtin tensor encoding:  tensor<?x?xf64, #ulm_lam.props<spd>>
+def UlmLam_PropsAttr : EnumAttr<UlmLam_Dialect, UlmLam_Properties, "props",
+    [DeclareAttrInterfaceMethods<VerifiableTensorEncoding>]> {
+  let assemblyFormat = "`<` $value `>`";
+  ...
+}
+\end{lstlisting}
+
+Two MLIR mechanisms carry it: \code{EnumAttr} over an \code{I32BitEnumAttr}
+generates the attribute class, its parser and printer; the interface
+\code{VerifiableTensorEncoding} makes MLIR call a verifier when a tensor
+type with this encoding is created. The verifier is ulm.lam's
+(\srcref{lib/UlmLamDialect.cpp}{145}{167}):
+
+\begin{lstlisting}[style=cpp]
+LogicalResult PropertiesAttr::verifyEncoding(ArrayRef<int64_t> shape, Type,
+    function_ref<InFlightDiagnostic()> emitError) const
+{
+    P p = closure(getValue(), shape);
+    if (shape.size() != 2)
+        return emitError() << "#ulm_lam.props needs a rank-2 tensor";
+    if (has(p, P::zero) && has(p, P::full_rank))
+        return emitError() << "#ulm_lam.props: zero contradicts full rank";
+    ...
+    if (has(p, P::square) && !ShapedType::isDynamic(shape[0]) &&
+        !ShapedType::isDynamic(shape[1]) && shape[0] != shape[1])
+        return emitError() << "#ulm_lam.props: square property on a "
+                           << shape[0] << "x" << shape[1] << " tensor";
+    return success();
+}
+\end{lstlisting}
+
+It first closes the set under implication (so \code{spd} brings
+\code{square}), then checks the closure against itself and against the
+static shape. Two rejected types (\code{outputs/verify.out}):
+
+\begin{textout}
+### v3-square-props.mlir
+v3-square-props.mlir:1:53: error: #ulm_lam.props: square property on a 3x4 tensor
+func.func @f(%a: tensor<3x4xf64, #ulm_lam.props<spd>>) {
+### v4-zero-fullrank.mlir
+v4-zero-fullrank.mlir:1:68: error: #ulm_lam.props: zero contradicts full rank
+func.func @f(%a: tensor<?x?xf64, #ulm_lam.props<zero, non_singular>>) {
+\end{textout}
+
+\code{spd} on a \(3\times 4\) tensor is rejected because SPD implies square;
+\code{zero} with \code{non_singular} because non-singular implies full rank.
+Both are contradictions \emph{between the facts and the shape}, decided
+without looking at any data. \code{tensor<4x4xf64, #ulm_lam.props<spd>>} is
+accepted for every \(4\times 4\) matrix, SPD or not: a type cannot be wrong
+about entries it never sees.
+
+% ---------------------------------------------------------------------------
+\section{Operation verifiers: structural rules}
+\label{sec:infra-verify}
+
+Each op class may define \code{verify()}. MLIR calls it after parsing and,
+with the default pass-manager settings, after every pass. For
+\code{ulm_lam.mul} (\srcref{lib/UlmLamDialect.cpp}{514}{526}):
+
+\begin{lstlisting}[style=cpp]
+LogicalResult MulOp::verify()
+{
+    if (getFactors().size() < 2)
+        return emitOpError("needs at least two factors");
+    for (unsigned i = 0; i + 1 < getFactors().size(); ++i) {
+        Type a = getFactors()[i].getType(), b = getFactors()[i + 1].getType();
+        if (!dimsCompatible(cols(a), rows(b)))
+            return emitOpError("factor ") << i << " has " << cols(a)
+                   << " columns but factor " << i + 1 << " has " << rows(b) << " rows";
+    }
+    return success();
+}
+\end{lstlisting}
+
+\code{dimsCompatible(a, b)} is true if either is dynamic or both are equal.
+Accepted and rejected (\code{outputs/verify.out}):
+
+\begin{textout}
+### v1-mul-static.mlir
+v1-mul-static.mlir:2:8: error: 'ulm_lam.mul' op factor 0 has 4 columns but factor 1 has 5 rows
+### v2-mul-dynamic.mlir
+accepted
+### v5-inverse-nonsquare.mlir
+v5-inverse-nonsquare.mlir:2:8: error: 'ulm_lam.inverse' op operand is not square
+### v9-gemm.mlir
+v9-gemm.mlir:3:8: error: 'ulm_lamk.gemm' op shapes of op(A), op(B) and C do not match
+### v10-gemm-dps.mlir
+v10-gemm-dps.mlir:3:8: error: 'ulm_lamk.gemm' op result 0 must have the type of its init
+\end{textout}
+
+\code{v2} multiplies two \code{tensor<?x?xf64>}: the verifier cannot know
+whether the inner sizes agree, so it accepts. \Cref{ch:shapes} shows where
+dynamic sizes \emph{are} checked. \code{v10} violates a DPS rule: a kernel's
+tensor result must have the type of the operand it overwrites
+(\code{verifyDps}, \srcref{lib/UlmLamDialect.cpp}{826}{845}).
+
+\begin{limit}
+An operation verifier checks the IR, not the data. It sees types,
+attributes and the structure of the program, and it runs at compile time.
+It cannot tell whether the \(4\times 4\) array that a caller passes is SPD.
+In ulm.lam that question is answered only by \code{potrf} at run time, and
+only for the matrices that get factorized.
+\end{limit}
+
+% ---------------------------------------------------------------------------
+\section{Result types must be justified}
+\label{sec:infra-compat}
+
+\begin{steps}
+\item[Input] an op whose result type is written out, possibly with properties.
+\item[Representation] \code{ulm_lam} ops implement \code{InferTypeOpInterface}.
+\item[Rule] MLIR's generated verifier infers the result type from the operands and calls \code{isCompatibleReturnTypes(inferred, declared)}; ulm.lam defines compatible as ``same shape up to \code{?}, same element type, and every declared property is implied by the inferred ones''.
+\item[Output] a declared type may be weaker than the inferred one, never stronger.
+\item[Theory] subtyping by implication, \FG{1.7}{Refinement types}; checking against an annotation, \FG{1.10}{Type inference beyond Hindley–Milner: bidirectional and constraint-based}.
+\end{steps}
+
+The compatibility relation (\srcref{lib/UlmLamDialect.cpp}{359}{380}):
+
+\begin{lstlisting}[style=cpp]
+/// Shapes compatible, element types equal, properties of `actual` implied
+/// by `inferred`.
+bool ulmLamCompatible(TypeRange inferred, TypeRange actual)
+{
+    ...
+        P have = closure(propertiesOf(it), it.getShape());
+        if (!has(have, propertiesOf(at)))
+            return false;
+    ...
+}
+\end{lstlisting}
+
+The test is the pair \code{v6} and \code{v7}: the same Gram product
+\(A\T A\) of a \(4\times 3\) matrix, with the result declared \code{spd}.
+Without \code{full_rank} on \(A\), only SPSD can be inferred, and the
+verifier rejects the claim:
+
+\begin{textout}
+### v6-overclaim.mlir
+v6-overclaim.mlir:3:8: error: 'ulm_lam.mul' op inferred type(s) 'tensor<3x3xf64, #ulm_lam.props<spsd>>' are incompatible with return type(s) of operation 'tensor<3x3xf64, #ulm_lam.props<spd>>'
+v6-overclaim.mlir:3:8: error: 'ulm_lam.mul' op failed to infer returned types
+### v7-overclaim-ok.mlir
+accepted
+\end{textout}
+
+With \code{full_rank} on \(A\) (\code{v7}), SPD is inferable and the same
+declaration is accepted. So inside a function, a property on a result type
+is not an assumption: it is a claim that the verifier checks against the
+inference rules. The only way to state more than inference derives is the
+dedicated op \code{ulm_lam.assume}, which has no inference hook and is
+accepted with any properties (\code{v8} in \code{outputs/verify.out}).
+\Cref{sec:facts-declared} discusses it.
+
+\begin{theory}[ (\FGs{1.7}, \FGs{1.10})]
+In a refinement type system, a value of type \(\{v{:}B \mid p\}\) may be
+used where \(\{v{:}B \mid q\}\) is expected if \(p \Rightarrow q\). Here
+\(B\) is the tensor type, \(p\) the inferred property set and \(q\) the
+declared one, and \(p \Rightarrow q\) is decided by closing \(p\) under the
+implication rules and testing bit-set containment, not by an SMT
+(satisfiability modulo theories) solver: with fifteen atoms and a fixed set
+of Horn-like implications the check is a few bit operations. Comparing a
+synthesized type against a written one is the \emph{checking} direction of
+bidirectional typing.
+\end{theory}
+
+% ---------------------------------------------------------------------------
+\section{Operation traits are not matrix properties}
+\label{sec:infra-traits}
+
+Both are called ``properties'' in casual speech, and both are written in
+ODS. They live in different worlds.
+
+\begin{center}\small
+\begin{tabularx}{\linewidth}{@{}P{3.3cm}LL@{}}
+\toprule
+ & \textbf{Op traits and interfaces} & \textbf{Matrix properties} \\
+\midrule
+example & \code{Pure}, \code{Commutative}, \code{DestinationStyleOpInterface} & \code{spd}, \code{lower_tri}, \code{full_rank} \\
+describes & an \emph{operation class} (all \code{ulm_lam.mul} ops) & a \emph{value} (this matrix) \\
+where & the op's C++ class, via ODS & the value's type (encoding) \\
+read by & generic MLIR passes: CSE, DCE, LICM, canonicalizer, bufferization & only ulm.lam's own rules and passes \\
+MLIR understands it & yes: that is its purpose & no: an opaque attribute \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\code{ulm_lam.add} has the trait \code{Commutative}
+(\srcref{include/ulm_lam/UlmLamOps.td}{63}{71}); \code{ulm_lam.mul} does
+not, because matrix products do not commute. The trait states a fact about
+the \emph{operation} that a generic canonicalizer may use (to sort
+operands). A matrix being SPD states a fact about the \emph{operand}, and no
+upstream pass will ever read it.
+
+\begin{limit}
+MLIR operation traits are not mathematical matrix properties. The trait
+\code{Pure} on \code{ulm_lam.inverse} says that the operation has no memory
+effects and may be executed speculatively; it says nothing about whether the
+operand is invertible. \Cref{sec:effects-speculation} shows what follows
+from that difference.
+\end{limit}
+
+% ---------------------------------------------------------------------------
+\section{What is present, and what is related by analogy}
+\label{sec:infra-analogy}
+
+\begin{table}[t]
+\centering\small
+\begin{tabularx}{\linewidth}{@{}P{3.2cm}LP{2.4cm}@{}}
+\toprule
+\textbf{Discipline (FG)} & \textbf{In ulm.lam} & \textbf{Status} \\
+\midrule
+refinement types (\FGs{1.7}) & property sets on tensor types; results
+  checked by implication; parameters and \code{assume} trusted &
+  \textbf{present}, with a finite predicate language \\
+type inference (\FGs{1.10}) & synthesis of result types per op, one pass
+  in program order & \textbf{present} \\
+indexed / dependent types (\FGs{1.8}) & static shapes checked; run-time
+  sizes named in the Julia frontend and in \code{ulm_lam.dims}; no
+  type-level terms & \textbf{analogy} (\cref{ch:shapes}) \\
+effect systems (\FGs{1.6}) & per-op memory effects, used by generic
+  passes; no effects in function types, no effect polymorphism &
+  \textbf{partly}: effect annotations, not an effect type system \\
+linear / affine types (\FGs{1.2}, \FGs{1.3}) & none: SSA values may be
+  used any number of times & \textbf{absent} (\cref{ch:values}) \\
+uniqueness (\FGs{1.4}) & the in-place condition of bufferization, decided
+  by an analysis & \textbf{analogy} (\cref{ch:storage}) \\
+region types (\FGs{1.5}) & none; MLIR regions are nested code, the
+  workspace is one arena per call & \textbf{absent}; analogy only \\
+typestate (\FGs{1.9}) & ``factorized'' is tracked by a memo table in
+  kernel selection, not in types & \textbf{absent} \\
+\bottomrule
+\end{tabularx}
+\caption{Type disciplines of FG Chapter 1 and their status in ulm.lam.}
+\label{tab:infra-status}
+\end{table}
+
+\Cref{tab:infra-status} is the short answer to ``which theoretical type
+systems does ulm.lam have?''. Three entries need a remark.
+
+\paragraph{Declared but not implemented} The ODS of \code{ulm_lam.assume}
+has a unit attribute \code{checked}, documented as ``verified at run time
+(e.g.\ symmetry test, or success of the Cholesky factorisation for spd)''
+(\srcref{include/ulm_lam/UlmLamOps.td}{135}{154}). At commit
+\texttt{\shortcommit} neither frontend sets it and no pass generates a
+check from it; the only code that reads it is a normalization pattern that
+leaves checked assumptions alone
+(\srcref{lib/UlmLamPasses.cpp}{79}{99}). Likewise, the pass description in
+\srcfile{include/ulm_lam/UlmLamPasses.td} lists kernel-selection strategies
+\code{search} and \code{egraph}, a \code{cost-model} option and a pass
+\code{convert-ulm-lamk-to-linalg}; that file is documentation (the passes
+are registered by hand in C++), and the implemented pass rejects every
+strategy but \code{gmc} (\srcref{lib/UlmLamPasses.cpp}{2295}{2305}).
+
+\paragraph{Interfaces that nothing calls} \code{ulm_lam} and
+\code{ulm_lamk} ops implement two interfaces of ulm.lam's own,
+\code{PropertyInferenceOpInterface} and \code{KernelCostOpInterface}
+(\srcref{include/ulm_lam/UlmLamInterfaces.td}{11}{48}). No pass at this
+commit calls them: inference goes through MLIR's
+\code{InferTypeOpInterface}, and kernel selection computes flop counts
+inline (\cref{sec:orders-cost}). They are the extension points of a design,
+not mechanisms of the current compiler.
+
+\paragraph{Effects are partly present} MLIR's effect interface is a real
+effect annotation per op, and generic passes use it soundly
+(\cref{ch:values}). What the Field Guide calls an effect \emph{system},
+effects in function types that compose by union and that a type checker
+verifies, does not exist in MLIR or in ulm.lam.

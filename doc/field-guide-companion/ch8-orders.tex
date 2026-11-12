@@ -1,0 +1,153 @@
+% ch8-orders.tex
+\chapter{Choosing an Evaluation Order}
+\label{ch:orders}
+
+\begin{answer}
+ulm.lam's cost model counts floating-point operations (flops). With static
+sizes the dynamic program of kernel selection finds one cheapest plan at
+compile time. With run-time sizes it cannot, so it runs the dynamic program
+for several sample sizes, keeps every plan that wins for some sample, and
+emits all of them behind an \code{scf.if} that compares their flop counts,
+computed from the actual sizes when the function is called. The comparison
+is exact for the plans it has; whether those plans include the best one for
+every size is a heuristic, not a proof.
+\end{answer}
+
+% ---------------------------------------------------------------------------
+\section{The cost model}
+\label{sec:orders-cost}
+
+Costs are the flop counts in the table of \cref{sec:kernels-select}: \(2mkn\)
+for a product, \(m^2n\) for a triangular solve, \(n^2 r\) for a Gram
+product. They are computed inline by the dynamic program; the ops'
+\code{KernelCostOpInterface} methods (\code{estimateFlops},
+\code{estimateBytes}) exist but are not called
+(\cref{sec:infra-analogy}). A dynamic dimension that has no sample value
+counts as \(1000\) (\code{kNominal}, \srcref{lib/UlmLamPasses.cpp}{190}{200}).
+
+Flops are a crude model: \code{gemv} moves as many bytes as it computes
+flops, \code{gemm} reuses each byte many times, and \code{potrf} runs at a
+lower rate than \code{gemm} for small matrices. ulm.lam contains one
+measured correction: the choice between \(F P F\T\) by \code{gemm} plus
+\code{gemmtr} and by Cholesky of \(P\), \code{trmm} and \code{syrk} uses a
+constant \(n_0 = 2400\) fitted to OpenBLAS on an Apple M5
+(\code{choleskySandwich}, \srcref{lib/UlmLamPasses.cpp}{1592}{1724}). The
+README lists a measured cost model, in the spirit of ATLAS, as open work.
+
+% ---------------------------------------------------------------------------
+\section{Several plans and a run-time choice}
+\label{sec:orders-runtime}
+
+\begin{steps}
+\item[Input] \(QK\T V\) with \(Q,K\in\R^{n\times d}\), \(V\in\R^{n\times e}\), all sizes known only at run time (\code{test/select/runtime_order.mlir}).
+\item[Representation] one n-ary \code{ulm_lam.mul}; sizes as \code{index} parameters via \code{ulm_lam.dims}.
+\item[Rule] run the dynamic program for every assignment of \(\{10, 1000\}\) to the (at most four) distinct sizes; collect the distinct optimal plans; emit their costs as \code{index} arithmetic and select with \code{scf.if}.
+\item[Output] two plans, chosen at run time (below).
+\item[Theory] symbolic parameters, \FG{6.1}{Symbolic compile-time parameters}; multi-versioning as a residual of partial evaluation, \FG{8.5}{Partial evaluation and the Futamura projections}; cost models, \FG{10.5}{Auto-tuning and learned cost models}.
+\end{steps}
+
+The output after selection and \code{canonicalize}
+(\code{outputs/runtime_order.mlir}; \code{\%arg0} \(=n\), \code{\%arg1}
+\(=d\), \code{\%arg2} \(=e\)):
+
+\begin{lstlisting}
+%0 = arith.muli %arg0, %arg1 : index      // n d
+%1 = arith.muli %0, %arg0 : index         // n d n
+%2 = arith.muli %1, %c2 : index           // 2 n d n        : Q K^T
+%3 = arith.muli %arg0, %arg0 : index
+%4 = arith.muli %3, %arg2 : index
+%5 = arith.muli %4, %c2 : index           // 2 n n e        : (Q K^T) V
+%6 = arith.addi %2, %5 : index            // cost of plan 0
+...                                       // 2 d n e + 2 n d e: cost of plan 1
+%13 = arith.addi %9, %12 : index
+%14 = tensor.empty(%arg0, %arg2) : tensor<?x?xf64>
+%15 = arith.cmpi ule, %6, %13 : index
+%16 = scf.if %15 -> (tensor<?x?xf64>) {
+  %17 = tensor.empty(%arg0, %arg0) : tensor<?x?xf64>
+  %18 = ulm_lamk.gemm trans_a(none) trans_b(trans) ... ins(%arg3, %arg4 ...) outs(%17 ...)   // Q K^T
+  %19 = ulm_lamk.gemm trans_a(none) trans_b(none) ... ins(%18, %arg5 ...) outs(%14 ...)    // (Q K^T) V
+  scf.yield %19 : tensor<?x?xf64>
+} else {
+  %17 = tensor.empty(%arg1, %arg2) : tensor<?x?xf64>
+  %18 = ulm_lamk.gemm trans_a(trans) trans_b(none) ... ins(%arg4, %arg5 ...) outs(%17 ...)  // K^T V
+  %19 = ulm_lamk.gemm trans_a(none) trans_b(none) ... ins(%arg3, %18 ...) outs(%14 ...)    // Q (K^T V)
+  scf.yield %19 : tensor<?x?xf64>
+}
+\end{lstlisting}
+
+Both branches write into the same destination \code{\%14}, so that
+bufferization gives the \code{scf.if} result one buffer instead of one per
+branch (\srcref{lib/UlmLamPasses.cpp}{1847}{1907}). The README measures the
+effect: for \(n=4096\), \(d=64\), the formula as written in Julia,
+\((QK\T)V\), takes 43 times as long as ulm.lam, which picks \(Q(K\T V)\).
+
+\paragraph{How the plans are found} \code{plansOf}
+(\srcref{lib/UlmLamPasses.cpp}{1495}{1528}) samples the corners of the size
+space, \(\{10, 1000\}^s\) for \(s \le 4\) distinct sizes, and keeps each
+distinct optimal plan. For the chain above two plans suffice for all sizes,
+but in general a plan that is optimal only in the interior of the size
+space would be missed, and with more than four distinct sizes only the
+nominal plan is generated.
+
+\begin{theory}[ (\FGs{6.1}, \FGchs{6})]
+The costs are polynomials in symbolic sizes. Deciding at compile time which
+plan is cheapest for all admissible sizes is a question about the sign of a
+polynomial difference over a region: the kind of symbolic reasoning of
+\FGch{6}{Constraints and Symbolic Reasoning}, with nonlinear (polynomial)
+constraints that Presburger arithmetic does not cover. ulm.lam sidesteps the
+decision: it samples to find candidate plans and defers the comparison to
+run time, when the sizes are numbers. The values are unknown at compile
+time but become known before the computation starts, which is the binding
+time situation of \FG{6.1}{Symbolic compile-time parameters}.
+\end{theory}
+
+\begin{theory}[ (\FGs{8.5}, \FGs{9.2}, \FGs{10.5})]
+A function with several specialized versions and a dispatch on run-time
+values is a residual program in the sense of
+\FG{8.5}{Partial evaluation and the Futamura projections}: everything that
+does not depend on the sizes was decided at compile time. Unlike a JIT
+(just-in-time) compiler with speculation, \FG{9.2}{JIT compilation:
+tiering, OSR, deoptimization}, nothing is guessed and nothing needs to be
+undone; every version is correct for every size. And the cost model is an
+analytical one, not learned or measured, \FG{10.5}{Auto-tuning and learned
+cost models}.
+\end{theory}
+
+% ---------------------------------------------------------------------------
+\section{Decisions that depend on a trip count}
+\label{sec:orders-hoist}
+
+In a loop, \(b_i = S\inv H\T R\inv y_i\) can be evaluated as written in
+every step, or the operator \(P = S\inv H\T R\inv\) can be formed once before
+the loop and applied with one \code{gemv} per step. The second pays off if
+the loop runs often enough:
+\[
+\mathrm{cost}(P) + \mathrm{trips}\cdot 2\,\mathrm{rows}(P)\,\mathrm{cols}(P)
+\;<\; \mathrm{trips}\cdot\mathrm{cost}(\text{step}).
+\]
+The trip count is usually known only at run time, so \code{hoistOperator}
+(\srcref{lib/UlmLamPasses.cpp}{1909}{2064}) emits the condition and, if it
+holds, \(P\) before the loop, and both variants in the loop under the same
+condition. Matrix-vector flops are weighted ten times matrix-matrix flops
+(\code{kLevel2 = 10}) in this decision, a second crude correction of the flop model for
+memory-bound kernels. The Kalman-filter examples
+(\code{examples/kalman/}) exercise it.
+
+% ---------------------------------------------------------------------------
+\section{Specialization by element type, not by size}
+\label{sec:orders-spec}
+
+One compiled library serves all sizes. What the Julia frontend does
+specialize is the element type: a call with \code{Float32} arrays compiles
+a second library from the same traced text with \code{f64} replaced by
+\code{f32} (\srcref{julia/UlmLam/src/runtime.jl}{262}{264}). Libraries are
+cached under a hash of the program text, the compiler's modification time,
+the backend and the flags.
+
+\begin{theory}[ (\FGs{8.7})]
+Compiling one copy per element type and choosing it at the call by the
+argument types is monomorphization, \FG{8.7}{Monomorphization vs dictionary
+passing}. Sizes are handled the other way: one generic code with run-time
+size parameters, plus the run-time plan selection of
+\cref{sec:orders-runtime} where the order depends on them.
+\end{theory}

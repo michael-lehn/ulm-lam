@@ -1,0 +1,179 @@
+% ch9-summary.tex
+\chapter{Summary and Navigation}
+\label{ch:summary}
+
+This chapter answers the six questions the companion set out to answer,
+each with pointers to the sections that show it, and ends with the
+navigation table from ulm.lam examples to the Field Guide.
+
+% ---------------------------------------------------------------------------
+\section{Six answers}
+\label{sec:summary-answers}
+
+\qparagraph{1. Which guarantees do ulm.lam's types express?} Static sizes
+(checked, \cref{sec:shapes-static}); the element type and rank (checked);
+a conjunction of up to fifteen matrix facts in the tensor encoding, closed
+under implication, with no contradictions and consistent with a static
+shape (checked, \cref{sec:infra-props}); and, inside a function, that every
+fact on a result follows from the facts on the operands by ulm.lam's rules
+(checked, \cref{sec:infra-compat}). The facts themselves are guarantees
+only relative to the declarations at the parameters and in \code{assume}.
+
+\qparagraph{2. Which facts are assumed, verified, inferred or checked at run
+time?} Assumed: the properties of parameters and of \code{assume}, and full
+\emph{column} rank for dynamic sizes (\cref{sec:facts-declared},
+\cref{sec:gls-infer}). Verified: shapes, contradictions, result types
+(\cref{ch:infra}). Inferred: result properties (\cref{sec:facts-inferred}).
+Established by analysis: sizes of dynamic dimensions, reuse under
+dominance, in-place writes (\cref{sec:facts-analysis}). Checked at run
+time: array sizes (Julia/Python runtime), positive definiteness
+(\code{potrf}), exact singularity (\code{getrf}), workspace size
+(\cref{sec:facts-runtime}). Not established: symmetry of inputs, \(n\ge m\),
+zeros in the unreferenced triangle, conditioning.
+
+\qparagraph{3. What does MLIR provide, and what does ulm.lam implement?}
+MLIR: the tensor and memref types with an encoding slot, ODS, verifier
+hooks, \code{InferTypeOpInterface}, the effect interfaces and generic passes
+(CSE, DCE, LICM, canonicalization), pattern rewriting, dialect conversion,
+One-Shot Bufferize, EmitC. ulm.lam: the property attribute and its meaning,
+the verifiers, the inference rules, the effect declarations, the normal
+form, kernel selection with its cost model, the DPS kernel ops and their
+bufferization models, the workspace and \code{info} passes, the lowering
+patterns, and the frontends (\cref{tab:infra-who}).
+
+\qparagraph{4. How do those facts enable transformations?} \code{symmetric}
+removes transposes (\cref{sec:gls-normal}). \code{spd} selects Cholesky
+instead of LU, and with it \code{syrk} instead of \code{gemm} and two
+triangular solves instead of an LU solve (\cref{tab:variants}).
+\code{full_rank} turns \(X\T M\inv X\) from SPSD into SPD and so decides
+the factorization of \(S\). Triangularity removes a factorization. Purity
+lets LICM hoist an inverse out of a loop (\cref{sec:effects-licm}).
+Read-only intents decide copies (\cref{sec:storage-intent}).
+
+\qparagraph{5. How do value semantics, effects, aliasing and bufferization
+interact?} All optimization happens on tensors, where values have no
+identity and no aliasing, and effects are absent: uses can be shared,
+pure ops moved and dead ones removed, including a dead factorization with
+its check (\cref{ch:values}). DPS kernels name the value they overwrite;
+One-Shot Bufferize turns each into an in-place write or a copy, honoring
+read-only parameters (\cref{ch:storage}). After bufferization the kernels
+have read/write effects on one default resource, no further optimization
+needs alias information, and the workspace pass places temporaries at
+disjoint offsets. Failure travels as a value (\code{info}) until it becomes
+control flow (\cref{sec:effects-info}).
+
+\qparagraph{6. Where is the corresponding theory?} In the table below.
+
+% ---------------------------------------------------------------------------
+\section{Navigation table}
+\label{sec:summary-nav}
+
+\subsection*{From Julia to typed IR}
+{\small
+\begin{tabularx}{\linewidth}{@{}P{3.6cm}P{4.0cm}LP{2.0cm}@{}}
+\toprule
+\textbf{ulm.lam example} & \textbf{MLIR mechanism} & \textbf{Theoretical concept} & \textbf{Field Guide} \\
+\midrule
+\code{@lam} traced into \code{ulm_lam} ops (\cref{sec:gls-trace}) & textual IR from overloaded operators; \code{func.func} & tracing front end of an embedded DSL & \FGs{3.7} \\
+Julia \code{if} and loops disappear at trace time (\cref{sec:gls-trace}) & --- & binding time, staging & \FGs{8.6} \\
+\bottomrule
+\end{tabularx}
+}
+
+\subsection*{Facts: refinement, inference, assumptions, checks}
+{\small
+\begin{tabularx}{\linewidth}{@{}P{3.6cm}P{4.0cm}LP{2.0cm}@{}}
+\toprule
+\textbf{ulm.lam example} & \textbf{MLIR mechanism} & \textbf{Theoretical concept} & \textbf{Field Guide} \\
+\midrule
+\code{tensor<?x?xf64, #ulm_lam.props<spd>>} (\cref{sec:gls-types}) & attribute in the builtin tensor encoding; \code{VerifiableTensorEncoding} & refinement type & \FGs{1.7} \\
+\code{spd} on a \(3\times4\) tensor rejected (\cref{sec:infra-props}) & \code{verifyEncoding} & well-formedness of refinements & \FGs{1.7} \\
+result declared \code{spd} rejected without \code{full_rank} (\cref{sec:infra-compat}) & \code{InferTypeOpInterface}, \code{isCompatibleReturnTypes} & subtyping by implication; checking mode & \FGs{1.7}, \FGs{1.10} \\
+\(X\T M\inv X\) inferred SPD (\cref{sec:gls-infer}) & \code{inferReturnTypes}, pass \code{ulm-lam-infer-properties} & type synthesis & \FGs{1.10} \\
+property sets, closure, ``absence = unknown'' (\cref{sec:facts-lattice}) & bit-set attribute, \code{closure} & lattice, abstract domain, transfer functions & \FGs{5.1}, \FGs{5.2} \\
+loop-carried facts re-declared with \code{assume} (\cref{sec:facts-lattice}) & block arguments keep their types & fixpoint over loops (not implemented) & \FGs{5.1} \\
+\code{assume(S, :spd)} (\cref{sec:facts-declared}) & \code{ulm_lam.assume}, no inference hook & trusted cast into a refinement & \FGs{1.7} \\
+\code{potrf} returns \code{info} (\cref{sec:effects-info}) & result value, then \code{scf.if} from \code{ulm-lam-info} & run-time check; status passing vs exceptions & \FGs{1.6} \\
+\bottomrule
+\end{tabularx}
+}
+
+\subsection*{Dimensions}
+{\small
+\begin{tabularx}{\linewidth}{@{}P{3.6cm}P{4.0cm}LP{2.0cm}@{}}
+\toprule
+\textbf{ulm.lam example} & \textbf{MLIR mechanism} & \textbf{Theoretical concept} & \textbf{Field Guide} \\
+\midrule
+inner sizes of a product (\cref{sec:shapes-static}) & op verifiers on static shapes & sizes in types & \FGs{1.8} \\
+\code{Mat(:n, :m)} and \code{ulm_lam.dims} (\cref{sec:shapes-dims}) & \code{index} parameters, argument attribute, \code{dimOf} & named symbolic dimensions; indexed types (by analogy) & \FGs{10.4}, \FGs{1.8}, \FGs{6.1} \\
+sizes bound at the call (\cref{sec:shapes-runtime}) & --- (Julia runtime) & run-time shape check & \FGs{10.4} \\
+\bottomrule
+\end{tabularx}
+}
+
+\subsection*{Values, uses and effects}
+{\small
+\begin{tabularx}{\linewidth}{@{}P{3.6cm}P{4.0cm}LP{2.0cm}@{}}
+\toprule
+\textbf{ulm.lam example} & \textbf{MLIR mechanism} & \textbf{Theoretical concept} & \textbf{Field Guide} \\
+\midrule
+\(W\) used twice, stored once (\cref{sec:values-uses}) & SSA use lists; \code{hasOneUse} in patterns & contraction and weakening; value semantics & \FGs{1.1}, \FGs{2.7} \\
+\code{inverse} hoisted out of a loop (\cref{sec:effects-licm}) & \code{Pure}, LICM & effects decide code motion & \FGs{1.6}, \FGs{3.2} \\
+factorization fails in a zero-trip loop (\cref{sec:effects-speculation}) & \code{AlwaysSpeculatable} (part of \code{Pure}) & speculation; honesty of effect declarations & \FGs{1.6}, \FGs{3.2} \\
+unused tensor \code{potrf} erased (\cref{sec:effects}) & \code{MemoryEffectOpInterface}, DCE & effect-free ops are removable & \FGs{1.6} \\
+\code{ulm_lamk.call} never moved (\cref{sec:effects}) & read/write of the default resource & worst-case effects of unknown calls & \FGs{1.6} \\
+\code{scf.for}, \code{scf.if} bodies (\cref{sec:values-regions}) & MLIR regions & structured control flow (not region memory) & \FGs{2.6}, \FGs{1.5} \\
+\bottomrule
+\end{tabularx}
+}
+
+\subsection*{Storage}
+{\small
+\begin{tabularx}{\linewidth}{@{}P{3.6cm}P{4.0cm}LP{2.0cm}@{}}
+\toprule
+\textbf{ulm.lam example} & \textbf{MLIR mechanism} & \textbf{Theoretical concept} & \textbf{Field Guide} \\
+\midrule
+\code{trsm ... outs(\%B)} on tensors and memrefs (\cref{sec:storage-dps}) & \code{DestinationStyleOpInterface}, \code{DstBufferizableOpInterfaceExternalModel} & destination-passing style & \FGs{10.3} \\
+copies of \(M\), \(X\), \(y\); none with \code{InOut} (\cref{sec:storage-intent}) & One-Shot Bufferize, \code{bufferization.writable} & in-place condition; uniqueness (by analogy) & \FGs{10.3}, \FGs{1.4} \\
+loop state in one buffer (\cref{sec:storage-loops}) & \code{materialize_in_destination} & bufferization of loop-carried values & \FGs{10.3} \\
+one workspace, 64-byte aligned views (\cref{sec:storage-workspace}) & pass \code{ulm-lam-workspace}, \code{memref.view} & arena allocation; buffer assignment & \FGs{10.3}, \FGs{4.1} \\
+no overlap between kernel operands (\cref{sec:storage-alias}) & disjoint views; effects on \code{DefaultResource} & alias analysis (avoided) & \FGs{5.5}, \FGs{2.7} \\
+properties dropped after selection (\cref{sec:storage-lost}) & \code{ulm-lam-strip-properties} & progressive lowering & \FGs{3.3} \\
+\bottomrule
+\end{tabularx}
+}
+
+\subsection*{Rewriting, kernels and floating point}
+{\small
+\begin{tabularx}{\linewidth}{@{}P{3.6cm}P{4.0cm}LP{2.0cm}@{}}
+\toprule
+\textbf{ulm.lam example} & \textbf{MLIR mechanism} & \textbf{Theoretical concept} & \textbf{Field Guide} \\
+\midrule
+normal form (\cref{sec:kernels-normal}) & \code{OpRewritePattern}, greedy driver & rewriting to a fixpoint; termination & \FGs{3.4}, \FGs{3.5} \\
+\(X\T M\inv X\) as \code{trsm} + \code{syrk} (\cref{sec:gls-select}) & custom pass, dynamic program & instruction selection by tiling; matrix chain & \FGs{4.5} \\
+\(W\) reused transposed (\cref{sec:kernels-select}) & memo table, dominance & CSE up to transposition; DAG covering & \FGs{4.5} \\
+C++ from memrefs (\cref{sec:kernels-emitc}) & \code{ConversionTarget}, \code{TypeConverter}, \code{applyPartialConversion} & dialect conversion; legalization, ABI & \FGs{3.3}, \FGs{4.6} \\
+last-bit differences; NaN-safe accumulation (\cref{sec:kernels-fp}) & --- & real vs floating-point semantics & --- \\
+Cholesky fails for nearly rank-deficient \(X\) (\cref{sec:kernels-fp}) & --- & conditioning of normal equations & --- \\
+\bottomrule
+\end{tabularx}
+}
+
+\subsection*{Evaluation order and specialization}
+{\small
+\begin{tabularx}{\linewidth}{@{}P{3.6cm}P{4.0cm}LP{2.0cm}@{}}
+\toprule
+\textbf{ulm.lam example} & \textbf{MLIR mechanism} & \textbf{Theoretical concept} & \textbf{Field Guide} \\
+\midrule
+flop counts as costs (\cref{sec:orders-cost}) & inline formulas; \code{KernelCostOpInterface} unused & analytical cost model & \FGs{10.5} \\
+\((QK\T)V\) or \(Q(K\T V)\) at run time (\cref{sec:orders-runtime}) & \code{scf.if} on \code{index} cost polynomials & symbolic parameters; residual program & \FGs{6.1}, \FGs{8.5} \\
+operator hoisted if the trip count pays (\cref{sec:orders-hoist}) & \code{scf.if} before and in the loop & run-time decision on a symbolic parameter & \FGs{6.1} \\
+\code{Float32} library (\cref{sec:orders-spec}) & same IR text with \code{f32} & monomorphization & \FGs{8.7} \\
+\bottomrule
+\end{tabularx}
+}
+
+
+The entries marked --- in the last column have no entry of their own in
+the Field Guide; floating-point behavior is covered by the numerical
+literature~\cite{higham}.

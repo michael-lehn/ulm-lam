@@ -1,0 +1,88 @@
+==== gls_nofr
+gls_nofr(X::n×m, M::n×n spd, y::n)
+  potrf    L1 ← chol(M)                      M = L1 L1ᵀ, Cholesky
+  copy     T1 ← X
+  trsm     T1 ← L1⁻¹ T1
+  syrk     T2 ← T1ᵀ T1                       one triangle only
+  symm.    T2 ← sym(T2)                      copy one triangle to the other
+  getrf    LU1 ← lu(T2)                      P T2 = L U, LU
+  trsv     T3 ← L1⁻¹ y
+  gemv     T4 ← T1ᵀ T3
+  getrs    T4 ← LU1⁻¹ T4
+  return T4
+if a factorisation fails, the call throws InfoError with
+  info 1:  Cholesky factorisation of M: not positive definite
+  info 2:  LU factorisation of a computed matrix: singular
+
+result: [1.2739726027397262, 0.9452054794520547]
+==== gls_nospd
+gls_nospd(X::n×m full_rank, M::n×n, y::n)
+  getrf    LU1 ← lu(M)                       P M = L U, LU
+  getrs    T1 ← LU1⁻ᵀ X
+  gemm     T2 ← T1ᵀ X
+  getrf    LU2 ← lu(T2)                      P T2 = L U, LU
+  gemv     T3 ← T1ᵀ y
+  getrs    T3 ← LU2⁻¹ T3
+  return T3
+if a factorisation fails, the call throws InfoError with
+  info 1:  LU factorisation of M: singular
+  info 2:  LU factorisation of a computed matrix: singular
+
+result: [1.2739726027397262, 0.9452054794520547]
+==== gls_sym
+gls_sym(X::n×m full_rank, M::n×n symmetric, y::n)
+  getrf    LU1 ← lu(M)                       P M = L U, LU
+  getrs    T1 ← LU1⁻ᵀ X
+  gemmtr   T2 ← T1ᵀ X                        symmetric: one triangle only
+  symm.    T2 ← sym(T2)                      copy one triangle to the other
+  getrf    LU2 ← lu(T2)                      P T2 = L U, LU
+  gemv     T3 ← T1ᵀ y
+  getrs    T3 ← LU2⁻¹ T3
+  return T3
+if a factorisation fails, the call throws InfoError with
+  info 1:  LU factorisation of M: singular
+  info 2:  LU factorisation of a computed matrix: singular
+
+result: [1.2739726027397262, 0.9452054794520547]
+==== gls_assume
+gls_assume(X::n×m, M::n×n spd, y::n)
+  potrf    L1 ← chol(M)                      M = L1 L1ᵀ, Cholesky
+  copy     T1 ← X
+  trsm     T1 ← L1⁻¹ T1
+  syrk     T2 ← T1ᵀ T1                       one triangle only
+  potrf    L2 ← chol(T2)                     T2 = L2 L2ᵀ, Cholesky
+  trsv     T3 ← L1⁻¹ y
+  gemv     T4 ← T1ᵀ T3
+  trsv     T4 ← L2⁻¹ T4
+  trsv     T4 ← L2⁻ᵀ T4
+  return T4
+if a factorisation fails, the call throws InfoError with
+  info 1:  Cholesky factorisation of M: not positive definite
+  info 2:  Cholesky factorisation of a computed matrix: not positive definite
+
+result: [1.2739726027397262, 0.9452054794520546]
+==== iterate
+iterate(M::n×n spd, x0::n, steps::Index)
+  potrf    L1 ← chol(M)                      M = L1 L1ᵀ, Cholesky
+  copy     x ← x0                            the loop's state, in place
+  for i = 0:steps-1
+    trsv     x ← L1⁻¹ x
+    trsv     x ← L1⁻ᵀ x
+  return x
+if a factorisation fails, the call throws InfoError with
+  info 1:  Cholesky factorisation of M: not positive definite
+
+result: [0.03176695108413696, -0.030506253242492676, 0.026294946670532227, 0.006547451019287109]  reference: [0.03176695108413696, -0.030506253242492676, 0.026294946670532227, 0.006547451019287109]
+==== shared
+shared(A::n×k, B::k×n, C::n×n)
+  gemm     T1 ← A B
+  gemm     T2 ← T1 C
+  copy     T3 ← T1
+  axpy     T3 ← T3 + C
+  return T2, T3
+
+ok: true true
+==== Mns2 (lower triangle in Julia changed, M declared spd)
+ulm.lam: [1.2739726027397262, 0.9452054794520546]
+Julia with Symmetric(Mns, :U): [1.2739726027397262, 0.9452054794520547]
+Julia with Mns as given:       [1.2726368159203976, 0.9552238805970151]
