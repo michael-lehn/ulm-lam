@@ -37,7 +37,7 @@ commands in \cref{app:repro} (files in \code{outputs/gls/}).
     \code{inverse}\\\scriptsize\code{1-traced.mlir}};
   \node[rep,below=of tr] (no) {\textbf{ulm\_lam}, normal form\\\scriptsize\code{2-normal.mlir}};
   \node[rep,below=of no] (in) {\textbf{ulm\_lam}, properties inferred\\\scriptsize\code{3-inferred.mlir}};
-  \node[rep,below=of in] (se) {\textbf{ulm\_lamk} on tensors (DPS):
+  \node[rep,below=of in] (se) {\textbf{ulm\_lamk} on tensors, DPS (destination-passing style):
     \code{potrf}, \code{trsm}, \code{syrk}, \ldots\\\scriptsize\code{5-selected.mlir}};
   \node[rep,below=of se] (bu) {\textbf{ulm\_lamk} on memrefs, workspace, \code{info}\\\scriptsize\code{6-bufferized.mlir}};
   \node[rep,below=of bu] (cc) {\textbf{EmitC} \(\to\) \textbf{C++} calling BLAS/LAPACK\\\scriptsize\code{7-gls.cpp}, compiled to a shared library};
@@ -133,7 +133,7 @@ program into a shared library (about half a second), and calls it.
 \item[Representation] each Julia operation on a \code{LamValue} appends one line of MLIR text.
 \item[Rule] operator overloading: \code{*} emits \code{ulm_lam.mul}, \code{'} emits \code{ulm_lam.transpose}, \code{inv} emits \code{ulm_lam.inverse}.
 \item[Output] a \code{func.func} in the \code{ulm_lam} dialect (\texttt{1-traced.mlir}).
-\item[Theory] a tracing front end of an embedded DSL (domain-specific language), \FG{3.7}{Embedded DSLs and tracing/AST-capturing front ends}.
+\item[Theory] a tracing front end of an embedded DSL (domain-specific language), \FG{3.7}{Embedded DSLs and tracing/AST-capturing front ends} (AST: abstract syntax tree).
 \end{steps}
 
 The overloaded product (\srcref{julia/UlmLam/src/frontend.jl}{222}{231})
@@ -235,7 +235,7 @@ information is.
 \midrule
 element type \code{f64} & tensor element type & \Odecl{} by the call
   (Float64 arrays; Float32 arrays compile an \code{f32} version) \\
-rank 2 & tensor rank; ODS constraint \code{2DTensorOf<[F32, F64]>} & \Over{}
+rank 2 & tensor rank; ODS (Operation Definition Specification) constraint \code{2DTensorOf<[F32, F64]>} & \Over{}
   by the generated operand checks \\
 static sizes & tensor shape & \Over{} by op verifiers when static \\
 which run-time size & \code{index} parameters and the argument attribute
@@ -291,7 +291,7 @@ relate a matrix to other values).
 \item[Representation] the same ops; patterns are C++ classes derived from \code{OpRewritePattern}.
 \item[Rule] fold \(A\T{}\T \to A\); fold \(A\T \to A\) when \(A\) is symmetric; flatten nested products into one n-ary \code{ulm_lam.mul} (if the inner product has no other use).
 \item[Output] \texttt{2-normal.mlir}, below.
-\item[Theory] greedy pattern rewriting to a fixpoint, \FG{3.4}{Pattern rewriting: greedy drivers, canonicalization, PDL}; termination, \FG{3.5}{Term rewriting theory: confluence, termination, strategies}.
+\item[Theory] greedy pattern rewriting to a fixpoint, \FG{3.4}{Pattern rewriting: greedy drivers, canonicalization, PDL} (PDL: Pattern Descriptor Language); termination, \FG{3.5}{Term rewriting theory: confluence, termination, strategies}.
 \end{steps}
 
 The pass \code{ulm-lam-normalize} collects the canonicalization patterns of
@@ -428,7 +428,7 @@ Computing result types bottom-up from operand types is type
 \emph{synthesis} in the sense of bidirectional typing,
 \FG{1.10}{Type inference beyond Hindley–Milner: bidirectional and
 constraint-based}. There are no type variables and no unification: one walk
-in program order suffices because SSA values are defined before they are
+in program order suffices because SSA (static single assignment) values are defined before they are
 used and the IR here has no cycles. The property sets with
 ``absence means unknown'' form a lattice ordered by implication, and each
 op's rule is a sound transfer function on it: \FG{5.1}{Lattices, monotone
@@ -444,9 +444,9 @@ interpretation: Galois connections, widening, narrowing}.
 \begin{steps}
 \item[Input] the inferred IR: two products with inverses, with properties on every value.
 \item[Representation] each product becomes a sequence of \emph{leaves}: matrices (possibly transposed) and triangular solves.
-\item[Rule] factorize each inverted matrix once, by its properties; parenthesize each product by a dynamic program over kernels and flop counts; reuse a sub-product computed earlier, also transposed.
+\item[Rule] factorize each inverted matrix once, by its properties; parenthesize each product by a dynamic program over kernels and flop (floating-point operation) counts; reuse a sub-product computed earlier, also transposed.
 \item[Output] \code{ulm_lamk} kernels on tensors (\texttt{5-selected.mlir}).
-\item[Theory] instruction selection by tiling with dynamic programming, \FG{4.5}{Instruction selection: tree/DAG tiling, SelectionDAG vs GlobalISel}; progressive lowering, \FG{3.3}{Progressive lowering and the dialect conversion framework}.
+\item[Theory] instruction selection by tiling with dynamic programming, \FG{4.5}{Instruction selection: tree/DAG tiling, SelectionDAG vs GlobalISel} (DAG: directed acyclic graph); progressive lowering, \FG{3.3}{Progressive lowering and the dialect conversion framework}.
 \end{steps}
 
 The pass \code{ulm-lam-select-kernels} (class \code{Selector},
@@ -456,7 +456,7 @@ The pass \code{ulm-lam-select-kernels} (class \code{Selector},
 factorized once, directly after its definition (\code{factorise},
 \srcref{lib/UlmLamPasses.cpp}{855}{903}). The choice is read off the type:
 triangular: no factorization; \code{spd}: Cholesky (\code{potrf}, LAPACK's
-Cholesky factorization of a positive definite matrix); otherwise: LU
+Cholesky factorization of a positive definite matrix); otherwise: LU (lower–upper)
 factorization with partial pivoting (\code{getrf}). Results are memoized per
 matrix, so \code{\%1} and \code{\%4}, both \code{inverse \%arg3}, share one
 \code{potrf}. An inverse becomes solves: \(M\inv = L_1\invT L_1\inv\).
@@ -800,11 +800,11 @@ has full rank (\cref{sec:kernels-fp}).
 \toprule
 \textbf{Step} & \textbf{MLIR mechanism} & \textbf{Theory} & \textbf{FG} \\
 \midrule
-tracing & text emitted by overloaded Julia operators & tracing eDSL & \FGs{3.7} \\
+tracing & text emitted by overloaded Julia operators & tracing embedded DSL & \FGs{3.7} \\
 facts on matrices & builtin tensor type with an attribute in its encoding & refinement types & \FGs{1.7} \\
 normal form & \code{OpRewritePattern}s, greedy driver & rewriting, termination & \FGs{3.4}, \FGs{3.5} \\
 \(X\T M\inv X\) is SPD & \code{InferTypeOpInterface} per op & type inference; abstract interpretation & \FGs{1.10}, \FGs{5.2} \\
-kernel selection & custom pass, DP over leaves & instruction selection & \FGs{4.5}, \FGs{3.3} \\
+kernel selection & custom pass, dynamic program over leaves & instruction selection & \FGs{4.5}, \FGs{3.3} \\
 copies, in place & DPS ops, One-Shot Bufferize & value vs reference semantics; uniqueness & \FGs{10.3}, \FGs{2.7}, \FGs{1.4} \\
 failed factorization & \code{info} results, \code{scf.if} & run-time check & --- \\
 C++ & dialect conversion to EmitC & lowering, legalization & \FGs{3.3}, \FGs{4.6} \\

@@ -32,7 +32,8 @@ measured correction: the choice between \(F P F\T\) by \code{gemm} plus
 \code{gemmtr} and by Cholesky of \(P\), \code{trmm} and \code{syrk} uses a
 constant \(n_0 = 2400\) fitted to OpenBLAS on an Apple M5
 (\code{choleskySandwich}, \srcref{lib/UlmLamPasses.cpp}{1592}{1724}). The
-README lists a measured cost model, in the spirit of ATLAS, as open work.
+README lists a measured cost model, in the spirit of ATLAS (Automatically Tuned Linear Algebra
+Software), as open work.
 
 % ---------------------------------------------------------------------------
 \section{Several plans and a run-time choice}
@@ -107,7 +108,7 @@ values is a residual program in the sense of
 \FG{8.5}{Partial evaluation and the Futamura projections}: everything that
 does not depend on the sizes was decided at compile time. Unlike a JIT
 (just-in-time) compiler with speculation, \FG{9.2}{JIT compilation:
-tiering, OSR, deoptimization}, nothing is guessed and nothing needs to be
+tiering, OSR, deoptimization} (OSR: on-stack replacement), nothing is guessed and nothing needs to be
 undone; every version is correct for every size. And the cost model is an
 analytical one, not learned or measured, \FG{10.5}{Auto-tuning and learned
 cost models}.

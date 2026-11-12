@@ -3,6 +3,8 @@
 \phantomsection\addcontentsline{toc}{chapter}{References}
 \markboth{References}{References}
 
+Links of the form \texttt{doi:} are DOIs (Digital Object Identifiers).
+
 \paragraph{The two documents this companion connects}
 \begin{itemize}
 \item \emph{Modern Compiler Concepts: A Field Guide} (\texttt{\FGfile}).
@@ -35,15 +37,17 @@
 
 \begingroup
 \renewcommand{\chapter}[2]{}% the list goes under the heading above
+\renewcommand{\bibname}{References}
 \begin{thebibliography}{99}
 \bibitem{mlir} C.~Lattner, M.~Amini, U.~Bondhugula, A.~Cohen, A.~Davis,
   J.~Pienaar, R.~Riddle, T.~Shpeisman, N.~Vasilache, O.~Zinenko.
   \emph{MLIR: Scaling Compiler Infrastructure for Domain Specific
-  Computation}. CGO 2021.
+  Computation}. CGO (International Symposium on Code Generation and
+  Optimization) 2021.
   \href{https://doi.org/10.1109/CGO51591.2021.9370308}{doi:10.1109/CGO51591.2021.9370308}
 
 \bibitem{linnea} H.~Barthels, C.~Psarras, P.~Bientinesi. \emph{Linnea:
-  Automatic Generation of Efficient Linear Algebra Programs}. ACM
+  Automatic Generation of Efficient Linear Algebra Programs}. ACM (Association for Computing Machinery)
   Transactions on Mathematical Software 47(3), 2021.
   \href{https://doi.org/10.1145/3446632}{doi:10.1145/3446632}
 
@@ -53,11 +57,12 @@
 
 \bibitem{aho-ganapathi-tjiang} A.~V.~Aho, M.~Ganapathi, S.~W.~K.~Tjiang.
   \emph{Code Generation Using Tree Matching and Dynamic Programming}. ACM
-  TOPLAS 11(4), 1989.
+  TOPLAS (Transactions on Programming Languages and Systems) 11(4), 1989.
   \href{https://doi.org/10.1145/69558.75700}{doi:10.1145/69558.75700}
 
 \bibitem{refinement} T.~Freeman, F.~Pfenning. \emph{Refinement Types for
-  ML}. PLDI 1991.
+  ML} (ML: Meta Language). PLDI (Conference on Programming Language Design
+  and Implementation) 1991.
   \href{https://doi.org/10.1145/113445.113468}{doi:10.1145/113445.113468}
 
 \bibitem{liquid} P.~M.~Rondon, M.~Kawaguchi, R.~Jhala. \emph{Liquid
@@ -69,7 +74,7 @@
   \href{https://doi.org/10.1145/277650.277732}{doi:10.1145/277650.277732}
 
 \bibitem{effects} J.~M.~Lucassen, D.~K.~Gifford. \emph{Polymorphic Effect
-  Systems}. POPL 1988.
+  Systems}. POPL (Symposium on Principles of Programming Languages) 1988.
   \href{https://doi.org/10.1145/73560.73564}{doi:10.1145/73560.73564}
 
 \bibitem{cousot} P.~Cousot, R.~Cousot. \emph{Abstract Interpretation: A
@@ -79,11 +84,12 @@
 
 \bibitem{dps} A.~Shaikhha, A.~Fitzgibbon, S.~Peyton Jones,
   D.~Vytiniotis. \emph{Destination-Passing Style for Efficient Memory
-  Management}. FHPC 2017.
+  Management}. FHPC (Workshop on Functional High-Performance Computing)
+  2017.
   \href{https://doi.org/10.1145/3122948.3122949}{doi:10.1145/3122948.3122949}
 
 \bibitem{higham} N.~J.~Higham. \emph{Accuracy and Stability of Numerical
-  Algorithms}, 2nd ed. SIAM, 2002.
+  Algorithms}, 2nd ed. SIAM (Society for Industrial and Applied Mathematics), 2002.
   \href{https://doi.org/10.1137/1.9780898718027}{doi:10.1137/1.9780898718027}
   (Chapter 20: the least squares problem, normal equations versus QR).
 
@@ -92,7 +98,7 @@
   \href{https://doi.org/10.1137/1.9780898719604}{doi:10.1137/1.9780898719604}
 
 \bibitem{blas3} J.~J.~Dongarra, J.~Du~Croz, S.~Hammarling, I.~S.~Duff.
-  \emph{A Set of Level 3 Basic Linear Algebra Subprograms}. ACM TOMS 16(1),
+  \emph{A Set of Level 3 Basic Linear Algebra Subprograms}. ACM Transactions on Mathematical Software 16(1),
   1990. \href{https://doi.org/10.1145/77626.79170}{doi:10.1145/77626.79170}
 \end{thebibliography}
 \endgroup

@@ -2,7 +2,7 @@
 --
 -- \code{...} gets its argument detokenized; this undoes what TeX needs in
 -- the source (\% for %, \# for #, the doubled # of \detokenize) and allows
--- a line break after , . _ / ( and before ->, so that long MLIR types break.
+-- a line break after , . _ / ( and before ->, so that long MLIR (Multi-Level Intermediate Representation) types break.
 local M = {}
 local bs = string.char(92)
 

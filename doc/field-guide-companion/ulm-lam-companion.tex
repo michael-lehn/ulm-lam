@@ -12,7 +12,7 @@
   \vspace*{0.18\textheight}
   {\sffamily\bfseries\fontsize{28}{34}\selectfont ulm.lam and the Field Guide\par}
   \vspace{0.6em}
-  {\sffamily\Large\color{accent} A Companion: Compiler Theory in a Linear-Algebra Compiler on MLIR\par}
+  {\sffamily\Large\color{accent} A Companion: Compiler Theory in a Linear-Algebra Compiler on\\ MLIR (Multi-Level Intermediate Representation)\par}
   \vspace{2.4em}
   {\large What the compiler does · how MLIR represents it · what the theory calls it\par}
   \vfill
@@ -30,10 +30,9 @@
 \label{ch:howto}
 
 This companion connects three things that you already have: the compiler
-ulm.lam (Ulm Linear Algebra Mapping), your practical experience with MLIR
-(Multi-Level Intermediate Representation), and the theory collected in
+ulm.lam (Ulm Linear Algebra Mapping), your practical experience with MLIR, and the theory collected in
 \emph{Modern Compiler Concepts: A Field Guide} (here: \emph{the Field Guide},
-cited as FG). It does not repeat the Field Guide. It shows what ulm.lam
+cited as FG (Field Guide)). It does not repeat the Field Guide. It shows what ulm.lam
 does with one concrete program, how MLIR represents and checks it, and then
 names the concept and points to the Field Guide entry that explains it.
 
@@ -47,8 +46,8 @@ Every section follows the same order:
 \item[Theory] the theoretical name, with the exact Field Guide section.
 \end{steps}
 
-\paragraph{Chapter 1 stands alone} It follows the generalized least-squares
-(GLS) problem from the formula to the kernel calls and to numbers, and
+\paragraph{Chapter 1 stands alone} It follows the GLS (generalized least
+squares) problem from the formula to the kernel calls and to numbers, and
 connects each step to its theory. The later chapters take up one question
 each and go deeper.
 
@@ -63,7 +62,7 @@ an origin. The text marks it with one of six tags:
 \Over & checked structurally by an MLIR verifier when the IR is built or
   parsed (shapes, contradictions, result types) \\
 \Oinf & derived by an inference rule from other facts (\(X\T M\inv X\) is
-  SPD if \(M\) is SPD and \(X\) has full column rank) \\
+  SPD (symmetric positive definite) if \(M\) is SPD and \(X\) has full column rank) \\
 \Oana & established by an analysis of the program (which buffer a size comes
   from, whether an in-place write conflicts with a later read) \\
 \Orun & checked when the generated code runs (array sizes, a failed
@@ -80,7 +79,8 @@ where an analogy stops, next to the example where it matters.
 
 \paragraph{Links} Internal references are hyperlinks. A reference such as
 \FG{1.7}{Refinement types} opens the Field Guide at that section when
-\texttt{\FGfile} is in the same directory as this PDF (a link to its named
+\texttt{\FGfile} is in the same directory as this PDF (Portable
+Document Format) file (a link to its named
 destination \texttt{section.1.7}); otherwise the printed number and title
 locate it. Links to source code, such as
 \srcref{lib/UlmLamDialect.cpp}{98}{130}, go to the exact lines at commit
@@ -94,11 +94,12 @@ marked) and by wrapping long lines. Where a listing is schematic or an
 extension that does not exist in ulm.lam, it says so.
 
 \paragraph{Notation} Matrices are real, \(X\T\) is the transpose,
-\(M\inv\) the inverse, \(M\invT = (M\inv)\T\). SPD stands for symmetric
-positive definite, SPSD for symmetric positive semidefinite. BLAS (Basic
+\(M\inv\) the inverse, \(M\invT = (M\inv)\T\). SPSD (symmetric positive
+semidefinite) complements SPD (symmetric positive definite), which appears in
+the tag table above. BLAS (Basic
 Linear Algebra Subprograms) and LAPACK (Linear Algebra PACKage) routine names
 (\code{potrf}, \code{trsm}, \ldots) are introduced where they first appear~\cite{blas3,lapack}.
-Other abbreviations are spelled out at first use.
+Every abbreviation is spelled out in parentheses at its first use.
 
 \tableofcontents
 

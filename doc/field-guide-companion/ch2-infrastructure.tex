@@ -49,7 +49,8 @@ inference & \code{InferTypeOpInterface} and its compatibility hook
   \code{isCompatibleReturnTypes} & the property rules (\code{mulProperties},
   \ldots) and what ``compatible'' means \\
 effects & \code{MemoryEffectOpInterface}, the \code{Pure} trait; generic
-  passes (CSE, DCE, LICM) that consult them & which ops are pure; which
+  passes (CSE, DCE (dead code elimination), LICM (loop-invariant code
+  motion)) that consult them & which ops are pure; which
   operands a kernel reads and writes \\
 rewriting & pattern classes, the greedy driver, the dialect conversion
   framework & the normal form, kernel selection, the lowering to EmitC \\

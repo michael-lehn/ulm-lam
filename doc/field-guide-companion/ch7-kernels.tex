@@ -185,10 +185,12 @@ the formula: the formula does not prescribe an evaluation order.
 
 \paragraph{Special values} Floating-point arithmetic is not a field.
 Kernel selection is careful where that matters: to accumulate into a new
-destination it copies instead of scaling by \(\beta = 0\), because ``scaling
-it by beta = 0 would read uninitialised memory, 0 * NaN = NaN''
+destination it copies instead of scaling by \(\beta = 0\), because the new
+memory may hold a NaN (not a number), and the source comment notes that
+``scaling it by beta = 0 would read uninitialised memory, 0 * NaN = NaN''
 (\srcref{lib/UlmLamPasses.cpp}{1262}{1271}). Over \(\R\), \(0\cdot C + AB =
-AB\) for every \(C\); in IEEE arithmetic only if \(C\) contains no NaN or
+AB\) for every \(C\); in IEEE (Institute of Electrical and Electronics
+Engineers) 754 arithmetic only if \(C\) contains no NaN or
 infinity.
 
 \paragraph{Stability} The derivation \(S = W\T W\) is the method of normal

@@ -15,7 +15,8 @@ make -C "$ROOT" tool >/dev/null
 OPT="$ROOT/build/bin/ulm-lam-opt"
 cd "$ROOT"
 
-# 1. GLS in Julia: traced IR, numbers, @code_lam, failures
+# 1. GLS (generalized least squares) in Julia: traced IR (intermediate
+#    representation), numbers, @code_lam, failures
 julia --project=julia/UlmLam "$HERE/gls.jl" >"$OUT/gls.out" 2>&1
 # the stages the Julia call left in build/julia/gls, plus the two
 # intermediate stages that ulm-lam-compile.sh does not keep

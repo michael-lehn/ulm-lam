@@ -9,7 +9,7 @@ for ε in (1e-2, 1e-5, 1e-7, 1e-9)
     X = [1.0 1.0; 1.0 1.0+ε; 1.0 1.0+2ε; 1.0 1.0+3ε]
     Xb, Mb, yb = big.(X), big.(M), big.(y)
     ref = (Xb' * (Mb \ Xb)) \ (Xb' * (Mb \ yb))       # exact up to 256-bit
-    L = cholesky(Symmetric(M)).L                         # whitened least squares by QR
+    L = cholesky(Symmetric(M)).L                         # reference: QR (orthogonal-triangular) factorisation of the whitened least-squares problem
     βqr = qr(L \ X) \ (L \ y)
     r(b) = Float64(maximum(abs.(big.(b) .- ref)) / maximum(abs.(ref)))
     κ = cond(L \ X)
