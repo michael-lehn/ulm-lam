@@ -5,31 +5,6 @@
 #include <cstring>
 #include <ulmblas/lapack/potrf.h>
 #include <ulmblas/ulmblas.h>
-template <typename T>
-static void
-ulm_lam_potrf(bool lower, std::ptrdiff_t n, T *A, std::ptrdiff_t incRow,
-              std::ptrdiff_t incCol, bool checked)
-{
-    std::ptrdiff_t info = ulmBLAS::potrf(lower, n, A, incRow, incCol);
-    if (checked && info != 0) {
-	std::fprintf(
-	    stderr,
-	    "ulm_lam: matrix is not positive definite (potrf info %td)\n",
-	    info);
-	std::abort();
-    }
-}
-extern "C" __attribute__((weak)) void
-ulm_lam_workspace_error(int64_t required, int64_t given)
-{
-    std::fprintf(
-        stderr,
-        "ulm_lam: workspace too small: %lld bytes required, %lld given\n",
-        (long long)required, (long long)given);
-    std::abort();
-}
-extern "C" void
-ulm_lam_workspace_error(int64_t, int64_t);
 extern "C" void
 observe(size_t, double *);
 extern "C" void
@@ -40,8 +15,14 @@ record(size_t, double *);
  *   v3  size_t              in
  *   v4  int8_t *            work  workspace (bytes)
  *   v5  int64_t *           info  -1: query, 0: allocate, >0: size of work
+ * returns info:
+ *    0  success
+ *    1  Cholesky factorisation of v2: not positive definite
+ *    2  Cholesky factorisation of a computed matrix: not positive definite
+ *   -5  v5: workspace too small
+ * (info != 0: the outputs are unspecified)
  */
-extern "C" void
+extern "C" int64_t
 estimate(double *v1, double *v2, size_t v3, int8_t *v4, int64_t *v5)
 {
     int64_t v6 = 35537600;
@@ -50,54 +31,76 @@ estimate(double *v1, double *v2, size_t v3, int8_t *v4, int64_t *v5)
     int64_t v9 = 0;
     size_t v10 = 0;
     int64_t v11 = v5[v10];
+    int64_t v12;
     if (v11 == -1) {
 	v5[v10] = v6;
+	v12 = v9;
     } else {
+	int64_t v13;
 	if (v11 > v9 & v11 < v6) {
-	    ulm_lam_workspace_error(v6, v11);
+	    v13 = -5;
 	} else {
-	    bool v12 = v11 == v9;
-	    int8_t *v13;
-	    if (v12) {
-		void *v14 = aligned_alloc(64, 35537600);
-		v13 = (int8_t *)v14;
+	    bool v14 = v11 == v9;
+	    int8_t *v15;
+	    if (v14) {
+		void *v16 = aligned_alloc(64, 35537600);
+		v15 = (int8_t *)v16;
 	    } else {
-		v13 = v4;
+		v15 = v4;
 	    }
-	    int8_t *v15 = v13;
-	    int64_t v16 = (int64_t)v10;
-	    double *v17 = (double *)(v15 + v16);
-	    memcpy(v17, v2, 32000000);
-	    ulm_lam_potrf(true, 2000, v17, 2000, 1, true);
-	    int64_t v18 = (int64_t)32000000;
-	    double *v19 = (double *)(v15 + v18);
-	    int64_t v20 = (int64_t)32320000;
-	    double *v21 = (double *)(v15 + v20);
-	    memcpy(v21, v1, 3200000);
-	    ulmBLAS::trlsm<std::ptrdiff_t>(2000, 200, v7, false, false, v17,
-	                                   2000, 1, v21, 200, 1);
-	    ulmBLAS::gemm<std::ptrdiff_t>(200, 200, 2000, v7, false, v21, 1,
-	                                  200, false, v21, 200, 1, v8, v19, 200,
-	                                  1);
-	    ulm_lam_potrf(true, 200, v19, 200, 1, true);
-	    int64_t v22 = (int64_t)35520000;
-	    double *v23 = (double *)(v15 + v22);
-	    int64_t v24 = (int64_t)35536000;
-	    double *v25 = (double *)(v15 + v24);
-	    for (size_t i26 = v10; i26 < v3; i26 += 1) {
-		observe(i26, v23);
-		ulmBLAS::trlsv<std::ptrdiff_t>(2000, false, v17, 2000, 1, v23,
-		                               1);
-		ulmBLAS::gemv<std::ptrdiff_t>(200, 2000, v7, v21, 1, 200, v23,
-		                              1, v8, v25, 1);
-		ulmBLAS::trlsv<std::ptrdiff_t>(200, false, v19, 200, 1, v25, 1);
-		ulmBLAS::trusv<std::ptrdiff_t>(200, false, v19, 1, 200, v25, 1);
-		record(i26, v25);
+	    int8_t *v17 = v15;
+	    int64_t v18 = (int64_t)v10;
+	    double *v19 = (double *)(v17 + v18);
+	    memcpy(v19, v2, 32000000);
+	    int64_t v20 =
+	        ulmBLAS::potrf<std::ptrdiff_t>(true, 2000, v19, 2000, 1);
+	    bool v21 = (bool)(v20 != v9);
+	    uint64_t v22 = (uint64_t)v21;
+	    int64_t v23 = (int64_t)v22;
+	    int64_t v24;
+	    if (v23 == v9) {
+		int64_t v25 = (int64_t)32000000;
+		double *v26 = (double *)(v17 + v25);
+		int64_t v27 = (int64_t)32320000;
+		double *v28 = (double *)(v17 + v27);
+		memcpy(v28, v1, 3200000);
+		ulmBLAS::trlsm<std::ptrdiff_t>(2000, 200, v7, false, false, v19,
+		                               2000, 1, v28, 200, 1);
+		ulmBLAS::gemm<std::ptrdiff_t>(200, 200, 2000, v7, false, v28, 1,
+		                              200, false, v28, 200, 1, v8, v26,
+		                              200, 1);
+		int64_t v29 =
+		    ulmBLAS::potrf<std::ptrdiff_t>(true, 200, v26, 200, 1);
+		int64_t v30 = v29 != v9 ? 2 : v9;
+		if (v30 == v9) {
+		    int64_t v31 = (int64_t)35520000;
+		    double *v32 = (double *)(v17 + v31);
+		    int64_t v33 = (int64_t)35536000;
+		    double *v34 = (double *)(v17 + v33);
+		    for (size_t i35 = v10; i35 < v3; i35 += 1) {
+			observe(i35, v32);
+			ulmBLAS::trlsv<std::ptrdiff_t>(2000, false, v19, 2000,
+			                               1, v32, 1);
+			ulmBLAS::gemv<std::ptrdiff_t>(200, 2000, v7, v28, 1,
+			                              200, v32, 1, v8, v34, 1);
+			ulmBLAS::trlsv<std::ptrdiff_t>(200, false, v26, 200, 1,
+			                               v34, 1);
+			ulmBLAS::trusv<std::ptrdiff_t>(200, false, v26, 1, 200,
+			                               v34, 1);
+			record(i35, v34);
+		    }
+		}
+		v24 = v30;
+	    } else {
+		v24 = v23;
 	    }
-	    if (v12) {
-		free(v15);
+	    int64_t v36 = v24;
+	    if (v14) {
+		free(v17);
 	    }
+	    v13 = v36;
 	}
+	v12 = v13;
     }
-    return;
+    return v12;
 }

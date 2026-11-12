@@ -715,7 +715,10 @@ verifyDps(Operation *op)
 		       << tensorInits << " must have the type of its init";
 	    ++tensorInits;
 	}
-    if (tensorInits != op->getNumResults())
+    // further results are scalars (the info of a factorisation)
+    unsigned tensorResults = llvm::count_if(
+        op->getResultTypes(), [](Type t) { return isa<TensorType>(t); });
+    if (tensorInits != tensorResults)
 	return op->emitOpError("expects one result per tensor init");
     return success();
 }
@@ -993,8 +996,14 @@ struct UlmLamkBufferizableModel
 	s.addOperands(operands);
 	s.addAttributes(llvm::to_vector(op->getDiscardableAttrs()));
 	s.propertiesAttr = op->getPropertiesAsAttribute();
-	rewriter.create(s);
-	bufferization::replaceOpWithBufferizedValues(rewriter, op, initBuffers);
+	// results that are not tensors (the info of a factorisation) stay
+	for (Value r : op->getResults())
+	    if (!isa<TensorType>(r.getType()))
+		s.addTypes(r.getType());
+	Operation *b = rewriter.create(s);
+	SmallVector<Value> values(initBuffers);
+	llvm::append_range(values, b->getResults());
+	bufferization::replaceOpWithBufferizedValues(rewriter, op, values);
 	return success();
     }
 };

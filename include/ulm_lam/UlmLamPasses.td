@@ -85,11 +85,11 @@ def UlmLamWorkspace : Pass<"ulm-lam-workspace", "ModuleOp"> {
     `int8_t *work, int64_t *workspace_info` (sizes in bytes):
       -1  query: set *workspace_info to the required size and return
        0  allocate one block of the required size, free it at the end
-      >0  the size of work; too small: call
-          ulm_lam_workspace_error(required, given) and return
+      >0  the size of work; too small: call ulm_lam_workspace_error
+          (which ulm-lam-info turns into info = -i) and return
     All temporaries become views of the one block at 64-byte aligned
-    offsets computed at compile time.  Functions without temporaries keep
-    their signature.
+    offsets (from the sizes).  Functions without temporaries keep their
+    signature.
   }];
   let dependentDialects = ["memref::MemRefDialect", "scf::SCFDialect",
                            "arith::ArithDialect", "func::FuncDialect"];
@@ -128,6 +128,21 @@ def ConvertUlmLamkToLinalg : Pass<"convert-ulm-lamk-to-linalg", "func::FuncOp"> 
     fallback where no BLAS is available.
   }];
   let dependentDialects = ["linalg::LinalgDialect", "scf::SCFDialect"];
+}
+
+def UlmLamInfo : Pass<"ulm-lam-info", "ModuleOp"> {
+  let summary = "LAPACK-style info results";
+  let description = [{
+    Runs after ulm-lam-workspace.  Implemented in lib/UlmLamInfo.cpp.
+    Every defined function returns an i64 info: 0 success, k > 0 check k
+    failed (a factorisation, or a call returning info != 0), -i argument
+    i illegal (a workspace that is too small).  After every check the rest
+    of its block runs only if it passed; loops carry the status.  The
+    descriptions of the checks are kept in the function attribute
+    ulm_lam.info for the interface comment.
+  }];
+  let dependentDialects = ["arith::ArithDialect", "scf::SCFDialect",
+                           "func::FuncDialect"];
 }
 
 #endif // ULM_LAM_PASSES_TD

@@ -43,12 +43,12 @@ constexpr int N = 2000, M = 200, STEPS = 20;
 constexpr int TSTEPS = 200, REPS = 3;
 
 extern "C" {
-void
+int64_t
 estimate(double *H, double *R, size_t n, int8_t *work,
-         int64_t *workspace_info); // generated
-void
+         int64_t *workspace_info); // generated, returns info
+int64_t
 estimate_nolicm(double *H, double *R, size_t n, int8_t *work,
-                int64_t *workspace_info); // generated, no LICM
+                int64_t *workspace_info); // generated (returns info), no LICM
 void
 observe(size_t i, double *y);
 void

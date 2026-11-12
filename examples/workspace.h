@@ -7,8 +7,8 @@
 //    *workspace_info == -1  query: the function sets the required size
 //                           (bytes) and returns
 //    *workspace_info ==  0  the function allocates one block itself
-//    *workspace_info  >  0  the size of work; too small: the function calls
-//                           ulm_lam_workspace_error(required, given), returns
+//    *workspace_info  >  0  the size of work; too small: the function returns
+//                           info = -i (i: the position of workspace_info)
 //
 //  Workspace ws([](int8_t *w, int64_t *i) { f(..., w, i); });  queries and
 //  allocates; then call f(..., ws.work, ws.info()).

@@ -20,5 +20,6 @@ sed 's/func.func @gls(%X: !X, %M: !M, %y: !y) -> !b {/func.func @gls(%X: !X {buf
 opt "$OUT/03-readonly.mlir" -o "$OUT/04-generated.mlir" --pass-pipeline='builtin.module(one-shot-bufferize{bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map}, buffer-deallocation-pipeline, canonicalize)'
 copies=$(grep -c "memref.copy" "$OUT/04-generated.mlir" || true)
 check "stage 3 bufferizes with 3 copies (M, X, y), as stage 4 predicts (got $copies)" '[ "$copies" = 3 ]'
-check "gemv and both trsv share one buffer" '[ "$(grep -E "ulm_lamk.(gemv|trsv).*outs\(%alloc_4" "$OUT/04-generated.mlir" | wc -l | tr -d " ")" = 3 ]'
+out=$(grep -oE "ulm_lamk.gemv .*outs\(%[a-z_0-9]+" "$OUT/04-generated.mlir" | grep -oE "%[a-z_0-9]+$")
+check "gemv and both trsv share one buffer ($out)" '[ "$(grep -E "ulm_lamk.(gemv|trsv).*outs\($out " "$OUT/04-generated.mlir" | wc -l | tr -d " ")" = 3 ]'
 exit $fail

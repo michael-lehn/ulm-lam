@@ -187,14 +187,15 @@ def UlmLamk_PotrfOp : UlmLamk_Op<"potrf", "A"> {
   let summary = "Cholesky factorisation A = L L^T (in place)";
   let description = [{
     Writes the factor into the `uplo` triangle; the other triangle is left
-    untouched and must not be read as part of L.  With `checked`, a
-    non-positive pivot (info > 0) aborts with a diagnostic; this is how a
-    trusted `spd` assumption becomes a run-time check.
+    untouched and must not be read as part of L.  `info` is LAPACK's: 0, or
+    i > 0 if the leading minor of order i is not positive definite (the
+    `spd` assumption did not hold numerically).  ulm-lam-info turns it into
+    the info of the function.
   }];
-  let arguments = (ins UlmLamk_UploAttr:$uplo, UlmLamk_Shaped:$A,
-                       UnitAttr:$checked);
+  let arguments = (ins UlmLamk_UploAttr:$uplo, UlmLamk_Shaped:$A);
+  let results = (outs Variadic<2DTensorOf<[F32, F64]>>:$result, I64:$info);
   let assemblyFormat = [{
-    `uplo` `(` $uplo `)` (`checked` $checked^)?
+    `uplo` `(` $uplo `)`
     `outs` `(` $A `:` type($A) `)` attr-dict (`->` type($result)^)?
   }];
 }
@@ -204,11 +205,13 @@ def UlmLamk_GetrfOp : Op<UlmLamk_Dialect, "getrf", [
     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
     DeclareOpInterfaceMethods<UlmLamk_KernelCostOpInterface>]> {
   let summary = "LU factorisation with partial pivoting P A = L U (in place)";
-  let arguments = (ins UlmLamk_Shaped:$A, UlmLamk_Pivots:$ipiv,
-                       UnitAttr:$checked);
-  let results = (outs Variadic<AnyRankedTensor>:$result);
+  let description = [{
+    `info` is LAPACK's: 0, or i > 0 if U(i-1, i-1) is exactly zero (the
+    matrix is singular).
+  }];
+  let arguments = (ins UlmLamk_Shaped:$A, UlmLamk_Pivots:$ipiv);
+  let results = (outs Variadic<AnyRankedTensor>:$result, I64:$info);
   let assemblyFormat = [{
-    (`checked` $checked^)?
     `outs` `(` $A `,` $ipiv `:` type($A) `,` type($ipiv) `)`
     attr-dict (`->` type($result)^)?
   }];

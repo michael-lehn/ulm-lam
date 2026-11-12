@@ -26,13 +26,13 @@
 
 #include "../workspace.h"
 
-extern "C" void
+extern "C" int64_t
 gls(double *X, double *M, double *y, double *b, int8_t *work,
-    int64_t *workspace_info); // generated
+    int64_t *workspace_info); // generated, returns info
 //  the same with M and y {ulm_lam.inout}: they may be overwritten
-extern "C" void
+extern "C" int64_t
 gls_inout(double *X, double *M, double *y, double *b, int8_t *work,
-          int64_t *workspace_info); // generated
+          int64_t *workspace_info); // generated, returns info
 
 constexpr int N = 2000, MM = 200, REPS = 5;
 

@@ -13,26 +13,27 @@
 constexpr int n = 64, k = 32;
 using Mat = std::vector<double>;
 
+//  every function returns info (0: success, k > 0: check k failed, -i:
+//  argument i illegal)
 extern "C" {
-void
-lu(double *A, double *B, double *X, int8_t *work, int64_t *info);
-void
-lu_t(double *A, double *B, double *X, int8_t *work, int64_t *info);
-void
+int64_t
+lu(double *A, double *B, double *X, int8_t *work, int64_t *workspace_info);
+int64_t
+lu_t(double *A, double *B, double *X, int8_t *work, int64_t *workspace_info);
+int64_t
 upper(double *U, double *B, double *X);
-void
+int64_t
 right(double *B, double *L, double *X);
-void
+int64_t
 right_t(double *B, double *L, double *X);
-void
-chol_vec(double *S, double *x, double *r, int8_t *work, int64_t *info);
-void
+int64_t
+chol_vec(double *S, double *x, double *r, int8_t *work,
+         int64_t *workspace_info);
+int64_t
 sum(double *Y, double *Z, double *W, double *r);
-void
+int64_t
 mixed(double *A, double *B, double *C, double *D, double *r, int8_t *work,
-      int64_t *info);
-void
-ulm_lam_workspace_error(int64_t required, int64_t given);
+      int64_t *workspace_info);
 }
 
 static std::mt19937_64 gen(1);
@@ -100,13 +101,13 @@ solve(Mat A, Mat B, int c)
 }
 
 static int failures = 0;
-static int errors = 0;
+static int64_t info = 0; // of the last call
 
-//  replaces the weak default (which aborts): count and return
-void
-ulm_lam_workspace_error(int64_t, int64_t)
+static void
+expect(bool ok, const char *what)
 {
-    ++errors;
+    failures += !ok;
+    std::printf("%s  %s\n", ok ? "ok  " : "FAIL", what);
 }
 
 static void
@@ -118,10 +119,10 @@ check(const char *name, const Mat &x, const Mat &ref)
 	den += ref[i] * ref[i];
     }
     double rel = std::sqrt(num / den);
-    bool ok = rel < 1e-10;
+    bool ok = rel < 1e-10 && info == 0;
     failures += !ok;
-    std::printf("%s  %-9s relative error %.2e\n", ok ? "ok  " : "FAIL", name,
-                rel);
+    std::printf("%s  %-9s relative error %.2e, info %lld\n",
+                ok ? "ok  " : "FAIL", name, rel, (long long)info);
 }
 
 int
@@ -148,28 +149,28 @@ main()
 
     Mat r(n * k), rk(k * n), rv(n), rs(n * n);
     int64_t zero = 0;
-    lu(A.data(), B.data(), r.data(), nullptr, &zero);
+    info = lu(A.data(), B.data(), r.data(), nullptr, &zero);
     check("lu", r, solve(A, B, k));
-    lu_t(A.data(), B.data(), r.data(), nullptr, &(zero = 0));
+    info = lu_t(A.data(), B.data(), r.data(), nullptr, &(zero = 0));
     check("lu_t", r, solve(transpose(A, n, n), B, k));
-    upper(U.data(), B.data(), r.data());
+    info = upper(U.data(), B.data(), r.data());
     check("upper", r, solve(U, B, k));
     //  B L^-1 = (L^-T B^T)^T
-    right(Bk.data(), L.data(), rk.data());
+    info = right(Bk.data(), L.data(), rk.data());
     check("right", rk,
           transpose(solve(transpose(L, n, n), transpose(Bk, k, n), k), n, k));
-    right_t(Bk.data(), L.data(), rk.data());
+    info = right_t(Bk.data(), L.data(), rk.data());
     check("right_t", rk, transpose(solve(L, transpose(Bk, k, n), k), n, k));
-    chol_vec(S.data(), x.data(), rv.data(), nullptr, &(zero = 0));
+    info = chol_vec(S.data(), x.data(), rv.data(), nullptr, &(zero = 0));
     check("chol_vec", rv, solve(S, x, 1));
-    sum(Y.data(), Z.data(), W.data(), rs.data());
+    info = sum(Y.data(), Z.data(), W.data(), rs.data());
     Mat ref(n * n);
     for (int i = 0; i < n * n; ++i)
 	ref[i] = Y[i] + 2 * Z[i] - W[i];
     check("sum", rs, ref);
     Mat Bn = random(n, n);
-    mixed(A.data(), Bn.data(), C.data(), D.data(), r.data(), nullptr,
-          &(zero = 0));
+    info = mixed(A.data(), Bn.data(), C.data(), D.data(), r.data(), nullptr,
+                 &(zero = 0));
     Mat m = solve(A, mul(Bn, C, n, n, k), k);
     for (int i = 0; i < n * k; ++i)
 	m[i] += D[i];
@@ -196,17 +197,26 @@ main()
 	Workspace ws([&](int8_t *w, int64_t *i) {
 	    lu(A.data(), B.data(), x.data(), w, i);
 	});
-	lu(A.data(), B.data(), x.data(), ws.work, ws.info());
+	info = lu(A.data(), B.data(), x.data(), ws.work, ws.info());
 	check("lu, given workspace", x, ref);
 	std::fill(x.begin(), x.end(), 0.0);
 	int64_t small = ws.size - 1;
-	errors = 0;
-	lu(A.data(), B.data(), x.data(), ws.work, &small);
-	bool refused = errors == 1 && x == Mat(n * k, 0.0);
-	failures += !refused;
-	std::printf("%s  workspace too small: error function called, nothing "
-	            "computed\n",
-	            refused ? "ok  " : "FAIL");
+	info = lu(A.data(), B.data(), x.data(), ws.work, &small);
+	expect(info == -5 && x == Mat(n * k, 0.0),
+	       "workspace too small: info = -5 (argument 5), nothing computed");
+    }
+    //  the assumptions did not hold: info, no abort
+    {
+	Mat N(S);
+	for (int i = 0; i < n; ++i)
+	    N[i * n + i] = -1; // symmetric, indefinite
+	info = chol_vec(N.data(), x.data(), rv.data(), nullptr, &(zero = 0));
+	std::printf("      chol_vec of an indefinite matrix: info %lld\n",
+	            (long long)info);
+	expect(info == 1, "not positive definite: info = 1 (factorisation 1)");
+	Mat Z0(n * n, 0.0); // singular
+	info = lu(Z0.data(), B.data(), r.data(), nullptr, &(zero = 0));
+	expect(info == 1, "singular: info = 1 (LU factorisation)");
     }
     std::printf("%s\n", failures ? "FAIL" : "PASS");
     return failures ? 1 : 0;

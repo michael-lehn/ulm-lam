@@ -78,12 +78,15 @@ _IFACE = re.compile(r"/\* (\w+): matrices by reference[^\n]*\n(.*?)\n \*/",
                     re.S)
 
 
+_INFO = re.compile(r"^\s*(-?\d+)\s+(.*)$")
+
+
 def _interfaces(cpp: str) -> dict[str, list[tuple[str, str]]]:
     """name -> [(C type, intent)] from the generated interface comments."""
     out = {}
     for m in _IFACE.finditer(cpp):
         rows = []
-        for line in m.group(2).splitlines():
+        for line in m.group(2).split(" * returns info:")[0].splitlines():
             parts = line.lstrip(" *").split()
             # v1  double[2000][200]  in  read only  |  v5  int8_t *  work ...
             ctype = parts[1] + (" *" if len(parts) > 2 and parts[2] == "*"
@@ -92,6 +95,20 @@ def _interfaces(cpp: str) -> dict[str, list[tuple[str, str]]]:
                 parts[2] if len(parts) > 2 else "in")
             rows.append((ctype, intent))
         out[m.group(1)] = rows
+    return out
+
+
+def _info_codes(cpp: str) -> dict[str, dict[int, str]]:
+    """name -> {info: meaning} from the generated interface comments."""
+    out = {}
+    for m in _IFACE.finditer(cpp):
+        codes = {}
+        parts = m.group(2).split(" * returns info:")
+        for line in parts[1].splitlines() if len(parts) > 1 else []:
+            c = _INFO.match(line.lstrip(" *"))
+            if c:
+                codes[int(c.group(1))] = c.group(2)
+        out[m.group(1)] = codes
     return out
 
 
@@ -308,9 +325,10 @@ def _function_source(cpp: str, name: str) -> str:
     """The generated C++ of one function: its interface comment and its
     definition (up to the matching closing brace)."""
     start = cpp.find(f"/* {name}: matrices by reference")
-    head = cpp.find(f'extern "C" void\n{name}(', max(start, 0))
-    if head < 0:
+    m = re.compile(rf'extern "C" \w+\n{name}\(').search(cpp, max(start, 0))
+    if not m:
         return ""
+    head = m.start()
     if start < 0 or start > head:
         start = head
     i = cpp.find("{", cpp.find(")", head))
@@ -411,6 +429,19 @@ def _copy_into(dst, r, t: fe.MatrixType, name: str) -> None:
         flat[k] = v
 
 
+class InfoError(fe.LamError):
+    """A compiled function returned info != 0, as a LAPACK routine does:
+    info = k > 0 if its check k failed (a factorisation: the matrix was not
+    positive definite or singular, numerically, although the program
+    assumed it; or a call of another ulm.lam function), info = -i if
+    argument i was illegal.  The results are then unspecified."""
+
+    def __init__(self, function: str, info: int, meaning: str):
+        self.function, self.info, self.meaning = function, info, meaning
+        super().__init__(f"{function}: info {info}"
+                         + (f": {meaning}" if meaning else ""))
+
+
 class CompiledFunction:
     """A ulm.lam function in a compiled library."""
 
@@ -418,7 +449,8 @@ class CompiledFunction:
         self.lib, self.name, self.rows, self.fn = lib, name, rows, fn
         self._c = getattr(lib._dll, name)
         self._c.argtypes = [_ctype(t) for t, _ in rows]
-        self._c.restype = None
+        self._c.restype = ctypes.c_int64  # info, as LAPACK
+        self._codes = _info_codes(lib.source).get(name, {})
         self._ws = {}
         self.has_workspace = bool(rows) and rows[-1][1] == "info"
         self.__doc__ = self.interface()
@@ -496,10 +528,12 @@ class CompiledFunction:
             info = ctypes.c_int64(size)
             cargs += [ctypes.addressof(work), ctypes.addressof(info)]
         self.lib._pending.clear()
-        self._c(*cargs)
+        info = self._c(*cargs)
         del keep  # the argument buffers lived until here
         if self.lib._pending:
             raise self.lib._pending[0]
+        if info != 0:
+            raise InfoError(self.name, info, self._codes.get(info, ""))
         if not outs:
             return None
         return outs[0] if len(outs) == 1 else tuple(outs)

@@ -22,9 +22,9 @@
 
 #include "../workspace.h"
 
-extern "C" void
+extern "C" int64_t
 gls(size_t n, size_t m, double *X, double *M, double *y, double *b,
-    int8_t *work, int64_t *workspace_info); // generated
+    int8_t *work, int64_t *workspace_info); // generated, returns info
 
 static int64_t
 round64(int64_t bytes)
@@ -63,7 +63,8 @@ check(int n, int m, std::mt19937_64 &gen)
     });
     int64_t expected = round64(8 * n * n) + round64(8 * m * m) +
                        round64(8 * n * m) + round64(8 * n);
-    gls(n, m, X.data(), M.data(), y.data(), b.data(), ws.work, ws.info());
+    int64_t info =
+        gls(n, m, X.data(), M.data(), y.data(), b.data(), ws.work, ws.info());
 
     //  residual r = X^T M^-1 (X b - y), M^-1 by LU (independent of potrf)
     std::vector<double> U(n * 2), LU(M), r(m), q(m);
@@ -83,7 +84,7 @@ check(int n, int m, std::mt19937_64 &gen)
                   1);
     double res = nrm2(r) / nrm2(q);
     bool unchanged = X == X0 && M == M0 && y == y0;
-    bool ok = res < 1e-10 && ws.size == expected && unchanged;
+    bool ok = info == 0 && res < 1e-10 && ws.size == expected && unchanged;
     std::printf("n = %4d, m = %3d: workspace %9lld bytes (expected %9lld), "
                 "residual %.1e, inputs %s  %s\n",
                 n, m, (long long)ws.size, (long long)expected, res,

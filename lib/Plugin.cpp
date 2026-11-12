@@ -21,6 +21,8 @@ void
 registerUlmLamPasses();
 void
 registerWorkspacePass();
+void
+registerInfoPass();
 } // namespace ulm_lam
 
 extern "C" LLVM_ATTRIBUTE_WEAK mlir::DialectPluginLibraryInfo
@@ -42,5 +44,6 @@ mlirGetPassPluginInfo()
 	        ulm_lam::registerConvertUlmLamkToUlmBLASPass();
 	        ulm_lam::registerUlmLamPasses();
 	        ulm_lam::registerWorkspacePass();
+	        ulm_lam::registerInfoPass();
             }};
 }

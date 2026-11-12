@@ -439,9 +439,9 @@ class Selector
 		b.setInsertionPointToStart(m.getParentBlock());
 	    Location loc = m.getLoc();
 	    if (bitEnumContainsAll(p, Properties::spd)) {
-		auto potrf = lk::PotrfOp::create(b, loc, TypeRange{m.getType()},
-		                                 lk::Uplo::lower, m,
-		                                 /*checked=*/true);
+		auto potrf = lk::PotrfOp::create(
+		    b, loc, TypeRange{m.getType(), b.getI64Type()},
+		    lk::Uplo::lower, m);
 		f = {Factor::Cholesky, potrf->getResult(0), {}, true};
 	    } else {
 		auto pivTy = RankedTensorType::get(
@@ -450,9 +450,9 @@ class Selector
 		if (pivTy.isDynamicDim(0))
 		    n.push_back(dimValue(b, loc, m, 0));
 		Value piv = tensor::EmptyOp::create(b, loc, pivTy, n);
-		auto getrf =
-		    lk::GetrfOp::create(b, loc, TypeRange{m.getType(), pivTy},
-		                        m, piv, /*checked=*/true);
+		auto getrf = lk::GetrfOp::create(
+		    b, loc, TypeRange{m.getType(), pivTy, b.getI64Type()}, m,
+		    piv);
 		f = {Factor::LU, getrf->getResult(0), getrf->getResult(1),
 		     true};
 	    }

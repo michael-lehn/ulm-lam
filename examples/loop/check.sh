@@ -31,5 +31,5 @@ check "ulm.lam: no allocation in the loop" '[ "$(count "$BUF" memref.alloc)" = 0
 check "ulm.lam: no copy in the loop" '[ "$(count "$BUF" memref.copy)" = 0 ]'
 check "ulm.lam: no deallocation in the loop" '[ "$(count "$BUF" dealloc)" = 0 ]'
 check "ulm.lam: foo(i, B) by reference" 'grep -q "func.func private @foo(index, memref<500x500xf64>)$" "$BUF"'
-check "ulm.lam: X in place, no result (workspace last)" 'grep -qE "@accumulate\(.*%arg3: index, %arg4: memref<\?xi8>[^,]*, %arg5: memref<1xi64>[^)]*\) \{$" "$BUF" && ! grep -q "memref.copy\|bufferization.clone" "$BUF"'
+check "ulm.lam: X in place, only info returned (workspace last)" 'grep -qE "@accumulate\(.*%arg3: index, %arg4: memref<\?xi8>[^,]*, %arg5: memref<1xi64>[^)]*\) -> i64 attributes" "$BUF" && ! grep -q "memref.copy\|bufferization.clone" "$BUF"'
 exit $fail

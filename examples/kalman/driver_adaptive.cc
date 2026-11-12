@@ -27,9 +27,9 @@
 constexpr int N = 2000, M = 200, STEPS = 10;
 
 extern "C" {
-void
+int64_t
 estimate_adaptive(double *H, double *R0, size_t n, int8_t *work,
-                  int64_t *workspace_info); // generated
+                  int64_t *workspace_info); // generated, returns info
 void
 update_covariance(size_t i, double *R);
 void

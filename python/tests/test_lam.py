@@ -253,7 +253,7 @@ class Lam(unittest.TestCase):
     def test_cpp_source(self):
         src = self.lib.gls.cpp
         self.assertTrue(src.startswith("/* gls: matrices by reference"))
-        self.assertIn('extern "C" void\ngls(', src)
+        self.assertIn('extern "C" int64_t\ngls(', src)
         self.assertIn("ulmBLAS::", src)
         self.assertTrue(src.rstrip().endswith("}"))
         self.assertNotIn("gls_inout(", src)  # only this function
@@ -292,9 +292,37 @@ class Rewrites(unittest.TestCase):
         ref = flat(solve(matmul(tr(X), MiX), matmul(tr(X), Miy)))
         self.assertLess(rel(lib.gls_squared(X, R, y), ref), 1e-10)
         src = lib.gls_squared.cpp
-        self.assertEqual(src.count("ulm_lam_potrf(true, %d," % N), 1)
+        self.assertEqual(src.count("potrf<std::ptrdiff_t>(true, %d," % N), 1)
         self.assertNotIn("gemm<std::ptrdiff_t>(%d, %d" % (N, N), src)
         self.assertNotIn("getrf", src)
+
+
+class Info(unittest.TestCase):
+
+    def test_not_positive_definite_raises(self):
+        """M is declared spd but is not: the Cholesky factorisation fails,
+        the function returns info 1, Python raises InfoError (no abort)."""
+        bad = spd(N)
+        for i in range(N):
+            bad[i][i] = -1.0
+        lib = lam.compile(gls, name="info_gls")
+        with self.assertRaises(lam.InfoError) as e:
+            lib.gls(rand(N, K), bad, [1.0] * N)
+        self.assertEqual(e.exception.info, 1)
+        self.assertIn("not positive definite", str(e.exception))
+
+    def test_loop_stops_after_failure(self):
+        """A failure in a loop: the remaining iterations do nothing."""
+        calls = []
+        lib = lam.compile(estimate, name="info_loop")
+        bad = spd(N)
+        for i in range(N):
+            bad[i][i] = -1.0
+        lib.bind(observe=lambda i: calls.append(i) or [1.0] * N,
+                 record=lambda i, b: calls.append(("record", i)))
+        with self.assertRaises(lam.InfoError):
+            lib.estimate(rand(N, K), bad, 5)
+        self.assertEqual(calls, [])
 
 
 class Cache(unittest.TestCase):

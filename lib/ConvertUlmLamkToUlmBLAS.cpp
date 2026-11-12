@@ -421,10 +421,10 @@ struct Args
 	return dim(m.incRow).dim(m.incCol);
     }
     LogicalResult
-    call(Operation *o, StringRef callee)
+    call(Operation *o, StringRef callee, TypeRange results = {})
     {
 	rw.replaceOpWithNewOp<emitc::CallOpaqueOp>(
-	    o, TypeRange{}, callee, ValueRange(ops), rw.getArrayAttr(attrs));
+	    o, results, callee, ValueRange(ops), rw.getArrayAttr(attrs));
 	return success();
     }
 };
@@ -582,8 +582,7 @@ ULM_LAMK_LOWERING(PotrfLowering, lk::PotrfOp)
         .dim(A.rows)
         .op(a.getA())
         .strides(A)
-        .flag(o.getChecked())
-        .call(o, "ulm_lam_potrf");
+        .call(o, "ulmBLAS::potrf" kIndexType, rw.getI64Type());
 }
 
 // P A = L U in place
@@ -596,8 +595,8 @@ ULM_LAMK_LOWERING(GetrfLowering, lk::GetrfOp)
         .op(a.getA())
         .strides(A)
         .op(a.getIpiv())
-        .flag(o.getChecked())
-        .call(o, "ulm_lam_getrf");
+        .lit(1)
+        .call(o, "ulmBLAS::getrf" kIndexType, rw.getI64Type());
 }
 
 // B := op(A)^-1 B with the LU factors
@@ -640,42 +639,6 @@ struct CallLowering : OpConversionPattern<lk::CallOp>
 };
 
 // ---- checks of LAPACK info, emitted into the output ----------------------
-
-const char *kPotrf = R"(template <typename T>
-static void
-ulm_lam_potrf(bool lower, std::ptrdiff_t n, T *A, std::ptrdiff_t incRow,
-              std::ptrdiff_t incCol, bool checked)
-{
-    std::ptrdiff_t info = ulmBLAS::potrf(lower, n, A, incRow, incCol);
-    if (checked && info != 0) {
-        std::fprintf(stderr, "ulm_lam: matrix is not positive definite (potrf info %td)\n", info);
-        std::abort();
-    }
-})";
-
-/// Weak default of the global workspace error function: a program may
-/// define its own (and then the function returns without computing).
-const char *kWorkspaceError =
-    R"(extern "C" __attribute__((weak)) void
-ulm_lam_workspace_error(int64_t required, int64_t given)
-{
-    std::fprintf(stderr, "ulm_lam: workspace too small: %lld bytes required, %lld given\n",
-                 (long long)required, (long long)given);
-    std::abort();
-})";
-
-const char *kGetrf = R"(template <typename T>
-static void
-ulm_lam_getrf(std::ptrdiff_t m, std::ptrdiff_t n, T *A, std::ptrdiff_t incRow,
-              std::ptrdiff_t incCol, int32_t *piv, bool checked)
-{
-    std::ptrdiff_t info = ulmBLAS::getrf(m, n, A, incRow, incCol, piv,
-                                         std::ptrdiff_t(1));
-    if (checked && info != 0) {
-        std::fprintf(stderr, "ulm_lam: matrix is singular (getrf info %td)\n", info);
-        std::abort();
-    }
-})";
 
 // ---- the interface comment ------------------------------------------------
 
@@ -773,6 +736,21 @@ describe(func::FuncOp f)
 	    line.pop_back();
 	s += "\n" + line;
     }
+    // the info result (ulm-lam-info)
+    if (f.getNumResults() == 1) {
+	s += "\n * returns info:\n *    0  success";
+	if (auto checks = f->getAttrOfType<ArrayAttr>("ulm_lam.info"))
+	    for (auto [k, a] : llvm::enumerate(checks)) {
+		std::string num = std::to_string(k + 1);
+		s += "\n *   " + std::string(num.size() < 2 ? " " : "") + num +
+		     "  " + cast<StringAttr>(a).str();
+	    }
+	bool work = n >= 2 && f.getArgAttr(n - 1, "ulm_lam.workspace");
+	if (work)
+	    s += "\n *   -" + std::to_string(n) + "  v" + std::to_string(n) +
+	         ": workspace too small";
+	s += "\n * (info != 0: the outputs are unspecified)";
+    }
     return s + "\n */";
 }
 
@@ -853,8 +831,6 @@ struct ConvertUlmLamkToUlmBLAS
 
 	// Which ulmBLAS LAPACK headers and info checks the output needs.
 	bool potrf = false, getrf = false, getrs = false;
-	bool workspace =
-	    static_cast<bool>(module.lookupSymbol("ulm_lam_workspace_error"));
 	module.walk([&](Operation *op) {
 	    potrf |= isa<lk::PotrfOp>(op);
 	    getrf |= isa<lk::GetrfOp>(op);
@@ -921,12 +897,6 @@ struct ConvertUlmLamkToUlmBLAS
 	    include("ulmblas/lapack/getrf.h");
 	if (getrs)
 	    include("ulmblas/lapack/getrs.h");
-	if (potrf)
-	    emitc::VerbatimOp::create(b, loc, kPotrf);
-	if (getrf)
-	    emitc::VerbatimOp::create(b, loc, kGetrf);
-	if (workspace)
-	    emitc::VerbatimOp::create(b, loc, kWorkspaceError);
     }
 };
 

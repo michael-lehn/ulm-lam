@@ -26,6 +26,6 @@ check "b written into the output buffer (workspace last)" 'grep -qE "@gls\(.*%ar
 "$ROOT/scripts/ulm-lam-compile.sh" "$HERE/gls_inout.mlir" "$OUT/gls_inout"
 BUF="$OUT/gls_inout.bufferized.mlir"
 check "inout: one copy (X), none of M and y" '[ "$(n memref.copy "$BUF")" = 1 ]'
-check "inout: potrf works on the caller's M" 'grep -q "ulm_lamk.potrf uplo(lower) checked outs(%arg1 " "$BUF"'
+check "inout: potrf works on the caller's M" 'grep -q "ulm_lamk.potrf uplo(lower) outs(%arg1 " "$BUF"'
 check "inout: the interface comment says so" 'grep -q "v2  double\[2000\]\[2000\]  inout  may be overwritten" "$OUT/gls_inout.cpp"'
 exit $fail

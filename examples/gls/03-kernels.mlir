@@ -25,7 +25,7 @@ func.func @gls(%X: !X, %M: !M, %y: !y) -> !b {
   %one  = arith.constant 1.0 : f64
   %zero = arith.constant 0.0 : f64
 
-  %L = ulm_lamk.potrf uplo(lower) checked outs(%M : !M) -> !M
+  %L, %infoL = ulm_lamk.potrf uplo(lower) outs(%M : !M) -> !M
   %W = ulm_lamk.trsm side(left) uplo(lower) trans(none) diag(non_unit)
          alpha(%one) ins(%L : !M) outs(%X : !X) -> !X
   %z = ulm_lamk.trsv uplo(lower) trans(none) diag(non_unit)
@@ -34,7 +34,7 @@ func.func @gls(%X: !X, %M: !M, %y: !y) -> !b {
   %e0 = tensor.empty() : !S
   %S  = ulm_lamk.syrk uplo(lower) trans(trans) alpha(%one) beta(%zero)
           ins(%W : !X) outs(%e0 : !S) -> !S
-  %K  = ulm_lamk.potrf uplo(lower) checked outs(%S : !S) -> !S
+  %K, %infoK = ulm_lamk.potrf uplo(lower) outs(%S : !S) -> !S
 
   %e1 = tensor.empty() : !b
   %c  = ulm_lamk.gemv trans(trans) alpha(%one) beta(%zero)

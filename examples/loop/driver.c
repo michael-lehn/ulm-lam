@@ -17,9 +17,9 @@ enum
     ITERS = 4
 };
 
-void
+int64_t
 accumulate(double *A, double *C, double *X, size_t n, int8_t *work,
-           int64_t *workspace_info); /* generated */
+           int64_t *workspace_info); /* generated, returns info */
 
 /* The external function, called as foo(i, B) with B by reference. */
 void
@@ -74,7 +74,7 @@ main(void)
     accumulate(A, C, X, ITERS, NULL, &info);
     int8_t *work = aligned_alloc(64, (size_t)(info + 63) / 64 * 64);
     printf("workspace: %lld bytes\n", (long long)info);
-    accumulate(A, C, X, ITERS, work, &info);
+    int64_t status = accumulate(A, C, X, ITERS, work, &info);
     free(work);
     double t_gen = now() - t0;
 
@@ -96,7 +96,8 @@ main(void)
     printf("generated C++, ulmBLAS: %8.2f ms\n", 1e3 * t_gen);
     printf("naive C loops        : %8.2f ms\n", 1e3 * t_ref);
     printf("||X - X_ref|| / ||X_ref|| = %.2e\n", rel);
-    int ok = rel < 1e-12;
+    printf("info = %lld\n", (long long)status);
+    int ok = rel < 1e-12 && status == 0;
     printf("%s\n", ok ? "PASS" : "FAIL");
     free(A);
     free(C);

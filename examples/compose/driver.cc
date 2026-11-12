@@ -12,8 +12,10 @@
 //      of the generated gls;
 //    * every call of postprocess got a part of estimate_all's workspace that
 //      is large enough, and estimate_all leaves *workspace_info unchanged;
-//    * a workspace that is too small calls ulm_lam_workspace_error and
-//      computes nothing.
+//    * a workspace that is too small: info = -5 (argument 5,
+//      workspace_info), nothing computed;
+//    * M not positive definite: gls returns info 1, estimate_all passes it
+//      on as its info 1 (its call of gls) and stops at once.
 //
 #include <cmath>
 #include <cstdio>
@@ -28,25 +30,23 @@
 constexpr int N = 2000, M = 200, STEPS = 3;
 
 extern "C" {
-void
+int64_t
 gls(double *X, double *M, double *y, double *b, int8_t *work,
-    int64_t *workspace_info); // generated
-void
+    int64_t *workspace_info); // generated, returns info
+int64_t
 estimate_all(double *X, double *M, size_t n, int8_t *work,
-             int64_t *workspace_info); // generated
+             int64_t *workspace_info); // generated, returns info
 void
 observe(size_t i, double *y);
 void
 postprocess(size_t i, double *b, int8_t *work, int64_t *workspace_info);
-void
-ulm_lam_workspace_error(int64_t required, int64_t given);
 }
 
 static std::vector<double>
 X(N *M), Mat(N *N), noise(N *STEPS);
 static std::vector<double>
 results(M *STEPS);
-static int errors = 0, badSlots = 0, calls = 0;
+static int badSlots = 0, calls = 0;
 static int8_t *callerWork = nullptr;
 static int64_t callerSize = 0;
 
@@ -82,13 +82,6 @@ postprocess(size_t i, double *b, int8_t *work, int64_t *workspace_info)
     double *tmp = reinterpret_cast<double *>(work);
     std::memcpy(tmp, b, required);
     std::memcpy(results.data() + i * M, tmp, required);
-}
-
-//  replaces the weak default (which aborts): count and return
-void
-ulm_lam_workspace_error(int64_t, int64_t)
-{
-    ++errors;
 }
 
 static int failures = 0;
@@ -161,20 +154,35 @@ main()
 	callerWork = ws.work;
 	callerSize = ws.size;
 	int64_t *info = ws.info();
-	estimate_all(X.data(), Mat.data(), STEPS, ws.work, info);
-	check(same(), "given workspace: estimates equal separate calls of gls");
+	int64_t r = estimate_all(X.data(), Mat.data(), STEPS, ws.work, info);
+	check(r == 0 && same(),
+	      "given workspace: estimates equal separate calls of gls");
 	check(*info == ws.size,
 	      "estimate_all leaves *workspace_info unchanged");
 	check(calls == STEPS && badSlots == 0,
 	      "every postprocess got a large enough part of the workspace");
 
-	//  too small: error function, nothing computed
+	//  too small: info = -5, nothing computed
 	std::fill(results.begin(), results.end(), 0.0);
-	calls = errors = 0;
+	calls = 0;
 	int64_t small = ws.size - 1;
-	estimate_all(X.data(), Mat.data(), STEPS, ws.work, &small);
-	check(errors == 1 && calls == 0,
-	      "workspace too small: error function called, nothing computed");
+	r = estimate_all(X.data(), Mat.data(), STEPS, ws.work, &small);
+	check(r == -5 && calls == 0,
+	      "workspace too small: info = -5, nothing computed");
+
+	//  M indefinite: gls fails in the first step; estimate_all stops
+	std::vector<double> Bad(Mat);
+	for (int i = 0; i < N; ++i)
+	    Bad[i * N + i] = -1;
+	calls = 0;
+	int64_t g = gls(X.data(), Bad.data(), y.data(), ref.data(), nullptr,
+	                &(small = 0));
+	r = estimate_all(X.data(), Bad.data(), STEPS, ws.work, ws.info());
+	std::printf("      M indefinite: gls info %lld, estimate_all info "
+	            "%lld\n",
+	            (long long)g, (long long)r);
+	check(g == 1 && r == 1 && calls == 0,
+	      "a failing gls: estimate_all returns info 1 and stops");
 	callerWork = nullptr;
     }
 

@@ -20,7 +20,7 @@ func.func @gls(%X: !X, %M: !M, %y: !y, %b: !b) {
 
   %L = memref.alloc() {alignment = 64 : i64} : !M
   memref.copy %M, %L : !M to !M
-  ulm_lamk.potrf uplo(lower) checked outs(%L : !M)
+  %infoL = ulm_lamk.potrf uplo(lower) outs(%L : !M)
 
   %W = memref.alloc() {alignment = 64 : i64} : !X
   memref.copy %X, %W : !X to !X
@@ -34,7 +34,7 @@ func.func @gls(%X: !X, %M: !M, %y: !y, %b: !b) {
   %S = memref.alloc() {alignment = 64 : i64} : !S
   ulm_lamk.syrk uplo(lower) trans(trans) alpha(%one) beta(%zero)
     ins(%W : !X) outs(%S : !S)
-  ulm_lamk.potrf uplo(lower) checked outs(%S : !S)
+  %infoS = ulm_lamk.potrf uplo(lower) outs(%S : !S)
 
   ulm_lamk.gemv trans(trans) alpha(%one) beta(%zero)
     ins(%W, %z : !X, !y) outs(%b : !b)

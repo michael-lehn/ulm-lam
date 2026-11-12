@@ -16,6 +16,7 @@
 \usepackage[skip=\medskipamount]{parskip}   % no indent, \medskip between paragraphs
 \usepackage{xcolor,luacolor,lua-ul}
 \usepackage{listings}
+\usepackage{caption}   % \captionof for listings that break across pages
 \usepackage{tikz}
 \usetikzlibrary{positioning,arrows.meta,fit,backgrounds}
 \usepackage[hidelinks]{hyperref}
@@ -537,9 +538,10 @@ Weaker types are always valid.
 sweep.
 Facts that inference cannot derive enter only through function signatures
 or \code{ulm_lam.assume}.
-The \code{checked} form of \code{ulm_lam.assume} turns an assumption into a
-run-time test: for spd, a failing Cholesky factorisation aborts with a
-diagnostic.
+An assumption is also tested at run time where it matters: a Cholesky
+factorisation of a matrix that is assumed spd reports through \code{info}
+when the matrix is not positive definite numerically
+(\cref{sec:info}).
 
 \subsection{Operations}
 
@@ -906,8 +908,9 @@ output.
 Factorisations are chosen by structure: Cholesky for spd, LU with pivoting
 otherwise, and QR (orthogonal $Q$ times upper triangular $R$) where
 requested.
-Every factorisation is \code{checked} by default, so a violated property
-assumption aborts with a diagnostic instead of producing garbage.
+Every factorisation reports failure through the \code{info} of the
+function (\cref{sec:info}), so a violated property assumption is
+reported to the caller instead of producing garbage.
 
 % =====================================================================
 \section{Bufferization and lowering}\label{sec:lowering}
@@ -968,10 +971,8 @@ Strides are what an MLIR \code{memref} carries, so the lowering is direct:
         triangle is the column-major upper one; \code{getrf} factorises
         $A\T$) and \code{getrs} with several right-hand sides cannot be
         used at all;
-  \item factorisations return \code{info}.
-        The lowering wraps \code{potrf} and \code{getrf} in a small
-        template (emitted into the output) that aborts with a diagnostic
-        if a \code{checked} factorisation fails.
+  \item factorisations return \code{info}, which the generated function
+        turns into its own \code{info} (\cref{sec:info}).
 \end{itemize}
 
 \paragraph{The ulm.lam ABI.}
@@ -1068,18 +1069,20 @@ void gls(double *X, double *M, double *y, double *b,
   \item \code{*workspace_info == 0}: the function allocates one block of
         the required size, uses it, and frees it before it returns.
   \item \code{*workspace_info > 0}: the size of \code{work}.
-        If it is too small, the function calls the global function
-        \code{ulm_lam_workspace_error(required, given)} and returns;
-        otherwise all temporaries live in \code{work}.
+        It must be at least the required size; if it is too small, the
+        function returns $\mathit{info} = -i$, where $i$ is the position of
+        \code{workspace_info} (as LAPACK reports an illegal
+        \code{lwork}), and computes nothing.
+        Otherwise all temporaries live in \code{work}.
 \end{itemize}
 The sizes are in bytes, because the temporaries mix element types
 (matrices and \code{int32_t} pivots).
 All temporaries, including those of loops, become slots of the one block
-at 64-byte aligned offsets that are computed at compile time; in the C++
-each is \code{(double *)(work + offset)}.
-The generated code contains a weak default of \code{ulm_lam_workspace_error}
-that prints a message and aborts; a program can define its own, and then
-the function returns without computing.
+at 64-byte aligned offsets (computed at compile time, or from the sizes
+for dynamic dimensions); in the C++ each is
+\code{(double *)(work + offset)}.
+The query returns the size that exactly the evaluation chosen by the
+compiler needs; there is no separate minimal size as in LAPACK.
 Functions without temporaries keep their plain signature.
 
 \paragraph{Accumulation.}
@@ -1115,13 +1118,15 @@ plus the 35\,536\,000 of \code{gls} plus the 1\,600 of
 call of \code{postprocess} gets a large enough part of the caller's
 workspace, that the estimates equal separate calls of \code{gls}, both with
 a given workspace and with \code{*workspace_info = 0}, that
-\code{*workspace_info} is unchanged after the call, and that a workspace
-one byte too small calls the error function and computes nothing.
+\code{*workspace_info} is unchanged after the call, that a workspace
+one byte too small gives $\mathit{info} = -5$ and computes nothing, and
+that a failing \code{gls} (an indefinite $M$) makes \code{estimate_all}
+return $\mathit{info} = 1$ (its call of \code{gls}) at once.
 
 \begin{figure}[t]
 \begin{lstlisting}[style=c]
-void estimate_all(double *X, double *M, size_t n,
-                  int8_t *work, int64_t *workspace_info)
+int64_t estimate_all(double *X, double *M, size_t n,
+                     int8_t *work, int64_t *workspace_info)
 {
     int64_t given = *workspace_info;
     *workspace_info = -1;                         // query the callees
@@ -1132,17 +1137,21 @@ void estimate_all(double *X, double *M, size_t n,
     int64_t q2 = *workspace_info;
     *workspace_info = given;
     int64_t required = 17600 + up64(q1) + up64(q2);
-    if (given == -1) { *workspace_info = required; return; }
-    if (given > 0 && given < required) { ulm_lam_workspace_error(required, given); return; }
+    if (given == -1) { *workspace_info = required; return 0; }
+    if (given > 0 && given < required) return -5;  // info: argument 5
     int8_t *ws = given == 0 ? aligned_alloc(64, required) : work;
     double *y = (double *)(ws + 0), *b = (double *)(ws + 16000);
+    int64_t info = 0;
     for (size_t i = 0; i < n; ++i) {
+        if (info != 0) continue;   // a failed step: the others do nothing
         observe(i, y);
-        *workspace_info = q1;  gls(X, M, y, b, ws + 17600, workspace_info);
+        *workspace_info = q1;
+        if (gls(X, M, y, b, ws + 17600, workspace_info) != 0) { info = 1; continue; }
         *workspace_info = q2;  postprocess(i, b, ws + 17600 + up64(q1), workspace_info);
     }
     *workspace_info = given;
     if (given == 0) free(ws);
+    return info;
 }
 \end{lstlisting}
 \caption{The structure of the generated \code{estimate_all}
@@ -1156,8 +1165,10 @@ GLS needs 35.5\,MB (copies of $M$, $X$, $y$ and the matrix $S$); the
 driver queries the size once and passes the same workspace to every call.
 \file{examples/cases/driver.cc} checks all four cases: the query computes
 nothing, a given workspace gives the same result, and a workspace that is
-one byte too small calls the error function (here a replacement that
-counts) and computes nothing.
+one byte too small gives $\mathit{info} = -5$ and computes nothing; and
+that an indefinite matrix assumed spd gives $\mathit{info} = 1$ (its
+Cholesky factorisation) and a singular one $\mathit{info} = 1$ (its LU
+factorisation), without aborting.
 
 \begin{table}[t]
 \centering\small
@@ -1181,6 +1192,46 @@ counts) and computes nothing.
 select \code{trl*} or \code{tru*}.}
 \label{tab:ulmcalls}
 \end{table}
+
+\paragraph{Info.}\label{sec:info}
+Numerically, a matrix can fail a property that holds mathematically: a
+matrix that is positive definite in exact arithmetic need not be so in
+floating point, and the factorisation then breaks down.  LAPACK leaves
+the decision to the caller: its routines return \code{info}, and the caller
+either chooses another method or returns an \code{info} of its own.
+Every function that ulm.lam generates does the same:
+\begin{lstlisting}[style=c]
+extern "C" int64_t gls(size_t n, size_t m, double *X, double *M, double *y,
+                       double *b, int8_t *work, int64_t *workspace_info);
+/* returns info:
+ *    0  success
+ *    1  Cholesky factorisation of v4: not positive definite
+ *    2  Cholesky factorisation of a computed matrix: not positive definite
+ *   -8  v8: workspace too small
+ * (info != 0: the outputs are unspecified) */
+\end{lstlisting}
+$\mathit{info} = k > 0$ says that check $k$ failed: a factorisation
+(\code{potrf}: not positive definite; \code{getrf}: singular) or a call of
+another ulm.lam function that returned a non-zero \code{info};
+$\mathit{info} = -i$ that argument $i$ is illegal, which is the case for a
+workspace that is too small.  The checks are numbered in the order of the
+function body, and the interface comment lists them.
+\code{ulm-lam-info} implements this on buffers, after
+\code{ulm-lam-workspace}: the factorisation kernels return LAPACK's
+\code{info}, and after every check the rest of its block runs only if the
+check passed (an \code{scf.if} whose result is the status of the block).
+A loop carries the status: once an iteration has failed, the remaining
+ones do nothing, and the function returns the code of the failure.
+Releasing a workspace that the function allocated itself runs also after
+a failure.  The guards cost nothing measurable: the Kalman loop of
+\cref{sec:kalman} takes the same time as without them.
+
+In Python, a non-zero \code{info} raises \code{lam.InfoError}, whose
+message is the line of the interface comment, e.g.
+\code{gls: info 1: Cholesky factorisation of v4: not positive definite}.
+A fallback, such as an LU factorisation where a Cholesky factorisation
+fails, will use the same mechanism as choosing a plan by the sizes at run
+time: several plans for one formula in the generated code.
 
 \paragraph{What ulm.lam needs from ulmBLAS next.}
 ulm.lam also shows how missing ulmBLAS routines should look: in the style of
@@ -1362,8 +1413,8 @@ in place.}
 \code{ulm_lam} ops by kernel selection, \code{ulm-lam-results-to-out-params},
 upstream bufferization, \code{convert-ulm-lamk-to-ulmblas},
 \code{mlir-translate --mlir-to-cpp} and \code{clang-format}: the function
-\code{extern "C" void accumulate(...)}, without the \code{\#include}
-lines and the weak \code{ulm_lam_workspace_error} in front of it.
+\code{extern "C" int64_t accumulate(...)}, without the \code{\#include}
+lines in front of it.
 $B$ (\texttt{v18}) and $T$ (\texttt{v20}) live in the workspace; \code{foo}
 writes $B$ by reference; $X$ (\texttt{v3}) is updated in place by the
 second \code{ulmBLAS::gemm} ($\beta=1$).}
@@ -1378,12 +1429,13 @@ mlir-opt --load-dialect-plugin=UlmLamPasses.dylib \
          --load-pass-plugin=UlmLamPasses.dylib --pass-pipeline='builtin.module(
     func.func(ulm-lam-normalize, ulm-lam-infer-properties, ulm-lam-select-kernels),
     ulm-lam-strip-properties, canonicalize,
-    ulm-lam-results-to-out-params,
+    ulm-lam-results-to-out-params, eliminate-empty-tensors,
     one-shot-bufferize{bufferize-function-boundaries
                        function-boundary-type-conversion=identity-layout-map},
     buffer-results-to-out-params{hoist-static-allocs modify-public-functions},
     func.func(buffer-loop-hoisting), buffer-deallocation-pipeline,
-    canonicalize, ulm-lam-workspace, canonicalize,
+    canonicalize, ulm-lam-workspace, canonicalize, cse,
+    ulm-lam-info, canonicalize,
     convert-ulm-lamk-to-ulmblas, reconcile-unrealized-casts, form-expressions)'
 mlir-translate --mlir-to-cpp gls.emitc.mlir -o gls.cpp
 clang-format -i gls.cpp
@@ -1479,17 +1531,17 @@ with strides $(1, 200)$, in the \code{gemm} for $W\T W$ and in the
 \label{lst:glssel}
 \end{figure}
 
-\begin{figure}[tbp]
+% (not a float: the listing is longer than a page and breaks)
 \IfFileExists{\src examples/gls/generated/gls.cpp}{%
   \srcbetween[style=c]{\src examples/gls/generated/gls.cpp}{gls(double}{}{glscpp}}{%
   \fbox{run \code{make gls} to generate this listing}}
-\caption{GLS in C++ calling ulmBLAS, generated from stage~2: the
-function \code{extern "C" void gls(...)}, without the \code{\#include}
-lines and the helpers in front of it (\code{ulm_lam_potrf}, the info check of
-\cref{sec:ulmblas}, and the weak \code{ulm_lam_workspace_error}).  The outer
-\code{if}s implement the workspace convention (\cref{sec:workspace}).}
+\captionof{figure}{GLS in C++ calling ulmBLAS, generated from stage~2: the
+function \code{extern "C" int64_t gls(...)}, without the
+\code{\#include} lines in front of it.  The outer \code{if}s implement the
+workspace convention (\cref{sec:workspace}), the inner ones the
+\code{info} of \cref{sec:info}.}
 \label{lst:glscpp}
-\end{figure}
+\medskip
 
 \paragraph{Results.}
 \file{driver.cc} uses ulmBLAS for everything:

@@ -23,7 +23,7 @@ BUFFERIZE='ulm-lam-results-to-out-params, eliminate-empty-tensors,
 	one-shot-bufferize{bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map},
 	buffer-results-to-out-params{hoist-static-allocs modify-public-functions add-result-attr},
 	func.func(buffer-loop-hoisting), buffer-deallocation-pipeline, canonicalize,
-	ulm-lam-workspace, canonicalize, cse'
+	ulm-lam-workspace, canonicalize, cse, ulm-lam-info, canonicalize'
 LOWER='convert-ulm-lamk-to-ulmblas, reconcile-unrealized-casts, form-expressions'
 
 opt "$IN" --pass-pipeline="builtin.module($SELECT)" -o "$OUT.selected.mlir"

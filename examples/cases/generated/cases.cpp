@@ -7,88 +7,66 @@
 #include <ulmblas/lapack/getrs.h>
 #include <ulmblas/lapack/potrf.h>
 #include <ulmblas/ulmblas.h>
-template <typename T>
-static void
-ulm_lam_potrf(bool lower, std::ptrdiff_t n, T *A, std::ptrdiff_t incRow,
-              std::ptrdiff_t incCol, bool checked)
-{
-    std::ptrdiff_t info = ulmBLAS::potrf(lower, n, A, incRow, incCol);
-    if (checked && info != 0) {
-	std::fprintf(
-	    stderr,
-	    "ulm_lam: matrix is not positive definite (potrf info %td)\n",
-	    info);
-	std::abort();
-    }
-}
-template <typename T>
-static void
-ulm_lam_getrf(std::ptrdiff_t m, std::ptrdiff_t n, T *A, std::ptrdiff_t incRow,
-              std::ptrdiff_t incCol, int32_t *piv, bool checked)
-{
-    std::ptrdiff_t info =
-        ulmBLAS::getrf(m, n, A, incRow, incCol, piv, std::ptrdiff_t(1));
-    if (checked && info != 0) {
-	std::fprintf(stderr, "ulm_lam: matrix is singular (getrf info %td)\n",
-	             info);
-	std::abort();
-    }
-}
-extern "C" __attribute__((weak)) void
-ulm_lam_workspace_error(int64_t required, int64_t given)
-{
-    std::fprintf(
-        stderr,
-        "ulm_lam: workspace too small: %lld bytes required, %lld given\n",
-        (long long)required, (long long)given);
-    std::abort();
-}
-extern "C" void
-ulm_lam_workspace_error(int64_t, int64_t);
 /* lu: matrices by reference (row-major), owned by the caller
  *   v1  double[64][64]  in    read only
  *   v2  double[64][32]  in    read only
  *   v3  double[64][32]  out   written
  *   v4  int8_t *        work  workspace (bytes)
  *   v5  int64_t *       info  -1: query, 0: allocate, >0: size of work
+ * returns info:
+ *    0  success
+ *    1  LU factorisation of v1: singular
+ *   -5  v5: workspace too small
+ * (info != 0: the outputs are unspecified)
  */
-extern "C" void
+extern "C" int64_t
 lu(double *v1, double *v2, double *v3, int8_t *v4, int64_t *v5)
 {
     int64_t v6 = 33024;
     int64_t v7 = 0;
     size_t v8 = 0;
     int64_t v9 = v5[v8];
+    int64_t v10;
     if (v9 == -1) {
 	v5[v8] = v6;
+	v10 = v7;
     } else {
+	int64_t v11;
 	if (v9 > v7 & v9 < v6) {
-	    ulm_lam_workspace_error(v6, v9);
+	    v11 = -5;
 	} else {
-	    bool v10 = v9 == v7;
-	    int8_t *v11;
-	    if (v10) {
-		void *v12 = aligned_alloc(64, 33024);
-		v11 = (int8_t *)v12;
+	    bool v12 = v9 == v7;
+	    int8_t *v13;
+	    if (v12) {
+		void *v14 = aligned_alloc(64, 33024);
+		v13 = (int8_t *)v14;
 	    } else {
-		v11 = v4;
+		v13 = v4;
 	    }
-	    int8_t *v13 = v11;
-	    int64_t v14 = (int64_t)v8;
-	    int32_t *v15 = (int32_t *)(v13 + v14);
-	    int64_t v16 = (int64_t)256;
-	    double *v17 = (double *)(v13 + v16);
-	    memcpy(v17, v1, 32768);
-	    ulm_lam_getrf(64, 64, v17, 64, 1, v15, true);
-	    memcpy(v3, v2, 16384);
-	    ulmBLAS::getrs<std::ptrdiff_t>(false, false, 64, 32, v17, 64, 1,
-	                                   v15, 1, v3, 32, 1);
-	    if (v10) {
-		free(v13);
+	    int8_t *v15 = v13;
+	    int64_t v16 = (int64_t)v8;
+	    int32_t *v17 = (int32_t *)(v15 + v16);
+	    int64_t v18 = (int64_t)256;
+	    double *v19 = (double *)(v15 + v18);
+	    memcpy(v19, v1, 32768);
+	    int64_t v20 =
+	        ulmBLAS::getrf<std::ptrdiff_t>(64, 64, v19, 64, 1, v17, 1);
+	    bool v21 = (bool)(v20 != v7);
+	    uint64_t v22 = (uint64_t)v21;
+	    int64_t v23 = (int64_t)v22;
+	    if (v23 == v7) {
+		memcpy(v3, v2, 16384);
+		ulmBLAS::getrs<std::ptrdiff_t>(false, false, 64, 32, v19, 64, 1,
+		                               v17, 1, v3, 32, 1);
 	    }
+	    if (v12) {
+		free(v15);
+	    }
+	    v11 = v23;
 	}
+	v10 = v11;
     }
-    return;
+    return v10;
 }
 /* lu_t: matrices by reference (row-major), owned by the caller
  *   v1  double[64][64]  in    read only
@@ -96,86 +74,111 @@ lu(double *v1, double *v2, double *v3, int8_t *v4, int64_t *v5)
  *   v3  double[64][32]  out   written
  *   v4  int8_t *        work  workspace (bytes)
  *   v5  int64_t *       info  -1: query, 0: allocate, >0: size of work
+ * returns info:
+ *    0  success
+ *    1  LU factorisation of v1: singular
+ *   -5  v5: workspace too small
+ * (info != 0: the outputs are unspecified)
  */
-extern "C" void
+extern "C" int64_t
 lu_t(double *v1, double *v2, double *v3, int8_t *v4, int64_t *v5)
 {
     int64_t v6 = 33024;
     int64_t v7 = 0;
     size_t v8 = 0;
     int64_t v9 = v5[v8];
+    int64_t v10;
     if (v9 == -1) {
 	v5[v8] = v6;
+	v10 = v7;
     } else {
+	int64_t v11;
 	if (v9 > v7 & v9 < v6) {
-	    ulm_lam_workspace_error(v6, v9);
+	    v11 = -5;
 	} else {
-	    bool v10 = v9 == v7;
-	    int8_t *v11;
-	    if (v10) {
-		void *v12 = aligned_alloc(64, 33024);
-		v11 = (int8_t *)v12;
+	    bool v12 = v9 == v7;
+	    int8_t *v13;
+	    if (v12) {
+		void *v14 = aligned_alloc(64, 33024);
+		v13 = (int8_t *)v14;
 	    } else {
-		v11 = v4;
+		v13 = v4;
 	    }
-	    int8_t *v13 = v11;
-	    int64_t v14 = (int64_t)v8;
-	    int32_t *v15 = (int32_t *)(v13 + v14);
-	    int64_t v16 = (int64_t)256;
-	    double *v17 = (double *)(v13 + v16);
-	    memcpy(v17, v1, 32768);
-	    ulm_lam_getrf(64, 64, v17, 64, 1, v15, true);
-	    memcpy(v3, v2, 16384);
-	    ulmBLAS::getrs<std::ptrdiff_t>(true, false, 64, 32, v17, 64, 1, v15,
-	                                   1, v3, 32, 1);
-	    if (v10) {
-		free(v13);
+	    int8_t *v15 = v13;
+	    int64_t v16 = (int64_t)v8;
+	    int32_t *v17 = (int32_t *)(v15 + v16);
+	    int64_t v18 = (int64_t)256;
+	    double *v19 = (double *)(v15 + v18);
+	    memcpy(v19, v1, 32768);
+	    int64_t v20 =
+	        ulmBLAS::getrf<std::ptrdiff_t>(64, 64, v19, 64, 1, v17, 1);
+	    bool v21 = (bool)(v20 != v7);
+	    uint64_t v22 = (uint64_t)v21;
+	    int64_t v23 = (int64_t)v22;
+	    if (v23 == v7) {
+		memcpy(v3, v2, 16384);
+		ulmBLAS::getrs<std::ptrdiff_t>(true, false, 64, 32, v19, 64, 1,
+		                               v17, 1, v3, 32, 1);
 	    }
+	    if (v12) {
+		free(v15);
+	    }
+	    v11 = v23;
 	}
+	v10 = v11;
     }
-    return;
+    return v10;
 }
 /* upper: matrices by reference (row-major), owned by the caller
  *   v1  double[64][64]  in   read only
  *   v2  double[64][32]  in   read only
  *   v3  double[64][32]  out  written
+ * returns info:
+ *    0  success
+ * (info != 0: the outputs are unspecified)
  */
-extern "C" void
+extern "C" int64_t
 upper(double *v1, double *v2, double *v3)
 {
     double v4 = 1.00000000000000000e+00;
     memcpy(v3, v2, 16384);
     ulmBLAS::trusm<std::ptrdiff_t>(64, 32, v4, false, false, v1, 64, 1, v3, 32,
                                    1);
-    return;
+    return 0;
 }
 /* right: matrices by reference (row-major), owned by the caller
  *   v1  double[32][64]  in   read only
  *   v2  double[64][64]  in   read only
  *   v3  double[32][64]  out  written
+ * returns info:
+ *    0  success
+ * (info != 0: the outputs are unspecified)
  */
-extern "C" void
+extern "C" int64_t
 right(double *v1, double *v2, double *v3)
 {
     double v4 = 1.00000000000000000e+00;
     memcpy(v3, v1, 16384);
     ulmBLAS::trusm<std::ptrdiff_t>(64, 32, v4, false, false, v2, 1, 64, v3, 1,
                                    64);
-    return;
+    return 0;
 }
 /* right_t: matrices by reference (row-major), owned by the caller
  *   v1  double[32][64]  in   read only
  *   v2  double[64][64]  in   read only
  *   v3  double[32][64]  out  written
+ * returns info:
+ *    0  success
+ * (info != 0: the outputs are unspecified)
  */
-extern "C" void
+extern "C" int64_t
 right_t(double *v1, double *v2, double *v3)
 {
     double v4 = 1.00000000000000000e+00;
     memcpy(v3, v1, 16384);
     ulmBLAS::trlsm<std::ptrdiff_t>(64, 32, v4, false, false, v2, 64, 1, v3, 1,
                                    64);
-    return;
+    return 0;
 }
 /* chol_vec: matrices by reference (row-major), owned by the caller
  *   v1  double[64][64]  in    read only
@@ -183,50 +186,68 @@ right_t(double *v1, double *v2, double *v3)
  *   v3  double[64][1]   out   written
  *   v4  int8_t *        work  workspace (bytes)
  *   v5  int64_t *       info  -1: query, 0: allocate, >0: size of work
+ * returns info:
+ *    0  success
+ *    1  Cholesky factorisation of v1: not positive definite
+ *   -5  v5: workspace too small
+ * (info != 0: the outputs are unspecified)
  */
-extern "C" void
+extern "C" int64_t
 chol_vec(double *v1, double *v2, double *v3, int8_t *v4, int64_t *v5)
 {
     int64_t v6 = 32768;
     int64_t v7 = 0;
     size_t v8 = 0;
     int64_t v9 = v5[v8];
+    int64_t v10;
     if (v9 == -1) {
 	v5[v8] = v6;
+	v10 = v7;
     } else {
+	int64_t v11;
 	if (v9 > v7 & v9 < v6) {
-	    ulm_lam_workspace_error(v6, v9);
+	    v11 = -5;
 	} else {
-	    bool v10 = v9 == v7;
-	    int8_t *v11;
-	    if (v10) {
-		void *v12 = aligned_alloc(64, 32768);
-		v11 = (int8_t *)v12;
+	    bool v12 = v9 == v7;
+	    int8_t *v13;
+	    if (v12) {
+		void *v14 = aligned_alloc(64, 32768);
+		v13 = (int8_t *)v14;
 	    } else {
-		v11 = v4;
+		v13 = v4;
 	    }
-	    int8_t *v13 = v11;
-	    int64_t v14 = (int64_t)v8;
-	    double *v15 = (double *)(v13 + v14);
-	    memcpy(v15, v1, 32768);
-	    ulm_lam_potrf(true, 64, v15, 64, 1, true);
-	    memcpy(v3, v2, 512);
-	    ulmBLAS::trlsv<std::ptrdiff_t>(64, false, v15, 64, 1, v3, 1);
-	    ulmBLAS::trusv<std::ptrdiff_t>(64, false, v15, 1, 64, v3, 1);
-	    if (v10) {
-		free(v13);
+	    int8_t *v15 = v13;
+	    int64_t v16 = (int64_t)v8;
+	    double *v17 = (double *)(v15 + v16);
+	    memcpy(v17, v1, 32768);
+	    int64_t v18 = ulmBLAS::potrf<std::ptrdiff_t>(true, 64, v17, 64, 1);
+	    bool v19 = (bool)(v18 != v7);
+	    uint64_t v20 = (uint64_t)v19;
+	    int64_t v21 = (int64_t)v20;
+	    if (v21 == v7) {
+		memcpy(v3, v2, 512);
+		ulmBLAS::trlsv<std::ptrdiff_t>(64, false, v17, 64, 1, v3, 1);
+		ulmBLAS::trusv<std::ptrdiff_t>(64, false, v17, 1, 64, v3, 1);
 	    }
+	    if (v12) {
+		free(v15);
+	    }
+	    v11 = v21;
 	}
+	v10 = v11;
     }
-    return;
+    return v10;
 }
 /* sum: matrices by reference (row-major), owned by the caller
  *   v1  double[64][64]  in   read only
  *   v2  double[64][64]  in   read only
  *   v3  double[64][64]  in   read only
  *   v4  double[64][64]  out  written
+ * returns info:
+ *    0  success
+ * (info != 0: the outputs are unspecified)
  */
-extern "C" void
+extern "C" int64_t
 sum(double *v1, double *v2, double *v3, double *v4)
 {
     double v5 = 2.00000000000000000e+00;
@@ -234,7 +255,7 @@ sum(double *v1, double *v2, double *v3, double *v4)
     memcpy(v4, v1, 32768);
     ulmBLAS::geaxpy<std::ptrdiff_t>(64, 64, v5, v2, 64, 1, v4, 64, 1);
     ulmBLAS::geaxpy<std::ptrdiff_t>(64, 64, v6, v3, 64, 1, v4, 64, 1);
-    return;
+    return 0;
 }
 /* mixed: matrices by reference (row-major), owned by the caller
  *   v1  double[64][64]  in    read only
@@ -244,8 +265,13 @@ sum(double *v1, double *v2, double *v3, double *v4)
  *   v5  double[64][32]  out   written
  *   v6  int8_t *        work  workspace (bytes)
  *   v7  int64_t *       info  -1: query, 0: allocate, >0: size of work
+ * returns info:
+ *    0  success
+ *    1  LU factorisation of v1: singular
+ *   -7  v7: workspace too small
+ * (info != 0: the outputs are unspecified)
  */
-extern "C" void
+extern "C" int64_t
 mixed(double *v1, double *v2, double *v3, double *v4, double *v5, int8_t *v6,
       int64_t *v7)
 {
@@ -255,39 +281,52 @@ mixed(double *v1, double *v2, double *v3, double *v4, double *v5, int8_t *v6,
     int64_t v11 = 0;
     size_t v12 = 0;
     int64_t v13 = v7[v12];
+    int64_t v14;
     if (v13 == -1) {
 	v7[v12] = v8;
+	v14 = v11;
     } else {
+	int64_t v15;
 	if (v13 > v11 & v13 < v8) {
-	    ulm_lam_workspace_error(v8, v13);
+	    v15 = -7;
 	} else {
-	    bool v14 = v13 == v11;
-	    int8_t *v15;
-	    if (v14) {
-		void *v16 = aligned_alloc(64, 49408);
-		v15 = (int8_t *)v16;
+	    bool v16 = v13 == v11;
+	    int8_t *v17;
+	    if (v16) {
+		void *v18 = aligned_alloc(64, 49408);
+		v17 = (int8_t *)v18;
 	    } else {
-		v15 = v6;
+		v17 = v6;
 	    }
-	    int8_t *v17 = v15;
-	    int64_t v18 = (int64_t)v12;
-	    int32_t *v19 = (int32_t *)(v17 + v18);
-	    int64_t v20 = (int64_t)256;
-	    double *v21 = (double *)(v17 + v20);
-	    memcpy(v21, v1, 32768);
-	    ulm_lam_getrf(64, 64, v21, 64, 1, v19, true);
-	    int64_t v22 = (int64_t)33024;
-	    double *v23 = (double *)(v17 + v22);
-	    ulmBLAS::gemm<std::ptrdiff_t>(64, 32, 64, v9, false, v2, 64, 1,
-	                                  false, v3, 32, 1, v10, v23, 32, 1);
-	    ulmBLAS::getrs<std::ptrdiff_t>(false, false, 64, 32, v21, 64, 1,
-	                                   v19, 1, v23, 32, 1);
-	    memcpy(v5, v4, 16384);
-	    ulmBLAS::geaxpy<std::ptrdiff_t>(64, 32, v9, v23, 32, 1, v5, 32, 1);
-	    if (v14) {
-		free(v17);
+	    int8_t *v19 = v17;
+	    int64_t v20 = (int64_t)v12;
+	    int32_t *v21 = (int32_t *)(v19 + v20);
+	    int64_t v22 = (int64_t)256;
+	    double *v23 = (double *)(v19 + v22);
+	    memcpy(v23, v1, 32768);
+	    int64_t v24 =
+	        ulmBLAS::getrf<std::ptrdiff_t>(64, 64, v23, 64, 1, v21, 1);
+	    bool v25 = (bool)(v24 != v11);
+	    uint64_t v26 = (uint64_t)v25;
+	    int64_t v27 = (int64_t)v26;
+	    if (v27 == v11) {
+		int64_t v28 = (int64_t)33024;
+		double *v29 = (double *)(v19 + v28);
+		ulmBLAS::gemm<std::ptrdiff_t>(64, 32, 64, v9, false, v2, 64, 1,
+		                              false, v3, 32, 1, v10, v29, 32,
+		                              1);
+		ulmBLAS::getrs<std::ptrdiff_t>(false, false, 64, 32, v23, 64, 1,
+		                               v21, 1, v29, 32, 1);
+		memcpy(v5, v4, 16384);
+		ulmBLAS::geaxpy<std::ptrdiff_t>(64, 32, v9, v29, 32, 1, v5, 32,
+		                                1);
 	    }
+	    if (v16) {
+		free(v19);
+	    }
+	    v15 = v27;
 	}
+	v14 = v15;
     }
-    return;
+    return v14;
 }
