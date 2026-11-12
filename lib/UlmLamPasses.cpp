@@ -257,9 +257,16 @@ class Selector
 	    if (isa<MulOp, AddOp>(op))
 		ops.push_back(op);
 	});
+	for (Operation *op : ops)
+	    if (auto m = dyn_cast<MulOp>(op); m && invertFactorwise(m))
+		expanded.insert(m);
 	for (Operation *op : ops) {
-	    // a product used only by a sum is emitted by that sum
-	    if (consumed.contains(op) || feedsSum(op))
+	    // a product used only by a sum is emitted by that sum; a product
+	    // inverted factor by factor is never formed
+	    if (consumed.contains(op) || feedsSum(op) ||
+	        (expanded.contains(op) &&
+	         llvm::all_of(op->getUsers(),
+	                      [](Operation *u) { return isa<InverseOp>(u); })))
 		continue;
 	    b.setInsertionPoint(op);
 	    FailureOr<Value> r = isa<AddOp>(op)
@@ -276,6 +283,9 @@ class Selector
     func::FuncOp func;
     OpBuilder b;
     llvm::SmallPtrSet<Operation *, 8> consumed;
+    /// Products that are only used inverted and are cheaper to invert
+    /// factor by factor: (A B)^-1 = B^-1 A^-1.
+    llvm::SmallPtrSet<Operation *, 8> expanded;
     llvm::DenseMap<Value, Factor> factors;
     DominanceInfo dom;
 
@@ -348,6 +358,63 @@ class Selector
 
     // ---- factorisations ----------------------------------------------------
 
+    /// Cost of factorising an n x n matrix with properties p (0: it is
+    /// triangular, or already factorised).
+    double
+    factorCost(Value m)
+    {
+	if (factors.contains(m))
+	    return 0;
+	auto t = cast<RankedTensorType>(m.getType());
+	Properties p = closure(propertiesOf(t), t.getShape());
+	double n = costSize(t.getDimSize(0));
+	if (bitEnumContainsAll(p, Properties::lower_tri) ||
+	    bitEnumContainsAll(p, Properties::upper_tri))
+	    return 0;
+	if (bitEnumContainsAll(p, Properties::spd))
+	    return n * n * n / 3;
+	return 2 * n * n * n / 3;
+    }
+
+    /// Invert the product m = F_1 ... F_k factor by factor
+    /// (F_k^-1 ... F_1^-1) instead of forming and factorising it?  Possible
+    /// if every factor is square and non-singular; chosen if factorising
+    /// the distinct factors costs less than forming the product (unless
+    /// it is needed anyway) and factorising it.  E.g. (R R)^-1 with R spd:
+    /// one Cholesky factorisation of R (n^3/3) instead of R R (2n^3) and
+    /// its factorisation (n^3/3); and cond(R) instead of cond(R)^2.
+    bool
+    invertFactorwise(MulOp m)
+    {
+	bool onlyInverted = llvm::all_of(
+	    m->getUsers(), [](Operation *u) { return isa<InverseOp>(u); });
+	if (m->use_empty() || !llvm::any_of(m->getUsers(), [](Operation *u) {
+	        return isa<InverseOp>(u);
+	    }))
+	    return false;
+	llvm::SmallPtrSet<Value, 4> distinct;
+	double n = 0;
+	for (Value f : m.getFactors()) {
+	    Value v = f;
+	    while (auto t = v.getDefiningOp<TransposeOp>())
+		v = t.getOperand();
+	    auto t = cast<RankedTensorType>(v.getType());
+	    Properties p = closure(propertiesOf(t), t.getShape());
+	    OpFoldResult r = dimOf(v, 0), c = dimOf(v, 1);
+	    if (!r || r != c ||
+	        !bitEnumContainsAll(p, Properties::non_singular))
+		return false;
+	    n = costSize(t.getDimSize(0));
+	    distinct.insert(v);
+	}
+	double factorwise = 0;
+	for (Value v : distinct)
+	    factorwise += factorCost(v);
+	double form =
+	    onlyInverted ? 2 * n * n * n * (m.getFactors().size() - 1) : 0;
+	return factorwise < form + factorCost(m.getResult());
+    }
+
     /// Factorise `m` once, right after its definition.
     Factor
     factorise(Value m)
@@ -395,11 +462,11 @@ class Selector
     }
 
     /// The leaves of one factor of a product.
+    /// (trans, inv: the factor is v^T, v^-1 or v^-T.)
     LogicalResult
     leavesOf(Value v, Operation *user, SmallVectorImpl<Leaf> &out,
-             double &alpha)
+             double &alpha, bool trans = false, bool inv = false)
     {
-	bool trans = false, inv = false;
 	while (true) {
 	    if (auto t = v.getDefiningOp<TransposeOp>()) {
 		trans = !trans;
@@ -434,6 +501,17 @@ class Selector
 		       << kDimsAttr << "?)";
 	if (!inv) {
 	    out.push_back({Leaf::Mat, v, {}, trans, true});
+	    return success();
+	}
+	// (F_1 ... F_k)^-1 = F_k^-1 ... F_1^-1, (F_1 ... F_k)^-T = F_1^-T ...
+	// F_k^-T: factorise the factors instead of the product
+	if (auto m = v.getDefiningOp<MulOp>(); m && expanded.contains(m)) {
+	    SmallVector<Value> fs(m.getFactors());
+	    if (!trans)
+		std::reverse(fs.begin(), fs.end());
+	    for (Value f : fs)
+		if (failed(leavesOf(f, user, out, alpha, trans, true)))
+		    return failure();
 	    return success();
 	}
 	Factor f = factorise(v);

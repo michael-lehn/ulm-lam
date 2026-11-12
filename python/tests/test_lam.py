@@ -272,6 +272,31 @@ except ImportError:
 
 
 @unittest.skipIf(np is None, "NumPy is not installed")
+class Rewrites(unittest.TestCase):
+
+    def test_inverse_of_product_factorwise(self):
+        """(R R)^-1 with R spd: R R is spd (property rule), and it is
+        inverted factor by factor: one Cholesky factorisation of R, R R is
+        never formed (no N x N gemm)."""
+
+        @lam.function
+        def gls_squared(X: Matrix(N, K, "full_rank"), R: Matrix(N, N, "spd"),
+                        y: Vector(N)):
+            M = R @ R
+            return (X.T @ M.inv @ X).inv @ X.T @ M.inv @ y
+
+        lib = lam.compile(gls_squared)
+        X, R, y = rand(N, K), spd(N), [rnd.uniform(-1, 1) for _ in range(N)]
+        M, Y = matmul(R, R), [[v] for v in y]
+        MiX, Miy = solve(M, X), solve(M, Y)
+        ref = flat(solve(matmul(tr(X), MiX), matmul(tr(X), Miy)))
+        self.assertLess(rel(lib.gls_squared(X, R, y), ref), 1e-10)
+        src = lib.gls_squared.cpp
+        self.assertEqual(src.count("ulm_lam_potrf(true, %d," % N), 1)
+        self.assertNotIn("gemm<std::ptrdiff_t>(%d, %d" % (N, N), src)
+        self.assertNotIn("getrf", src)
+
+
 class Cache(unittest.TestCase):
 
     def test_interrupted_build_is_not_reused(self):

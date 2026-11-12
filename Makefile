@@ -1,8 +1,8 @@
 # ULMBLAS_DIR (default ~/git/ulmBLAS) and ARCHFLAGS (default -mcpu=native)
 # select ulmBLAS and its micro kernels, see scripts/ulmblas-env.sh.
-.PHONY: all ods plugin stages loop gls kalman compose cases python doc clean
+.PHONY: all ods plugin stages loop gls kalman compose cases dynamic python doc clean
 
-all: ods plugin stages loop gls kalman compose cases python doc
+all: ods plugin stages loop gls kalman compose cases dynamic python doc
 
 ods:            ## run all mlir-tblgen backends on the dialect sketch
 	scripts/check-ods.sh
@@ -30,6 +30,9 @@ compose:        ## functions with workspaces calling such functions: accumulated
 
 cases:          ## inverses, solves and sums: C++ with ulmBLAS against naive code
 	examples/cases/run.sh
+
+dynamic:        ## GLS with sizes as run-time parameters: one library, several sizes
+	examples/dynamic/run.sh
 
 python:         ## the Python frontend: unit tests and the Kalman examples
 	python3 -m unittest discover -s python/tests

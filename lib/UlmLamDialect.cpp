@@ -191,6 +191,76 @@ transposed(Value v)
     return {};
 }
 
+bool
+isSymmetric(Value v)
+{
+    return has(closure(propertiesOf(v.getType()),
+                       cast<RankedTensorType>(v.getType()).getShape()),
+               P::symmetric);
+}
+
+/// A factor of a product up to transposition: the matrix and whether it
+/// is transposed (never for a symmetric matrix: S^T = S).
+std::pair<Value, bool>
+leafOf(Value v)
+{
+    bool t = false;
+    while (Value a = transposed(v)) {
+	v = a;
+	t = !t;
+    }
+    return {v, isSymmetric(v) ? false : t};
+}
+
+/// Z has full column rank: a single factor of full rank with at least as
+/// many rows as columns, or a product of non-singular factors.  With a
+/// dynamic size, a full-rank Z is taken to have full column rank: Z^T M Z
+/// is then invertible, as the formulas that invert it require (if not,
+/// the checked Cholesky factorisation reports it at run time).
+bool
+fullColumnRank(ValueRange z, ArrayRef<P> ps)
+{
+    if (llvm::all_of(ps, [](P p) { return has(p, P::non_singular); }))
+	return true;
+    if (z.size() != 1 || !has(ps[0], P::full_rank))
+	return false;
+    int64_t r = rows(z[0].getType()), c = cols(z[0].getType());
+    return ShapedType::isDynamic(r) || ShapedType::isDynamic(c) || r >= c;
+}
+
+/// Products that read the same backwards when transposed,
+/// F_1 ... F_k with F_i^T = F_(k+1-i):
+///   Z^T Z      (k even)            spsd, spd if Z has full column rank;
+///   Z^T M Z    (k odd, M middle)   symmetric if M is, spsd if M is, spd if
+///                                  M is spd and Z has full column rank.
+/// This covers A^T A, A A^T, A^T P A, and S S, S^3 for symmetric S (S^T =
+/// S): e.g. R R with R spd is spd.
+P
+palindromeProperties(ValueRange f, ArrayRef<P> ps)
+{
+    size_t k = f.size(), h = k / 2;
+    if (k < 2)
+	return P::general;
+    for (size_t i = 0; i < h; ++i) {
+	auto [a, ta] = leafOf(f[i]);
+	auto [b, tb] = leafOf(f[k - 1 - i]);
+	if (a != b || (ta == tb && !isSymmetric(a)))
+	    return P::general;
+    }
+    ValueRange z = f.drop_front(k - h);
+    ArrayRef<P> pz = ps.drop_front(k - h);
+    if (k % 2 == 0)
+	return fullColumnRank(z, pz) ? P::spd : P::spsd;
+    P m = ps[h];
+    if (has(m, P::spd) && fullColumnRank(z, pz))
+	return P::spd;
+    if (has(m, P::spsd))
+	return P::spsd;
+    if (has(m, P::symmetric))
+	return P::symmetric;
+    return P::general;
+}
+
 P
 mulProperties(ValueRange f)
 {
@@ -209,35 +279,12 @@ mulProperties(ValueRange f)
     r = r & all;
     if (anyZero)
 	return P::zero;
-    // A^T A and A A^T
-    if (f.size() == 2) {
-	if (Value a = transposed(f[0]); a && a == f[1]) {
-	    r = r | P::spsd;
-	    if (has(ps[1], P::full_rank) &&
-	        rows(a.getType()) >= cols(a.getType()))
-		r = r | P::spd;
-	}
-	if (Value a = transposed(f[1]); a && a == f[0]) {
-	    r = r | P::spsd;
-	    if (has(ps[0], P::full_rank) &&
-	        cols(a.getType()) >= rows(a.getType()))
-		r = r | P::spd;
-	}
-	// N A and A N with N non-singular keep the rank of A
-	if ((has(ps[0], P::non_singular) && has(ps[1], P::full_rank)) ||
-	    (has(ps[1], P::non_singular) && has(ps[0], P::full_rank)))
-	    r = r | P::full_rank;
-    }
-    // A^T P A with P spd (spsd)
-    if (f.size() == 3) {
-	if (Value a = transposed(f[0]); a && a == f[2]) {
-	    if (has(ps[1], P::spsd))
-		r = r | P::spsd;
-	    if (has(ps[1], P::spd) && has(ps[2], P::full_rank) &&
-	        rows(a.getType()) >= cols(a.getType()))
-		r = r | P::spd;
-	}
-    }
+    // N A and A N with N non-singular keep the rank of A
+    if (f.size() == 2 &&
+        ((has(ps[0], P::non_singular) && has(ps[1], P::full_rank)) ||
+         (has(ps[1], P::non_singular) && has(ps[0], P::full_rank))))
+	r = r | P::full_rank;
+    return r | palindromeProperties(f, ps);
     return r;
 }
 
