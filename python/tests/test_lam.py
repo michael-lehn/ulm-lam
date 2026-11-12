@@ -324,6 +324,101 @@ class Info(unittest.TestCase):
         self.assertEqual(calls, [])
 
 
+@unittest.skipIf(np is None, "NumPy is not installed")
+class Dynamic(unittest.TestCase):
+    """Sizes as names: run-time parameters, taken from the arrays."""
+
+    @classmethod
+    def setUpClass(cls):
+        obs = lam.extern("observe_n", [Index], Vector("n"))
+        rec = lam.extern("record_m", [Index, Vector("m")])
+
+        @lam.function
+        def gls_d(X: Matrix("n", "m", "full_rank"),
+                  M: Matrix("n", "n", "spd"), y: Vector("n")):
+            return (X.T @ M.inv @ X).inv @ X.T @ M.inv @ y
+
+        @lam.function
+        def estimate_d(H: Matrix("n", "m", "full_rank"),
+                       R: Matrix("n", "n", "spd"), steps: Index):
+            with lam.loop(steps) as L:
+                y = obs(L.index)
+                rec(L.index, (H.T @ R.inv @ H).inv @ H.T @ R.inv @ y)
+
+        @lam.function
+        def calls_d(X: Matrix("n", "m", "full_rank"),
+                    M: Matrix("n", "n", "spd"), y: Vector("n")):
+            return gls_d(X, M, y)
+
+        @lam.function
+        def chain_d(A: Matrix("n", "k"), B: Matrix("k", "m"),
+                    C: Matrix("m", "p")):
+            return A @ B @ C
+
+        cls.lib = lam.compile([gls_d, estimate_d, calls_d, chain_d],
+                              name="dynamic")
+        cls.rng = np.random.default_rng(3)
+
+    def problem(self, n, m):
+        X = self.rng.uniform(-1, 1, (n, m))
+        A = self.rng.uniform(-1, 1, (n, n))
+        return X, A @ A.T + n * np.eye(n), self.rng.uniform(-1, 1, n)
+
+    def test_one_library_several_sizes(self):
+        for n, m in [(5, 2), (60, 7), (200, 30)]:
+            X, M, y = self.problem(n, m)
+            ref = np.linalg.solve(X.T @ np.linalg.solve(M, X),
+                                  X.T @ np.linalg.solve(M, y))
+            self.assertLess(np.abs(self.lib.gls_d(X, M, y)[:, 0] - ref)
+                            .max(), 1e-12)
+            self.assertLess(np.abs(self.lib.calls_d(X, M, y)[:, 0] - ref)
+                            .max(), 1e-12)
+            # temporaries: L (n x n), K (m x m), W (n x m), L^-1 y (n)
+            up = lambda b: (b + 63) // 64 * 64  # noqa: E731
+            self.assertEqual(self.lib.gls_d.workspace_size(X, M, y),
+                             up(8 * n * n) + up(8 * m * m) + up(8 * n * m)
+                             + up(8 * n))
+
+    def test_loop_with_callbacks(self):
+        n, m, steps = 40, 5, 3
+        X, M, _ = self.problem(n, m)
+        ys = self.rng.uniform(-1, 1, (steps, n))
+        out = np.empty((steps, m))
+
+        def record(i, b):
+            out[i] = b[:, 0]
+
+        self.lib.bind(observe_n=lambda i: ys[i], record_m=record)
+        self.lib.estimate_d(X, M, steps)
+        ref = np.linalg.solve(X.T @ np.linalg.solve(M, X),
+                              X.T @ np.linalg.solve(M, ys.T)).T
+        self.assertLess(np.abs(out - ref).max(), 1e-12)
+
+    def test_plan_chosen_at_run_time(self):
+        for n, k, m, p in [(60, 3, 60, 3), (3, 60, 3, 60)]:
+            A, B, C = (self.rng.uniform(-1, 1, s)
+                       for s in [(n, k), (k, m), (m, p)])
+            self.assertLess(np.abs(self.lib.chain_d(A, B, C) - A @ B @ C)
+                            .max(), 1e-12)
+            # the temporary of the cheaper plan: A B (n x m) or B C (k x p)
+            left = n * k * m + n * m * p <= k * m * p + n * k * p
+            tmp = n * m if left else k * p
+            self.assertEqual(self.lib.chain_d.workspace_size(A, B, C),
+                             (8 * tmp + 63) // 64 * 64)
+        self.assertIn("ulmBLAS::gemm", self.lib.chain_d.cpp)
+        self.assertIn("<=", self.lib.chain_d.cpp)  # the cost comparison
+
+    def test_inconsistent_sizes(self):
+        X, M, y = self.problem(6, 2)
+        with self.assertRaises(LamError):
+            self.lib.gls_d(X, M[:5, :5], y)
+
+    def test_interface_names_the_sizes(self):
+        doc = self.lib.gls_d.__doc__
+        self.assertIn("sizes n, m", doc)
+        self.assertIn("double[n][m]", doc)
+
+
 class Cache(unittest.TestCase):
 
     def test_interrupted_build_is_not_reused(self):

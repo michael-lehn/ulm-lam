@@ -101,10 +101,80 @@ bufferTypeFor(Type t)
 }
 
 bool
-isStaticTensor(Type t)
+isPlainTensor(Type t)
 {
     auto rt = dyn_cast<RankedTensorType>(t);
-    return rt && rt.hasStaticShape() && !rt.getEncoding();
+    return rt && !rt.getEncoding();
+}
+
+/// The dims attribute of each result of f (before the signature changes).
+SmallVector<Attribute>
+resultDims(func::FuncOp f)
+{
+    SmallVector<Attribute> dims;
+    for (unsigned j = 0, e = f.getNumResults(); j < e; ++j)
+	dims.push_back(f.getResultAttr(j, ulm_lam::kDimsAttr));
+    return dims;
+}
+
+/// X = f(...) becomes f(..., X) at every call of f: the results in
+/// `results` are allocated by the caller (sizes from the callee's
+/// ulm_lam.dims and the call's operands) and passed by reference.
+LogicalResult
+rewriteCallSites(ModuleOp module, StringRef name, ArrayRef<unsigned> results,
+                 ArrayRef<Attribute> dims)
+{
+    SmallVector<func::CallOp> calls;
+    module.walk([&](func::CallOp c) {
+	if (c.getCallee() == name)
+	    calls.push_back(c);
+    });
+    for (func::CallOp call : calls) {
+	OpBuilder b(call);
+	Location loc = call.getLoc();
+	SmallVector<Value> operands(call.getOperands());
+	SmallVector<Value> buffers;
+	for (unsigned j : results) {
+	    auto t = cast<RankedTensorType>(call.getResult(j).getType());
+	    SmallVector<Value> sizes;
+	    auto d = dyn_cast_if_present<ArrayAttr>(dims[j]);
+	    unsigned k = 0;
+	    for (int64_t s : t.getShape()) {
+		if (!ShapedType::isDynamic(s))
+		    continue;
+		if (!d || k >= d.size())
+		    return call.emitError("ulm-lam-results-to-out-params: the "
+		                          "size of a result of @")
+		           << name << " is unknown (missing "
+		           << ulm_lam::kDimsAttr << ")";
+		sizes.push_back(operands[cast<IntegerAttr>(d[k++]).getInt()]);
+	    }
+	    auto alloc =
+	        memref::AllocOp::create(b, loc, bufferTypeFor(t), sizes);
+	    alloc.setAlignment(64);
+	    buffers.push_back(alloc);
+	}
+	llvm::append_range(operands, buffers);
+	SmallVector<Type> kept;
+	SmallVector<unsigned> keptIdx;
+	for (unsigned j = 0, e = call.getNumResults(); j < e; ++j)
+	    if (!llvm::is_contained(results, j)) {
+		kept.push_back(call.getResult(j).getType());
+		keptIdx.push_back(j);
+	    }
+	auto n = func::CallOp::create(b, loc, name, kept, operands);
+	for (auto [j, r] : llvm::zip(keptIdx, n.getResults()))
+	    call.getResult(j).replaceAllUsesWith(r);
+	for (auto [j, buf] : llvm::zip(results, buffers)) {
+	    auto t = bufferization::ToTensorOp::create(
+	        b, loc, call.getResult(j).getType(), buf);
+	    t.setRestrict(true);
+	    t.setWritable(true);
+	    call.getResult(j).replaceAllUsesWith(t.getResult());
+	}
+	call.erase();
+    }
+    return success();
 }
 
 struct UlmLamResultsToOutParams
@@ -205,9 +275,7 @@ struct UlmLamResultsToOutParams
 	for (auto f : module.getOps<func::FuncOp>()) {
 	    if (f.isExternal() || f.isPrivate() || f.getNumResults() == 0)
 		continue;
-	    if (auto uses = SymbolTable::getSymbolUses(f, module);
-	        !uses || !uses->empty())
-		continue; // called in the module: buffer-results-to-out-params
+	    SmallVector<Attribute> dims = resultDims(f);
 	    SmallVector<unsigned> results;
 	    for (unsigned j = 0, e = f.getNumResults(); j < e; ++j)
 		if (isa<RankedTensorType>(f.getResultTypes()[j]))
@@ -253,6 +321,9 @@ struct UlmLamResultsToOutParams
 	    }
 	    if (failed(f.eraseResults(drop)))
 		return f.emitError("cannot drop results");
+	    // ... and its callers in the module pass the buffers
+	    if (failed(rewriteCallSites(module, f.getSymName(), results, dims)))
+		return failure();
 	}
 	return success();
     }
@@ -300,12 +371,13 @@ struct UlmLamResultsToOutParams
     LogicalResult
     rewriteDeclarations(ModuleOp module)
     {
-	llvm::StringSet<> outParams, inPlace;
+	llvm::StringSet<> inPlace;
+	llvm::StringMap<SmallVector<Attribute>> outParams; // result dims
 	for (auto f : module.getOps<func::FuncOp>()) {
 	    if (!f.isExternal() || f.getNumResults() == 0)
 		continue;
-	    if (!llvm::all_of(f.getResultTypes(), isStaticTensor))
-		continue; // dynamic shapes: needs a size query, not handled yet
+	    if (!llvm::all_of(f.getResultTypes(), isPlainTensor))
+		continue;
 	    unsigned n = f.getNumArguments(), r = f.getNumResults();
 	    // results that update an argument in place: {ulm_lam.inout = k}
 	    unsigned marked = 0;
@@ -346,22 +418,28 @@ struct UlmLamResultsToOutParams
 	    SmallVector<DictionaryAttr> attrs(
 	        r, DictionaryAttr::get(f.getContext()));
 	    SmallVector<Location> locs(r, f.getLoc());
+	    SmallVector<Attribute> dims = resultDims(f);
 	    if (failed(f.insertArguments(idx, types, attrs, locs)) ||
 	        failed(f.eraseResults(llvm::BitVector(r, true))))
 		return f.emitError("cannot rewrite signature");
-	    outParams.insert(f.getSymName());
+	    outParams[f.getSymName()] = dims;
+	}
+	for (auto &[name, dims] : outParams) {
+	    SmallVector<unsigned> all =
+	        llvm::to_vector(llvm::seq<unsigned>(0, dims.size()));
+	    if (failed(rewriteCallSites(module, name, all, dims)))
+		return failure();
 	}
 
 	SmallVector<func::CallOp> calls;
 	module.walk([&](func::CallOp c) {
-	    if (outParams.contains(c.getCallee()) ||
-	        inPlace.contains(c.getCallee()))
+	    if (inPlace.contains(c.getCallee()))
 		calls.push_back(c);
 	});
 	for (func::CallOp call : calls) {
 	    OpBuilder b(call);
 	    Location loc = call.getLoc();
-	    if (inPlace.contains(call.getCallee())) {
+	    {
 		// X' = f(..., X)  ->  X' = ulm_lamk.call @f(...) outs(X)
 		unsigned r = call.getNumResults(), n = call.getNumOperands();
 		SmallVector<Value> inputs(call.getOperands().take_front(n - r));
@@ -369,11 +447,14 @@ struct UlmLamResultsToOutParams
 		for (Value v : call.getOperands().drop_front(n - r)) {
 		    // still needed after the call: update a copy
 		    if (!v.hasOneUse()) {
+			auto vt = cast<RankedTensorType>(v.getType());
+			FailureOr<SmallVector<Value>> sizes =
+			    ulm_lam::dynamicSizes(b, loc, vt, v, 0, v, 1);
+			if (failed(sizes))
+			    return call.emitError(
+			        "unknown size of an argument");
 			Value e = tensor::EmptyOp::create(
-			    b, loc,
-			    cast<RankedTensorType>(v.getType()).getShape(),
-			    cast<RankedTensorType>(v.getType())
-			        .getElementType());
+			    b, loc, vt.getShape(), vt.getElementType(), *sizes);
 			v = bufferization::MaterializeInDestinationOp::create(
 			        b, loc, v.getType(), v, e)
 			        .getResult();
@@ -385,26 +466,7 @@ struct UlmLamResultsToOutParams
 		                             call.getCallee(), inputs, inits);
 		call.replaceAllUsesWith(c.getResults());
 		call.erase();
-		continue;
 	    }
-	    SmallVector<Value> operands(call.getOperands());
-	    SmallVector<Value> buffers;
-	    for (Type t : call.getResultTypes()) {
-		auto alloc = memref::AllocOp::create(b, loc, bufferTypeFor(t));
-		alloc.setAlignment(64);
-		buffers.push_back(alloc);
-		operands.push_back(alloc);
-	    }
-	    func::CallOp::create(b, loc, call.getCallee(), TypeRange{},
-	                         operands);
-	    for (auto [res, buf] : llvm::zip(call.getResults(), buffers)) {
-		auto t = bufferization::ToTensorOp::create(b, loc,
-		                                           res.getType(), buf);
-		t.setRestrict(true);
-		t.setWritable(true);
-		res.replaceAllUsesWith(t.getResult());
-	    }
-	    call.erase();
 	}
 	return success();
     }
@@ -426,10 +488,10 @@ struct UlmLamResultsToOutParams
 		    return f.emitError()
 		           << kInOutAttr << " = " << i << ": no such argument";
 		Type at = f.getArgumentTypes()[i], rt = f.getResultTypes()[j];
-		if (!isStaticTensor(at) || at != rt)
+		if (!isPlainTensor(at) || at != rt)
 		    return f.emitError()
 		           << "result " << j << " and argument " << i
-		           << " must have the same static tensor type";
+		           << " must have the same tensor type";
 		inout.push_back({j, i});
 	    }
 	    if (inout.empty())

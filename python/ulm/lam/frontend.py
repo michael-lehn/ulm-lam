@@ -22,6 +22,12 @@ Parameter intents (the ulm.lam ABI): matrices are passed by reference.
                            exit, otherwise its contents are unspecified
     return values          out: buffers the caller provides
 
+Sizes are numbers, or names that are run-time parameters:
+    Matrix("n", "m", "full_rank")   n x m, n and m given by the arrays
+The generated C function takes them as size_t parameters in front of the
+matrices (in order of first appearance); from Python they are taken from
+the arrays.  Equal names are equal sizes.
+
 Loops and external functions:
     observe = lam.extern("observe", [Index], Vector(2000))
     with lam.loop(n) as L:
@@ -59,19 +65,34 @@ class LamError(Exception):
 
 @dataclass(frozen=True)
 class MatrixType:
-    rows: int
-    cols: int
+    rows: int | str  # a number, or the name of a run-time size
+    cols: int | str
     props: frozenset = frozenset()
     intent: str = "in"  # in | inout (parameters only)
 
     def mlir(self, with_props: bool = True) -> str:
-        t = f"tensor<{self.rows}x{self.cols}xf64"
+        def d(x):
+            return "?" if isinstance(x, str) else str(x)
+        t = f"tensor<{d(self.rows)}x{d(self.cols)}xf64"
         if with_props and self.props:
             t += ", #ulm_lam.props<" + ", ".join(sorted(self.props)) + ">"
         return t + ">"
 
     def plain(self) -> "MatrixType":
         return MatrixType(self.rows, self.cols)
+
+    def symbols(self) -> list[str]:
+        """The names of its run-time sizes."""
+        return [d for d in (self.rows, self.cols) if isinstance(d, str)]
+
+    def dims_attr(self, position: dict) -> str:
+        """`ulm_lam.dims = [...]`: the argument positions of its run-time
+        sizes ("" if it has none)."""
+        syms = self.symbols()
+        if not syms:
+            return ""
+        return "ulm_lam.dims = [" + ", ".join(str(position[x])
+                                              for x in syms) + "]"
 
     def __str__(self) -> str:
         p = (" " + ",".join(sorted(self.props))) if self.props else ""
@@ -100,7 +121,18 @@ Index = IndexType()
 Float = FloatType()
 
 
-def Matrix(rows: int, cols: int, *props: str,
+def _symbols(types) -> list[str]:
+    """The run-time sizes of these types, in order of first appearance."""
+    out = []
+    for t in types:
+        if isinstance(t, MatrixType):
+            for x in t.symbols():
+                if x not in out:
+                    out.append(x)
+    return out
+
+
+def Matrix(rows: int | str, cols: int | str, *props: str,
            stored: str | None = None) -> MatrixType:
     """An m x n matrix of doubles with properties, e.g. Matrix(n, n, "spd").
 
@@ -111,8 +143,13 @@ def Matrix(rows: int, cols: int, *props: str,
         if p not in PROPERTIES:
             raise LamError(f"unknown matrix property {p!r}; known: "
                             + ", ".join(PROPERTIES))
-    if rows <= 0 or cols <= 0:
-        raise LamError(f"matrix sizes must be positive, got {rows}x{cols}")
+    for d in (rows, cols):
+        if isinstance(d, str):
+            if not d.isidentifier():
+                raise LamError(f"a run-time size must be a name, got {d!r}")
+        elif not isinstance(d, int) or d <= 0:
+            raise LamError(f"matrix sizes must be positive numbers or "
+                            f"names, got {rows}x{cols}")
     ps = set(props)
     if stored is not None:
         if stored not in ("lower", "upper"):
@@ -125,7 +162,7 @@ def Matrix(rows: int, cols: int, *props: str,
     return MatrixType(rows, cols, frozenset(ps))
 
 
-def Vector(n: int, *props: str) -> MatrixType:
+def Vector(n: int | str, *props: str) -> MatrixType:
     """An n x 1 column vector."""
     return Matrix(n, 1, *props)
 
@@ -444,13 +481,27 @@ class Extern:
                 raise LamError(f"{self.name}: the updated parameter and the "
                                 "result must have the same shape")
 
+    @property
+    def sizes(self) -> list[str]:
+        """Its run-time sizes: index parameters in front of the others."""
+        return _symbols(list(self.params) + [self.result])
+
     def declaration(self) -> str:
-        params = ", ".join(p.mlir() for p in self.params)
+        sizes = self.sizes
+        pos = {x: k for k, x in enumerate(sizes)}
+        params = ", ".join(["index"] * len(sizes) +
+                           [p.mlir() for p in self.params])
         res = ""
         if self.result is not None:
-            r = self.result.mlir()
+            attrs = []
             if self.updates is not None:
-                r = f"{r} {{ulm_lam.inout = {self.updates} : i64}}"
+                attrs.append(f"ulm_lam.inout = {self.updates + len(sizes)}"
+                             " : i64")
+            if self.result.dims_attr(pos):
+                attrs.append(self.result.dims_attr(pos))
+            r = self.result.mlir()
+            if attrs:
+                r += " {" + ", ".join(attrs) + "}"
             res = f" -> ({r})"
         attrs = " attributes {ulm_lam.workspace}" if self.workspace else ""
         return f"func.func private @{self.name}({params}){res}{attrs}"
@@ -476,8 +527,10 @@ class Extern:
                                 f"{p}")
             vals.append(a)
         _Program.current.externs[self.name] = self
-        names = ", ".join(v._use() for v in vals)
-        ptypes = ", ".join(p.mlir() for p in self.params)
+        names = ", ".join(_size_values(self.sizes, self.name) +
+                          [v._use() for v in vals])
+        ptypes = ", ".join(["index"] * len(self.sizes) +
+                           [p.mlir() for p in self.params])
         if self.result is None:
             b.emit(f"func.call @{self.name}({names}) : ({ptypes}) -> ()")
             return None
@@ -485,6 +538,20 @@ class Extern:
         b.emit(f"{v.name} = func.call @{self.name}({names}) : ({ptypes}) -> "
                f"{self.result.mlir()}")
         return v
+
+
+def _size_values(sizes: list[str], callee: str) -> list[str]:
+    """The values of run-time sizes in the function being traced (its
+    size parameters, by name)."""
+    f = Function.tracing
+    known = f._size_values if f is not None else {}
+    out = []
+    for x in sizes:
+        if x not in known:
+            raise LamError(f"{callee} needs the size {x!r}, which no "
+                            "parameter of the calling function has")
+        out.append(known[x])
+    return out
 
 
 def extern(name, params, result=None, updates=None, workspace=False):
@@ -545,6 +612,9 @@ class Function:
                 raise LamError(f"{self.name}: parameter {p.name}: {t!r} is "
                                 "not a ulm_lam type")
             self.params.append((p.name, t))
+        # run-time sizes: index parameters in front of the others
+        self.sizes = _symbols(t for _, t in self.params)
+        self._size_values = {x: f"%s.{x}" for x in self.sizes}
         self._text = None
         self.results: list[MatrixType] = []
 
@@ -570,8 +640,21 @@ class Function:
                 o._matrix("a result")
             ups = [(k, _plain(v)) for k, v in sorted(self._updates.items())]
             results = outs + [v for _, v in ups]
-            rtypes = [f"{v.type.mlir()} {{ulm_lam.out}}" for v in outs]
-            rtypes += [f"{v.type.mlir()} {{ulm_lam.inout = {k} : i64}}"
+            pos = {x: k for k, x in enumerate(self.sizes)}
+            for v in outs:
+                for x in v.type.symbols():
+                    if x not in pos:
+                        raise LamError(f"{self.name}: the size {x!r} of a "
+                                        "result is not a size of a parameter")
+
+            def attrs(t, a):
+                d = t.dims_attr(pos)
+                return "{" + a + (", " + d if d else "") + "}"
+            nsz = len(self.sizes)
+            rtypes = [f"{v.type.mlir()} {attrs(v.type, 'ulm_lam.out')}"
+                      for v in outs]
+            rtypes += [f"{v.type.mlir()} "
+                       f"{attrs(v.type, f'ulm_lam.inout = {k + nsz} : i64')}"
                        for k, v in ups]
             self.results = [v.type for v in outs]
             self.updated = [k for k, _ in ups]
@@ -580,11 +663,15 @@ class Function:
             b.emit(f"return {ret} : {rett}" if results else "return")
         finally:
             _Builder.current, Function.tracing = outer_b, outer_f
-        args = []
+        pos = {x: k for k, x in enumerate(self.sizes)}
+        args = [f"%s.{x}: index" for x in self.sizes]
         for n, t in self.params:
             attr = ""
             if isinstance(t, MatrixType):
-                attr = " {ulm_lam.inout}" if t.intent == "inout" else " {ulm_lam.in}"
+                a = ["ulm_lam.inout" if t.intent == "inout" else "ulm_lam.in"]
+                if t.dims_attr(pos):
+                    a.append(t.dims_attr(pos))
+                attr = " {" + ", ".join(a) + "}"
             args.append(f"%p.{n}: {t.mlir()}{attr}")
         res = f" -> ({', '.join(rtypes)})" if rtypes else ""
         head = f"func.func @{self.name}({', '.join(args)}){res} {{"
@@ -637,8 +724,10 @@ class Function:
                 if a.type.mlir() != t.mlir():
                     a = _cast(a, t)
             vals.append(a)
-        names = ", ".join(v._use() for v in vals)
-        ptypes = ", ".join(t.mlir() for _, t in self.params)
+        names = ", ".join(_size_values(self.sizes, self.name) +
+                          [v._use() for v in vals])
+        ptypes = ", ".join(["index"] * len(self.sizes) +
+                           [t.mlir() for _, t in self.params])
         rtypes = [t.mlir() for t in self.results]
         if not rtypes:
             b.emit(f"func.call @{self.name}({names}) : ({ptypes}) -> ()")

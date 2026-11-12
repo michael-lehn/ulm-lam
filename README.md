@@ -24,6 +24,11 @@ b = lib.gls(X, M, y)            # NumPy arrays (or any float64 buffer) in and ou
 print(lib.gls.cpp)               # the generated C++ of gls
 ```
 
+Sizes can be names, `Matrix("n", "m", "full_rank")`: they are run-time
+parameters taken from the arrays, so one compiled library serves all sizes
+(and where the best evaluation depends on the sizes, the generated code
+chooses at run time).
+
 `python/ulm/lam/` is the frontend (tracing Python to `ulm_lam` IR, loops,
 external functions with Python callbacks, parameter intents, symmetric
 matrices stored as one triangle: `Matrix(n, n, "spd", stored="lower")`) and
@@ -91,7 +96,7 @@ What is checked (`make`):
 - `make cases`: eight kernel selection cases against naive evaluations;
   info for an indefinite and a singular matrix and a too small workspace.
 - `make dynamic`: one compiled GLS with run-time sizes for six sizes.
-- `make python`: the Python frontend: 28 unit tests (among them symmetric
+- `make python`: the Python frontend: 33 unit tests (among them symmetric
   matrices stored as one triangle, with NaN in the other one) and the two
   Kalman examples against NumPy.
 

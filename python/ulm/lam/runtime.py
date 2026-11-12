@@ -248,6 +248,55 @@ def _flatten(x):
         yield float(x)
 
 
+def _shape(x):
+    """(rows, cols) of a matrix argument; cols None if the buffer is flat
+    (then only a vector's length is known)."""
+    if _np is not None and isinstance(x, _np.ndarray):
+        if x.ndim == 2:
+            return x.shape
+        if x.ndim == 1:
+            return (x.shape[0], 1)
+        return (x.size, None)
+    if isinstance(x, (list, tuple)):
+        if x and isinstance(x[0], (list, tuple)):
+            return (len(x), len(x[0]))
+        return (len(x), 1)
+    mv = memoryview(x)
+    if mv.ndim == 2:
+        return mv.shape
+    return (mv.nbytes // 8, None)
+
+
+def _bind_sizes(env: dict, t: fe.MatrixType, x, what: str) -> None:
+    """Take the run-time sizes of `t` from the argument `x` (and check the
+    ones that are known)."""
+    r, c = _shape(x)
+    if c is None:  # a flat buffer: a vector, or a matrix of known size
+        if t.cols == 1:
+            c = 1
+        elif isinstance(t.cols, int) and r % t.cols == 0:
+            r, c = r // t.cols, t.cols
+        elif isinstance(t.rows, int) and r % t.rows == 0:
+            r, c = t.rows, r // t.rows
+        else:
+            raise fe.LamError(f"{what}: a flat buffer does not say the "
+                               f"sizes of a {t} matrix; pass a NumPy array "
+                               "or a list of rows")
+    for d, v in ((t.rows, r), (t.cols, c)):
+        if isinstance(d, str):
+            if env.setdefault(d, v) != v:
+                raise fe.LamError(f"{what}: size {d} = {v}, but {env[d]} "
+                                   "from an earlier argument")
+        elif d != v:
+            raise fe.LamError(f"{what}: expected {t}, got {r}x{c}")
+
+
+def _resolve(t: fe.MatrixType, env: dict) -> fe.MatrixType:
+    """`t` with its run-time sizes replaced by their values."""
+    return fe.MatrixType(env.get(t.rows, t.rows), env.get(t.cols, t.cols),
+                         t.props, t.intent)
+
+
 class _Arg:
     """A matrix argument as a C pointer (keeps its buffer alive)."""
 
@@ -381,12 +430,18 @@ class Library:
         out = ext.result is not None and ext.updates is None
         lib = self
 
+        nsizes = len(ext.sizes)
+
         def tramp(*cargs):
             try:
+                # run-time sizes: the leading size_t arguments
+                env = dict(zip(ext.sizes, cargs[:nsizes]))
+                cargs = cargs[nsizes:]
                 args = []
                 for k, p in enumerate(ext.params):
                     a = cargs[k]
                     if isinstance(p, fe.MatrixType):
+                        p = _resolve(p, env)
                         args.append(_view(a, p.rows, p.cols))
                     else:
                         args.append(a)
@@ -397,7 +452,7 @@ class Library:
                         return
                 r = fn(*args)
                 if out:
-                    t = ext.result
+                    t = _resolve(ext.result, env)
                     dst = _view(cargs[nparams], t.rows, t.cols)
                     _copy_into(dst, r, t, name)
             except BaseException as e:  # re-raised after the call
@@ -453,6 +508,8 @@ class CompiledFunction:
         self._codes = _info_codes(lib.source).get(name, {})
         self._ws = {}
         self.has_workspace = bool(rows) and rows[-1][1] == "info"
+        # run-time sizes: the leading size_t parameters
+        self.sizes = list(fn.sizes) if fn else []
         self.__doc__ = self.interface()
 
     @property
@@ -464,9 +521,15 @@ class CompiledFunction:
     def interface(self) -> str:
         """The parameters and their intents (as the generated C++ says)."""
         lines = [f"{self.name}:"]
+        if self.sizes:
+            lines.append(f"  sizes {', '.join(self.sizes)}: from the "
+                         "arrays")
         params = list(self.fn.params) if self.fn else []
         k = 0
-        for t, intent in self.rows:
+        names = {f"v{j + 1}": x for j, x in enumerate(self.sizes)}
+        for t, intent in self.rows[len(self.sizes):]:
+            t = re.sub(r"\[(v\d+)\]",
+                       lambda m: f"[{names.get(m.group(1), m.group(1))}]", t)
             if intent in ("in", "inout") and k < len(params):
                 lines.append(f"  {params[k][0]:<10} {t:<22} {intent}")
                 k += 1
@@ -476,7 +539,9 @@ class CompiledFunction:
 
     def workspace_size(self, *args) -> int:
         """The workspace this call needs (bytes)."""
-        key = tuple(a for a in args if isinstance(a, int))
+        env = self._sizes(args)
+        key = tuple(env[x] for x in self.sizes) + tuple(
+            a for a in args if isinstance(a, int))
         if key not in self._ws:
             info = ctypes.c_int64(-1)
             cargs, _, _ = self._arguments(args, query=True)
@@ -484,15 +549,25 @@ class CompiledFunction:
             self._ws[key] = info.value
         return self._ws[key]
 
-    def _arguments(self, args, query=False):
+    def _sizes(self, args) -> dict:
+        """The run-time sizes, from the matrix arguments."""
         params = self.fn.params
         if len(args) != len(params):
             raise fe.LamError(f"{self.name} takes {len(params)} arguments "
                                f"({', '.join(n for n, _ in params)})")
-        cargs, keep, outs = [], [], []
+        env = {}
+        for a, (pname, pt) in zip(args, params):
+            if isinstance(pt, fe.MatrixType) and pt.symbols():
+                _bind_sizes(env, pt, a, f"{self.name}: {pname}")
+        return env
+
+    def _arguments(self, args, query=False):
+        params = self.fn.params
+        env = self._sizes(args)
+        cargs, keep, outs = [env[x] for x in self.sizes], [], []
         k = 0
-        results = list(self.fn.results)
-        for t, intent in self.rows:
+        results = [_resolve(t, env) for t in self.fn.results]
+        for t, intent in self.rows[len(self.sizes):]:
             if intent in ("work", "info"):
                 continue
             if intent == "out":
@@ -505,6 +580,7 @@ class CompiledFunction:
             a = args[k]
             k += 1
             if isinstance(pt, fe.MatrixType):
+                pt = _resolve(pt, env)
                 if query:
                     cargs.append(None)
                     continue

@@ -1923,6 +1923,14 @@ a number times a matrix is \code{ulm_lam.scale}, \code{.T} is
         \code{Vector(n)}, \code{Index}; a symmetric matrix can be stored
         as one triangle, \code{Matrix(n, n, "spd", stored="lower")}
         (\cref{sec:storage}).
+  \item Sizes are numbers or names: \code{Matrix("n", "m", "full_rank")}
+        has run-time sizes (\cref{sec:dynamic}).  Equal names are equal
+        sizes; they become index parameters in front of the matrices, in
+        order of first appearance.  From Python they are taken from the
+        arrays (and checked: \code{gls: M: size n = 4, but 5 from an
+        earlier argument}); external functions get the sizes they use as
+        parameters too, and Python callbacks receive arrays of the actual
+        shapes.  One compiled library serves all sizes.
         Intermediate results get their properties from
         \code{ulm-lam-infer-properties}.
   \item Parameters have intents: a matrix is \code{in} by default;
