@@ -102,7 +102,21 @@ def _ulmblas_flags() -> list[str]:
     if not (ulm / "ulmblas" / "ulmblas.h").exists():
         raise fe.LamError(f"ulmBLAS not found: set ULMBLAS_DIR (now {ulm})")
     arch = os.environ.get("ARCHFLAGS", "-mcpu=native").split()
-    return ["-std=c++17", "-O3", *arch, "-isystem", str(ulm)]
+    return ["-std=c++17", "-O3", *arch, "-isystem", str(ulm), *_openmp()]
+
+
+def _openmp() -> list[str]:
+    """OpenMP flags (OPENMP=0: none): ulmBLAS runs potrf, getrf and the
+    solves as OpenMP tasks.  Apple clang needs Homebrew's libomp."""
+    if os.environ.get("OPENMP", "1") != "1":
+        return []
+    if sys.platform != "darwin":
+        return ["-fopenmp"]
+    omp = Path("/opt/homebrew/opt/libomp")
+    if not omp.exists():
+        return []
+    return ["-Xpreprocessor", "-fopenmp", "-isystem", str(omp / "include"),
+            f"-L{omp / 'lib'}", f"-Wl,-rpath,{omp / 'lib'}", "-lomp"]
 
 
 _SIG = re.compile(r'extern "C" void\s*\n(\w+)\(([^)]*)\);')

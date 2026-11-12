@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include <memory>
 #include <vector>
 
 #ifdef _OPENMP
@@ -66,6 +67,45 @@ kernel(const double *A, size_t na, const double *B, size_t nb, const Hyper &h,
     for (size_t i = 0; i < na; ++i)
 	for (size_t j = 0; j < nb; ++j)
 	    K[i * nb + j] = matern(&A[3 * i], &B[3 * j], h);
+}
+
+// Memory for large arrays, not initialised: the first write decides on
+// which NUMA (Non-Uniform Memory Access) node a page lies.  std::vector
+// would zero it with the calling thread, i.e. put all of it on one node.
+// GP_SERIAL_TOUCH=1 does just that, for comparison.
+template <typename T> struct Buffer
+{
+    std::unique_ptr<T[]> p;
+    explicit Buffer(size_t len) : p(new T[len])
+    {
+	if (std::getenv("GP_SERIAL_TOUCH"))
+	    std::memset(p.get(), 0, len * sizeof(T));
+    }
+    T *
+    data()
+    {
+	return p.get();
+    }
+    T &
+    operator[](size_t i)
+    {
+	return p[i];
+    }
+};
+
+// dst = src (or 0), in parallel: the pages are spread over the threads
+template <typename T>
+void
+parallelFill(T *dst, const T *src, size_t len)
+{
+    if (std::getenv("GP_SERIAL_TOUCH")) {
+	src ? std::memcpy(dst, src, len * sizeof(T))
+	    : std::memset(dst, 0, len * sizeof(T));
+	return;
+    }
+#pragma omp parallel for schedule(static)
+    for (size_t i = 0; i < len; ++i)
+	dst[i] = src ? src[i] : T(0);
 }
 
 double
@@ -131,7 +171,8 @@ main(int argc, char **argv)
 	    return 2;
 	}
 	double t0 = now();
-	std::vector<double> K(n * n), Ks(n * m), y(n);
+	Buffer<double> K(n * n), Ks(n * m);
+	std::vector<double> y(n);
 	kernel(Xn, n, Xn, n, h, K.data());
 	for (size_t i = 0; i < n; ++i) {
 	    K[i * n + i] += h.noise;
@@ -156,18 +197,20 @@ main(int argc, char **argv)
 	    int64_t ws = -1;
 	    gp(n, m, K.data(), Ks.data(), Kss.data(), y.data(), mean.data(),
 	       cov.data(), nullptr, &ws);
-	    std::vector<int8_t> work(ws);
+	    Buffer<int8_t> work(ws);
+	    parallelFill<int8_t>(work.data(), nullptr, ws);
 	    double t0 = now();
 	    info = gp(n, m, K.data(), Ks.data(), Kss.data(), y.data(),
 	              mean.data(), cov.data(), work.data(), &ws);
 	    tLam = now() - t0;
-	    work = {};
 	};
 	bool hasMkl = false;
 #ifdef WITH_MKL
 	hasMkl = true;
 	auto runHand = [&] {
-	    std::vector<double> alpha(y), V(Ks);
+	    std::vector<double> alpha(y);
+	    Buffer<double> V(n * m);
+	    parallelFill(V.data(), Ks.data(), n * m);
 	    mCov = Kss;
 	    bool prof = std::getenv("GP_PROF") != nullptr;
 	    double t0 = now();

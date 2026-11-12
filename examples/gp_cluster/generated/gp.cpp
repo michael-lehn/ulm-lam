@@ -6,6 +6,26 @@
 #include <ulmblas/lapack/potrf.h>
 #include <ulmblas/lapack/trtrs.h>
 #include <ulmblas/ulmblas.h>
+static void
+ulm_lam_copy(void *dst, const void *src, std::size_t bytes)
+{
+#ifdef _OPENMP
+    const std::size_t chunk = std::size_t(1) << 20;
+    if (bytes >= 8 * chunk) {
+	std::ptrdiff_t chunks = (bytes + chunk - 1) / chunk;
+#pragma omp parallel for schedule(static)
+	for (std::ptrdiff_t c = 0; c < chunks; ++c) {
+	    std::size_t off = c * chunk;
+	    std::size_t len = bytes - off < chunk ? bytes - off : chunk;
+	    std::memcpy(static_cast<char *>(dst) + off,
+	                static_cast<const char *>(src) + off, len);
+	}
+	return;
+    }
+#endif
+    std::memcpy(dst, src, bytes);
+}
+
 template <typename T>
 static void
 ulm_lam_sycomplete(bool lower, std::ptrdiff_t n, T *A, std::ptrdiff_t incRow,
@@ -81,7 +101,7 @@ gp(size_t v1, size_t v2, double *v3, double *v4, double *v5, double *v6,
 		int64_t v34 = (int64_t)v17;
 		double *v35 = (double *)(v29 + v34);
 		size_t v36 = 8 * v1;
-		memcpy(v35, v6, v36);
+		ulm_lam_copy(v35, v6, v36);
 		ulmBLAS::trlsv<std::ptrdiff_t>(v1, false, v3, v1, 1, v35, 1);
 		ulmBLAS::trusv<std::ptrdiff_t>(v1, false, v3, 1, v1, v35, 1);
 		ulmBLAS::gemv<std::ptrdiff_t>(v2, v1, v12, v4, 1, v2, v35, 1,
@@ -89,11 +109,11 @@ gp(size_t v1, size_t v2, double *v3, double *v4, double *v5, double *v6,
 		int64_t v37 = (int64_t)v20;
 		double *v38 = (double *)(v29 + v37);
 		size_t v39 = (8 * v1) * v2;
-		memcpy(v38, v4, v39);
+		ulm_lam_copy(v38, v4, v39);
 		(void)ulmBLAS::trtrs<std::ptrdiff_t>(
 		    true, false, false, false, v1, v2, v3, v1, 1, v38, v2, 1);
 		size_t v40 = (8 * v2) * v2;
-		memcpy(v8, v5, v40);
+		ulm_lam_copy(v8, v5, v40);
 		ulmBLAS::sylrk<std::ptrdiff_t>(v2, v1, v11, v38, 1, v2, v12, v8,
 		                               v2, 1);
 		ulm_lam_sycomplete(true, v2, v8, v2, 1);

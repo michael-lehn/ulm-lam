@@ -63,7 +63,7 @@ rentals (UCI, University of California, Irvine), timed for n up to 8000
 ulmBLAS and, with `backend="cblas"`, on the OpenBLAS of NumPy.  Optional:
 SciPy, scikit-learn, Matplotlib.  `examples/gp_cluster/` runs it with n up
 to 100 000 on bwUniCluster 3.0: ulm.lam on MKL is as fast as the same steps
-written by hand with MKL; ulmBLAS is 3.4x slower there (thread scaling).
+written by hand with MKL; ulmBLAS is 3.8x slower there (thread scaling).
 
 ## Conventions of the generated code
 

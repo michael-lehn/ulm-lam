@@ -6,6 +6,26 @@
 #include <ulmblas/lapack/potrf.h>
 #include <ulmblas/lapack/trtrs.h>
 #include <ulmblas/ulmblas.h>
+static void
+ulm_lam_copy(void *dst, const void *src, std::size_t bytes)
+{
+#ifdef _OPENMP
+    const std::size_t chunk = std::size_t(1) << 20;
+    if (bytes >= 8 * chunk) {
+	std::ptrdiff_t chunks = (bytes + chunk - 1) / chunk;
+#pragma omp parallel for schedule(static)
+	for (std::ptrdiff_t c = 0; c < chunks; ++c) {
+	    std::size_t off = c * chunk;
+	    std::size_t len = bytes - off < chunk ? bytes - off : chunk;
+	    std::memcpy(static_cast<char *>(dst) + off,
+	                static_cast<const char *>(src) + off, len);
+	}
+	return;
+    }
+#endif
+    std::memcpy(dst, src, bytes);
+}
+
 /* gls: matrices by reference (row-major), owned by the caller
  *   v1  size_t          in
  *   v2  size_t          in
@@ -62,7 +82,7 @@ gls(size_t v1, size_t v2, double *v3, double *v4, double *v5, double *v6,
 	    int64_t v30 = (int64_t)v15;
 	    double *v31 = (double *)(v29 + v30);
 	    size_t v32 = (8 * v1) * v1;
-	    memcpy(v31, v4, v32);
+	    ulm_lam_copy(v31, v4, v32);
 	    int64_t v33 = ulmBLAS::potrf<std::ptrdiff_t>(true, v1, v31, v1, 1);
 	    bool v34 = (bool)(v33 != v11);
 	    uint64_t v35 = (uint64_t)v34;
@@ -74,7 +94,7 @@ gls(size_t v1, size_t v2, double *v3, double *v4, double *v5, double *v6,
 		int64_t v40 = (int64_t)v19;
 		double *v41 = (double *)(v29 + v40);
 		size_t v42 = (8 * v1) * v2;
-		memcpy(v41, v3, v42);
+		ulm_lam_copy(v41, v3, v42);
 		(void)ulmBLAS::trtrs<std::ptrdiff_t>(
 		    true, false, false, false, v1, v2, v31, v1, 1, v41, v2, 1);
 		ulmBLAS::sylrk<std::ptrdiff_t>(v2, v1, v9, v41, 1, v2, v10, v39,
@@ -86,7 +106,7 @@ gls(size_t v1, size_t v2, double *v3, double *v4, double *v5, double *v6,
 		    int64_t v45 = (int64_t)v20;
 		    double *v46 = (double *)(v29 + v45);
 		    size_t v47 = 8 * v1;
-		    memcpy(v46, v5, v47);
+		    ulm_lam_copy(v46, v5, v47);
 		    ulmBLAS::trlsv<std::ptrdiff_t>(v1, false, v31, v1, 1, v46,
 		                                   1);
 		    ulmBLAS::gemv<std::ptrdiff_t>(v2, v1, v9, v41, 1, v2, v46,

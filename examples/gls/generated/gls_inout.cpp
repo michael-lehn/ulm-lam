@@ -6,6 +6,26 @@
 #include <ulmblas/lapack/potrf.h>
 #include <ulmblas/lapack/trtrs.h>
 #include <ulmblas/ulmblas.h>
+static void
+ulm_lam_copy(void *dst, const void *src, std::size_t bytes)
+{
+#ifdef _OPENMP
+    const std::size_t chunk = std::size_t(1) << 20;
+    if (bytes >= 8 * chunk) {
+	std::ptrdiff_t chunks = (bytes + chunk - 1) / chunk;
+#pragma omp parallel for schedule(static)
+	for (std::ptrdiff_t c = 0; c < chunks; ++c) {
+	    std::size_t off = c * chunk;
+	    std::size_t len = bytes - off < chunk ? bytes - off : chunk;
+	    std::memcpy(static_cast<char *>(dst) + off,
+	                static_cast<const char *>(src) + off, len);
+	}
+	return;
+    }
+#endif
+    std::memcpy(dst, src, bytes);
+}
+
 /* gls_inout: matrices by reference (row-major), owned by the caller
  *   v1  double[2000][200]   in     read only
  *   v2  double[2000][2000]  inout  may be overwritten (unspecified on exit)
@@ -59,7 +79,7 @@ gls_inout(double *v1, double *v2, double *v3, double *v4, int8_t *v5,
 		double *v25 = (double *)(v18 + v24);
 		int64_t v26 = (int64_t)320000;
 		double *v27 = (double *)(v18 + v26);
-		memcpy(v27, v1, 3200000);
+		ulm_lam_copy(v27, v1, 3200000);
 		(void)ulmBLAS::trtrs<std::ptrdiff_t>(true, false, false, false,
 		                                     2000, 200, v2, 2000, 1,
 		                                     v27, 200, 1);

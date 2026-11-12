@@ -21,7 +21,7 @@ on MKL would (`dpotrf`, `dpotrs`, `dgemv`, `dtrsm`, `dsyrk`).
 |---|---|
 | `prepare.py` | downloads the data, writes `build/gp_cluster/road.bin` and fits the hyperparameters with scikit-learn (`hyper.txt`) |
 | `generate.py` | generates `generated/gp.cpp` and `generated/gp_cblas.cpp` |
-| `driver.cc` | kernel matrices, `gp`, MKL by hand; `GP_HAND_FIRST=1` swaps the order, `GP_PROF=1` times the MKL calls |
+| `driver.cc` | kernel matrices, `gp`, MKL by hand; `GP_HAND_FIRST=1` swaps the order, `GP_PROF=1` times the MKL calls, `GP_SERIAL_TOUCH=1` zeroes arrays with the main thread |
 | `build.sh`, `run.sbatch` | build on the login node (GCC 14.2, `-march=native`, OpenMP, MKL 2025.0), Slurm job on an exclusive Zen 4 node |
 
 ## Results (2026-11-12)
@@ -33,11 +33,14 @@ Times in seconds, without the kernel matrices.  ulmBLAS `master`
 
 | n | RMSE [m] | ulm.lam on ulmBLAS | ulm.lam on MKL | by hand on MKL |
 |---:|---:|---:|---:|---:|
-| 4 000 | 11.03 | 0.48 | 0.32 | 0.26 |
-| 12 500 | 6.85 | 3.50 | 2.22 | 2.18 |
-| 25 000 | 4.83 | 19.8 | 7.49 | 7.57 |
-| 50 000 | 3.17 | 137.0 | 26.59 | 26.60 |
-| 100 000 | 1.95 | 579.0 | 168.0 | 154.8 |
+| 4 000 | 11.03 | 0.44 | 0.17 | 0.16 |
+| 12 500 | 6.85 | 2.48 | 1.34 | 1.46 |
+| 25 000 | 4.83 | 13.66 | 5.71 | 5.85 |
+| 50 000 | 3.17 | 106.5 | 26.15 | 27.84 |
+| 100 000 | 1.95 | 590.7 | 153.7 | 150.7 |
+
+ulm.lam ran first in each process; the arrays are first written by the
+threads (see below).  The kernel matrices take 1.1 s at n = 100 000.
 
 The RMSE (root mean square error) of the predicted altitude falls from
 15.5 m (n = 1000) to 1.95 m: exact GP regression profits from all the data.
@@ -45,13 +48,25 @@ ulm.lam and MKL agree to 1e-13; ulm.lam on MKL and by hand on MKL give
 identical results (the same calls).
 
 **The mapping (ulm.lam on MKL vs by hand on MKL)** is as fast as the
-hand-written version.  Whichever of the two runs first in a process pays
-about 25% (n = 50 000: by hand first 30.6 s, then ulm.lam 26.6 s; ulm.lam
-first 33.7 s, then by hand 26.6 s); the table shows the second run where
-both orders were measured.  At n = 100 000 only the order "ulm.lam first"
-was run.
+hand-written version (within 6% either way).  The first measurements
+used a driver that zeroed its arrays with `std::vector`, i.e. with the
+main thread: all pages lay on one of the 8 NUMA domains, and the
+kernel's automatic NUMA balancing (`numa_balancing` = 1) migrated them
+during the first heavy run, so whichever variant ran first paid about
+25%.  `driver.cc` now leaves large arrays uninitialised and writes them first
+with the threads (kernel matrices, workspace, copies); then the order no
+longer matters (n = 50 000, MKL):
 
-**ulmBLAS (ulm.lam on ulmBLAS vs on MKL)** is 3.4x slower at n = 100 000.
+| first touch | ulm.lam first: ulm.lam / by hand | by hand first: ulm.lam / by hand |
+|---|---:|---:|
+| main thread (`GP_SERIAL_TOUCH=1`) | 31.66 / 27.28 | 27.82 / 30.02 |
+| the threads (default) | **26.00 / 27.35** | **26.37 / 27.42** |
+| main thread, `numactl --interleave=all` | 25.29 / 27.85 | |
+
+and the kernel matrices take 0.27 s instead of 2.3 s.  The generated code
+copies large arrays in parallel (`ulm_lam_copy`) for the same reason.
+
+**ulmBLAS (ulm.lam on ulmBLAS vs on MKL)** is 3.8x slower at n = 100 000.
 Per kernel (n = 25 000): `potrf` 14.5 s (ulmBLAS) vs 2.9 s (MKL), `trtrs`
 3.2 s vs 4.1 s (`dtrsm`), `sylrk` 1.9 s vs 0.27 s.  Thread scaling at
 n = 12 500:

@@ -6,6 +6,26 @@
 #include <ulmblas/lapack/potrf.h>
 #include <ulmblas/lapack/trtrs.h>
 #include <ulmblas/ulmblas.h>
+static void
+ulm_lam_copy(void *dst, const void *src, std::size_t bytes)
+{
+#ifdef _OPENMP
+    const std::size_t chunk = std::size_t(1) << 20;
+    if (bytes >= 8 * chunk) {
+	std::ptrdiff_t chunks = (bytes + chunk - 1) / chunk;
+#pragma omp parallel for schedule(static)
+	for (std::ptrdiff_t c = 0; c < chunks; ++c) {
+	    std::size_t off = c * chunk;
+	    std::size_t len = bytes - off < chunk ? bytes - off : chunk;
+	    std::memcpy(static_cast<char *>(dst) + off,
+	                static_cast<const char *>(src) + off, len);
+	}
+	return;
+    }
+#endif
+    std::memcpy(dst, src, bytes);
+}
+
 extern "C" void
 observe(size_t, double *);
 extern "C" void
@@ -53,7 +73,7 @@ gls(double *v1, double *v2, double *v3, double *v4, int8_t *v5, int64_t *v6)
 	    int8_t *v18 = v16;
 	    int64_t v19 = (int64_t)v11;
 	    double *v20 = (double *)(v18 + v19);
-	    memcpy(v20, v2, 32000000);
+	    ulm_lam_copy(v20, v2, 32000000);
 	    int64_t v21 =
 	        ulmBLAS::potrf<std::ptrdiff_t>(true, 2000, v20, 2000, 1);
 	    bool v22 = (bool)(v21 != v10);
@@ -65,7 +85,7 @@ gls(double *v1, double *v2, double *v3, double *v4, int8_t *v5, int64_t *v6)
 		double *v27 = (double *)(v18 + v26);
 		int64_t v28 = (int64_t)32320000;
 		double *v29 = (double *)(v18 + v28);
-		memcpy(v29, v1, 3200000);
+		ulm_lam_copy(v29, v1, 3200000);
 		(void)ulmBLAS::trtrs<std::ptrdiff_t>(true, false, false, false,
 		                                     2000, 200, v20, 2000, 1,
 		                                     v29, 200, 1);
@@ -77,7 +97,7 @@ gls(double *v1, double *v2, double *v3, double *v4, int8_t *v5, int64_t *v6)
 		if (v31 == v10) {
 		    int64_t v32 = (int64_t)35520000;
 		    double *v33 = (double *)(v18 + v32);
-		    memcpy(v33, v3, 16000);
+		    ulm_lam_copy(v33, v3, 16000);
 		    ulmBLAS::trlsv<std::ptrdiff_t>(2000, false, v20, 2000, 1,
 		                                   v33, 1);
 		    ulmBLAS::gemv<std::ptrdiff_t>(200, 2000, v8, v29, 1, 200,

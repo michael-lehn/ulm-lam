@@ -31,7 +31,8 @@
 // column-major.
 //
 // Memory: memref.alloc -> aligned_alloc (size rounded up to the alignment,
-// as C11/C++17 require), memref.dealloc -> free, memref.copy -> memcpy.
+// as C11/C++17 require), memref.dealloc -> free, memref.copy -> memcpy
+// (ulm_lam_copy: in parallel for large copies with OpenMP).
 // Control flow, arithmetic and functions use the upstream
 // {scf,arith,func}-to-emitc patterns with this type converter.
 //
@@ -294,7 +295,7 @@ struct CopyLowering : OpConversionPattern<memref::CopyOp>
 	    return rewriter.notifyMatchFailure(op, "not a C array copy");
 	if (t.hasStaticShape()) {
 	    rewriter.replaceOpWithNewOp<emitc::CallOpaqueOp>(
-	        op, TypeRange{}, "memcpy",
+	        op, TypeRange{}, "ulm_lam_copy",
 	        ValueRange{adaptor.getTarget(), adaptor.getSource()},
 	        rewriter.getArrayAttr(
 	            {rewriter.getIndexAttr(0), rewriter.getIndexAttr(1),
@@ -329,7 +330,7 @@ struct CopyLowering : OpConversionPattern<memref::CopyOp>
 	    bytes = emitc::MulOp::create(rewriter, loc, sizeT, bytes, s);
 	}
 	rewriter.replaceOpWithNewOp<emitc::CallOpaqueOp>(
-	    op, TypeRange{}, "memcpy",
+	    op, TypeRange{}, "ulm_lam_copy",
 	    ValueRange{adaptor.getTarget(), adaptor.getSource(), bytes});
 	return success();
     }
@@ -751,6 +752,32 @@ struct CallLowering : OpConversionPattern<lk::CallOp>
 
 // ---- checks of LAPACK info, emitted into the output ----------------------
 
+/// memref.copy: memcpy, in parallel for large copies with OpenMP.  On a
+/// machine with several NUMA (Non-Uniform Memory Access) nodes the first
+/// write decides where a page of a new buffer (a workspace the function
+/// allocates itself) lies; a serial memcpy would put all of it on one
+/// node, and the kernels that use it with all threads would pay for that.
+const char *kCopy = R"(static void
+ulm_lam_copy(void *dst, const void *src, std::size_t bytes)
+{
+#ifdef _OPENMP
+    const std::size_t chunk = std::size_t(1) << 20;
+    if (bytes >= 8 * chunk) {
+        std::ptrdiff_t chunks = (bytes + chunk - 1) / chunk;
+#pragma omp parallel for schedule(static)
+        for (std::ptrdiff_t c = 0; c < chunks; ++c) {
+            std::size_t off = c * chunk;
+            std::size_t len = bytes - off < chunk ? bytes - off : chunk;
+            std::memcpy(static_cast<char *>(dst) + off,
+                        static_cast<const char *>(src) + off, len);
+        }
+        return;
+    }
+#endif
+    std::memcpy(dst, src, bytes);
+}
+)";
+
 /// Mirror the stored triangle of a symmetric matrix (ulm_lamk.sycomplete);
 /// ulmBLAS has no such routine.
 const char *kSycomplete = R"(template <typename T>
@@ -985,8 +1012,9 @@ struct ConvertUlmLamkToUlmBLAS
 
 	// Which ulmBLAS LAPACK headers and info checks the output needs.
 	bool potrf = false, getrf = false, getrs = false, sycomplete = false,
-	     trtrs = false;
+	     trtrs = false, copy = false;
 	module.walk([&](Operation *op) {
+	    copy |= isa<memref::CopyOp>(op);
 	    potrf |= isa<lk::PotrfOp>(op);
 	    if (auto t = dyn_cast<lk::TrsmOp>(op))
 		trtrs |= isOne(t.getAlpha());
@@ -1015,13 +1043,15 @@ struct ConvertUlmLamkToUlmBLAS
 	if (failed(applyPartialConversion(module, conv, std::move(patterns))))
 	    return signalPassFailure();
 
-	// Casts left without use (e.g. the sizes of workspace parts, which the
-	// pointer arithmetic does not need) would be unused variables in C++.
+	// Casts and constants left without use (e.g. the sizes of workspace
+	// parts, which the pointer arithmetic does not need, or the alpha = 1
+	// of a trsm lowered to trtrs) would be unused variables in C++.
 	for (bool erased = true; erased;) {
 	    erased = false;
-	    module.walk([&](emitc::CastOp c) {
-		if (c->use_empty()) {
-		    c->erase();
+	    module.walk([&](Operation *op) {
+		if (isa<emitc::CastOp, emitc::ConstantOp, arith::ConstantOp>(op) &&
+		    op->use_empty()) {
+		    op->erase();
 		    erased = true;
 		}
 	    });
@@ -1064,6 +1094,8 @@ struct ConvertUlmLamkToUlmBLAS
 	    include("ulmblas/lapack/getrs.h");
 	if (trtrs)
 	    include("ulmblas/lapack/trtrs.h");
+	if (copy)
+	    emitc::VerbatimOp::create(b, loc, kCopy);
 	if (sycomplete)
 	    emitc::VerbatimOp::create(b, loc, kSycomplete);
     }

@@ -31,10 +31,13 @@ Data (downloaded on first use into build/data/):
     Progress in Artificial Intelligence, 2013).  Tabular regression with up
     to 16000 training hours: timings.
 
-Not done by ulm.lam (yet): the kernel matrices (elementwise functions,
-NumPy here), the noise term s^2 I (added in NumPy: needs the identity and
-scalars known at run time) and fitting the hyperparameters (needs
-log det K = 2 sum log L_ii and traces; scikit-learn here, on a subset).
+The generated function gp gets K, K* and K** as finished matrices.  This
+script computes them before the call, with NumPy: the kernel matrices
+(elementwise functions of the data) and the noise term s^2 I.  Moving
+them into the ulm.lam program would need elementwise operations, the
+identity and scalars known at run time.  The hyperparameters are fitted
+by scikit-learn on a subset; in ulm.lam that would need log det K =
+2 sum log L_ii and traces (scalar results reusing the factorisation).
 
     python3 python/examples/gp.py            # n up to 8000
     python3 python/examples/gp.py --full     # n up to 16000
@@ -365,6 +368,11 @@ def main():
     # the same kernel calls on CBLAS/LAPACK (OpenBLAS, as NumPy here)
     lib_cblas = lam.compile(gp, name="gp_py_cblas", backend="cblas")
     print(f"compiled in {time.perf_counter() - t0:.1f} s: {lib.path}")
+    # the generated code, kept in the repository (shown in doc/ulm-lam.tex)
+    gen = Path(__file__).resolve().parent / "generated"
+    gen.mkdir(exist_ok=True)
+    (gen / "gp.cpp").write_text(lib.source)
+    (gen / "gp_cblas.cpp").write_text(lib_cblas.source)
     print("generated C++ (lib.gp.cpp):\n")
     print(lib.gp.cpp)
     err = co2(lib)

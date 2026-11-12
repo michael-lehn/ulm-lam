@@ -16,12 +16,12 @@ LICM= "$ROOT/scripts/ulm-lam-compile.sh" "$HERE/estimate.mlir" "$OUT/estimate_no
 "$CXX" "${ULMFLAGS[@]}" -Wall -Wextra -pedantic -Destimate=estimate_nolicm \
 	-c "$OUT/estimate_nolicm.cpp" -o "$OUT/estimate_nolicm.o"
 "$CXX" "${ULMFLAGS[@]}" "$OUT/estimate.o" "$OUT/estimate_nolicm.o" \
-	"$HERE/driver.cc" -o "$OUT/estimate"
+	"$HERE/driver.cc" -o "$OUT/estimate" "${ULMLIBS[@]}"
 "$OUT/estimate"
 
 "$ROOT/scripts/ulm-lam-compile.sh" "$HERE/adaptive.mlir" "$OUT/adaptive" "$HERE/generated"
 "$CXX" "${ULMFLAGS[@]}" -Wall -Wextra -pedantic -c "$OUT/adaptive.cpp" \
 	-o "$OUT/adaptive.o"
 "$CXX" "${ULMFLAGS[@]}" "$OUT/adaptive.o" "$HERE/driver_adaptive.cc" \
-	-o "$OUT/adaptive"
+	-o "$OUT/adaptive" "${ULMLIBS[@]}"
 "$OUT/adaptive"

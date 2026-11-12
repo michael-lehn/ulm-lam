@@ -13,3 +13,17 @@ CC="${CC:-cc}"
 # shellcheck disable=SC2206
 # -isystem: warnings are reported for the generated code, not for ulmBLAS
 ULMFLAGS=(-std=c++17 -O3 $ARCHFLAGS -isystem "$ULMBLAS_DIR")
+# OpenMP (OPENMP=0: without): ulmBLAS runs potrf, getrf and the solves
+# (trtrs, getrs, potrs) as OpenMP tasks.  Apple clang needs Homebrew's
+# libomp.  ULMLIBS: for the link commands.
+ULMLIBS=()
+if [ "${OPENMP:-1}" = 1 ]; then
+	if [ "$(uname)" = Darwin ]; then
+		OMPDIR="$(brew --prefix libomp)"
+		ULMFLAGS+=(-Xpreprocessor -fopenmp -isystem "$OMPDIR/include")
+		ULMLIBS=(-L"$OMPDIR/lib" -Wl,-rpath,"$OMPDIR/lib" -lomp)
+	else
+		ULMFLAGS+=(-fopenmp)
+		ULMLIBS=(-fopenmp)
+	fi
+fi

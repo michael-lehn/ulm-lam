@@ -8,6 +8,26 @@
 #include <ulmblas/lapack/potrf.h>
 #include <ulmblas/lapack/trtrs.h>
 #include <ulmblas/ulmblas.h>
+static void
+ulm_lam_copy(void *dst, const void *src, std::size_t bytes)
+{
+#ifdef _OPENMP
+    const std::size_t chunk = std::size_t(1) << 20;
+    if (bytes >= 8 * chunk) {
+	std::ptrdiff_t chunks = (bytes + chunk - 1) / chunk;
+#pragma omp parallel for schedule(static)
+	for (std::ptrdiff_t c = 0; c < chunks; ++c) {
+	    std::size_t off = c * chunk;
+	    std::size_t len = bytes - off < chunk ? bytes - off : chunk;
+	    std::memcpy(static_cast<char *>(dst) + off,
+	                static_cast<const char *>(src) + off, len);
+	}
+	return;
+    }
+#endif
+    std::memcpy(dst, src, bytes);
+}
+
 /* lu: matrices by reference (row-major), owned by the caller
  *   v1  double[64][64]  in    read only
  *   v2  double[64][32]  in    read only
@@ -49,14 +69,14 @@ lu(double *v1, double *v2, double *v3, int8_t *v4, int64_t *v5)
 	    int32_t *v17 = (int32_t *)(v15 + v16);
 	    int64_t v18 = (int64_t)256;
 	    double *v19 = (double *)(v15 + v18);
-	    memcpy(v19, v1, 32768);
+	    ulm_lam_copy(v19, v1, 32768);
 	    int64_t v20 =
 	        ulmBLAS::getrf<std::ptrdiff_t>(64, 64, v19, 64, 1, v17, 1);
 	    bool v21 = (bool)(v20 != v7);
 	    uint64_t v22 = (uint64_t)v21;
 	    int64_t v23 = (int64_t)v22;
 	    if (v23 == v7) {
-		memcpy(v3, v2, 16384);
+		ulm_lam_copy(v3, v2, 16384);
 		ulmBLAS::getrs<std::ptrdiff_t>(false, false, 64, 32, v19, 64, 1,
 		                               v17, 1, v3, 32, 1);
 	    }
@@ -110,14 +130,14 @@ lu_t(double *v1, double *v2, double *v3, int8_t *v4, int64_t *v5)
 	    int32_t *v17 = (int32_t *)(v15 + v16);
 	    int64_t v18 = (int64_t)256;
 	    double *v19 = (double *)(v15 + v18);
-	    memcpy(v19, v1, 32768);
+	    ulm_lam_copy(v19, v1, 32768);
 	    int64_t v20 =
 	        ulmBLAS::getrf<std::ptrdiff_t>(64, 64, v19, 64, 1, v17, 1);
 	    bool v21 = (bool)(v20 != v7);
 	    uint64_t v22 = (uint64_t)v21;
 	    int64_t v23 = (int64_t)v22;
 	    if (v23 == v7) {
-		memcpy(v3, v2, 16384);
+		ulm_lam_copy(v3, v2, 16384);
 		ulmBLAS::getrs<std::ptrdiff_t>(true, false, 64, 32, v19, 64, 1,
 		                               v17, 1, v3, 32, 1);
 	    }
@@ -141,8 +161,7 @@ lu_t(double *v1, double *v2, double *v3, int8_t *v4, int64_t *v5)
 extern "C" int64_t
 upper(double *v1, double *v2, double *v3)
 {
-    double v4 = 1.00000000000000000e+00;
-    memcpy(v3, v2, 16384);
+    ulm_lam_copy(v3, v2, 16384);
     (void)ulmBLAS::trtrs<std::ptrdiff_t>(false, false, false, false, 64, 32, v1,
                                          64, 1, v3, 32, 1);
     return 0;
@@ -158,8 +177,7 @@ upper(double *v1, double *v2, double *v3)
 extern "C" int64_t
 right(double *v1, double *v2, double *v3)
 {
-    double v4 = 1.00000000000000000e+00;
-    memcpy(v3, v1, 16384);
+    ulm_lam_copy(v3, v1, 16384);
     (void)ulmBLAS::trtrs<std::ptrdiff_t>(false, false, false, false, 64, 32, v2,
                                          1, 64, v3, 1, 64);
     return 0;
@@ -175,8 +193,7 @@ right(double *v1, double *v2, double *v3)
 extern "C" int64_t
 right_t(double *v1, double *v2, double *v3)
 {
-    double v4 = 1.00000000000000000e+00;
-    memcpy(v3, v1, 16384);
+    ulm_lam_copy(v3, v1, 16384);
     (void)ulmBLAS::trtrs<std::ptrdiff_t>(true, false, false, false, 64, 32, v2,
                                          64, 1, v3, 1, 64);
     return 0;
@@ -220,13 +237,13 @@ chol_vec(double *v1, double *v2, double *v3, int8_t *v4, int64_t *v5)
 	    int8_t *v15 = v13;
 	    int64_t v16 = (int64_t)v8;
 	    double *v17 = (double *)(v15 + v16);
-	    memcpy(v17, v1, 32768);
+	    ulm_lam_copy(v17, v1, 32768);
 	    int64_t v18 = ulmBLAS::potrf<std::ptrdiff_t>(true, 64, v17, 64, 1);
 	    bool v19 = (bool)(v18 != v7);
 	    uint64_t v20 = (uint64_t)v19;
 	    int64_t v21 = (int64_t)v20;
 	    if (v21 == v7) {
-		memcpy(v3, v2, 512);
+		ulm_lam_copy(v3, v2, 512);
 		ulmBLAS::trlsv<std::ptrdiff_t>(64, false, v17, 64, 1, v3, 1);
 		ulmBLAS::trusv<std::ptrdiff_t>(64, false, v17, 1, 64, v3, 1);
 	    }
@@ -253,7 +270,7 @@ sum(double *v1, double *v2, double *v3, double *v4)
 {
     double v5 = 2.00000000000000000e+00;
     double v6 = -1.00000000000000000e+00;
-    memcpy(v4, v1, 32768);
+    ulm_lam_copy(v4, v1, 32768);
     ulmBLAS::geaxpy<std::ptrdiff_t>(64, 64, v5, v2, 64, 1, v4, 64, 1);
     ulmBLAS::geaxpy<std::ptrdiff_t>(64, 64, v6, v3, 64, 1, v4, 64, 1);
     return 0;
@@ -304,7 +321,7 @@ mixed(double *v1, double *v2, double *v3, double *v4, double *v5, int8_t *v6,
 	    int32_t *v21 = (int32_t *)(v19 + v20);
 	    int64_t v22 = (int64_t)256;
 	    double *v23 = (double *)(v19 + v22);
-	    memcpy(v23, v1, 32768);
+	    ulm_lam_copy(v23, v1, 32768);
 	    int64_t v24 =
 	        ulmBLAS::getrf<std::ptrdiff_t>(64, 64, v23, 64, 1, v21, 1);
 	    bool v25 = (bool)(v24 != v11);
@@ -318,7 +335,7 @@ mixed(double *v1, double *v2, double *v3, double *v4, double *v5, int8_t *v6,
 		                              1);
 		ulmBLAS::getrs<std::ptrdiff_t>(false, false, 64, 32, v23, 64, 1,
 		                               v21, 1, v29, 32, 1);
-		memcpy(v5, v4, 16384);
+		ulm_lam_copy(v5, v4, 16384);
 		ulmBLAS::geaxpy<std::ptrdiff_t>(64, 32, v9, v29, 32, 1, v5, 32,
 		                                1);
 	    }

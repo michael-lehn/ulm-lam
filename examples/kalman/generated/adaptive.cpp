@@ -6,6 +6,26 @@
 #include <ulmblas/lapack/potrf.h>
 #include <ulmblas/lapack/trtrs.h>
 #include <ulmblas/ulmblas.h>
+static void
+ulm_lam_copy(void *dst, const void *src, std::size_t bytes)
+{
+#ifdef _OPENMP
+    const std::size_t chunk = std::size_t(1) << 20;
+    if (bytes >= 8 * chunk) {
+	std::ptrdiff_t chunks = (bytes + chunk - 1) / chunk;
+#pragma omp parallel for schedule(static)
+	for (std::ptrdiff_t c = 0; c < chunks; ++c) {
+	    std::size_t off = c * chunk;
+	    std::size_t len = bytes - off < chunk ? bytes - off : chunk;
+	    std::memcpy(static_cast<char *>(dst) + off,
+	                static_cast<const char *>(src) + off, len);
+	}
+	return;
+    }
+#endif
+    std::memcpy(dst, src, bytes);
+}
+
 extern "C" void
 update_covariance(size_t, double *);
 extern "C" void
@@ -54,7 +74,7 @@ estimate_adaptive(double *v1, double *v2, size_t v3, int8_t *v4, int64_t *v5)
 	    int8_t *v17 = v15;
 	    int64_t v18 = (int64_t)v10;
 	    double *v19 = (double *)(v17 + v18);
-	    memcpy(v19, v2, 32000000);
+	    ulm_lam_copy(v19, v2, 32000000);
 	    int64_t v20 = (int64_t)32000000;
 	    double *v21 = (double *)(v17 + v20);
 	    int64_t v22 = (int64_t)64000000;
@@ -72,7 +92,7 @@ estimate_adaptive(double *v1, double *v2, size_t v3, int8_t *v4, int64_t *v5)
 		int64_t v33;
 		if (v32 == v9) {
 		    update_covariance(i31, v19);
-		    memcpy(v21, v19, 32000000);
+		    ulm_lam_copy(v21, v19, 32000000);
 		    int64_t v34 = ulmBLAS::potrf<std::ptrdiff_t>(true, 2000,
 		                                                 v21, 2000, 1);
 		    bool v35 = (bool)(v34 != v9);
@@ -81,7 +101,7 @@ estimate_adaptive(double *v1, double *v2, size_t v3, int8_t *v4, int64_t *v5)
 		    int64_t v38;
 		    if (v37 == v9) {
 			observe(i31, v23);
-			memcpy(v27, v1, 3200000);
+			ulm_lam_copy(v27, v1, 3200000);
 			(void)ulmBLAS::trtrs<std::ptrdiff_t>(
 			    true, false, false, false, 2000, 200, v21, 2000, 1,
 			    v27, 200, 1);

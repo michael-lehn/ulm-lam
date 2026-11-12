@@ -13,5 +13,5 @@ OUT="${OUT:-$ROOT/build/gls}"
 "$CXX" "${ULMFLAGS[@]}" -Wall -Wextra -pedantic -c "$OUT/gls_inout.cpp" \
 	-o "$OUT/gls_inout.o"
 "$CXX" "${ULMFLAGS[@]}" "$OUT/gls.o" "$OUT/gls_inout.o" "$HERE/driver.cc" \
-	-o "$OUT/gls"
+	-o "$OUT/gls" "${ULMLIBS[@]}"
 "$OUT/gls"

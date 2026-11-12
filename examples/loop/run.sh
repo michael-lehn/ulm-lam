@@ -10,5 +10,5 @@ OUT="${OUT:-$ROOT/build/loop}"
 "$CXX" "${ULMFLAGS[@]}" -Wall -Wextra -pedantic -c "$OUT/accumulate.cpp" \
 	-o "$OUT/accumulate.o"
 "$CC" -std=c11 -O2 -c "$HERE/driver.c" -o "$OUT/driver.o"
-"$CXX" "$OUT/accumulate.o" "$OUT/driver.o" -o "$OUT/accumulate"
+"$CXX" "$OUT/accumulate.o" "$OUT/driver.o" -o "$OUT/accumulate" "${ULMLIBS[@]}"
 "$OUT/accumulate"

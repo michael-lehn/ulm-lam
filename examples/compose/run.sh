@@ -9,5 +9,5 @@ OUT="${OUT:-$ROOT/build/compose}"
 "$ROOT/scripts/ulm-lam-compile.sh" "$HERE/compose.mlir" "$OUT/compose" "$HERE/generated"
 "$CXX" "${ULMFLAGS[@]}" -Wall -Wextra -pedantic -c "$OUT/compose.cpp" \
 	-o "$OUT/compose.o"
-"$CXX" "${ULMFLAGS[@]}" "$OUT/compose.o" "$HERE/driver.cc" -o "$OUT/compose"
+"$CXX" "${ULMFLAGS[@]}" "$OUT/compose.o" "$HERE/driver.cc" -o "$OUT/compose" "${ULMLIBS[@]}"
 "$OUT/compose"
