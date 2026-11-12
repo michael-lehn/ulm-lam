@@ -2562,13 +2562,15 @@ exact GP regression profits from all the data, which makes the
 $O(n^3)$ factorisation, and a fast \code{potrf}, the point.
 
 % =====================================================================
+\addtocontents{toc}{\protect\setcounter{tocdepth}{2}}
 \section{More showcases}\label{sec:showcases}
 % =====================================================================
 Five more programs, each written as the formula and compared with NumPy
 (and one with PyTorch)
 (OpenBLAS) on the Apple M5 (\code{make showcases}).
 
-\paragraph{Ridge regression} (\file{python/examples/ridge.py}):
+\subsection{Ridge regression}\label{sec:ridge}
+\file{python/examples/ridge.py}:
 \begin{lstlisting}[style=py]
 @lam.function
 def ridge(X: Matrix("n", "p"), Y: Matrix("n", "k"), lam_: Float):
@@ -2602,7 +2604,8 @@ The time is that of $X\T X$ ($np^2$), which NumPy also computes by
 version written by hand, and $3$--$4\times$ faster than the formula with
 \code{inv}.
 
-\paragraph{Linear attention} (\file{python/examples/attention.py}):
+\subsection{Linear attention}\label{sec:attention}
+\file{python/examples/attention.py}:
 \begin{lstlisting}[style=py]
 @lam.function
 def attention(Q: Matrix("N", "d"), K: Matrix("N", "d"), V: Matrix("N", "e")):
@@ -2636,8 +2639,9 @@ parentheses placed by hand; and for a short sequence with a large
 dimension ($N = 16$, $d = 512$) ulm.lam takes the other order, which is
 $8\times$ faster there than the one that is right for long sequences.
 
-\paragraph{The Kalman filter} (\file{python/examples/kalman_filter.py}),
-predict and update in a loop, as in the textbook:
+\subsection{The Kalman filter}\label{sec:kalmanfilter}
+\file{python/examples/kalman_filter.py}: predict and update in a loop, as
+in the textbook,
 \begin{lstlisting}[style=py]
 with lam.loop(steps, carry=[x0, P0]) as L:
     x, P = L.carried
@@ -2674,8 +2678,8 @@ $n$ & $m$ & steps & ulm.lam & NumPy as written & NumPy by hand \\
 \end{tabular}
 \end{center}
 
-\paragraph{Bayesian linear regression} (\file{python/examples/bayes.py}):
-with the prior $w \sim N(0, \alpha\inv I)$ and the noise precision
+\subsection{Bayesian linear regression}\label{sec:bayes}
+\file{python/examples/bayes.py}: with the prior $w \sim N(0, \alpha\inv I)$ and the noise precision
 $\beta$ (Bishop, Sec.~3.3),
 \begin{lstlisting}[style=py]
 @lam.function
@@ -2719,9 +2723,8 @@ As fast as the version written by hand, $3.4$--$4.6\times$ faster than
 the formula with \code{inv}; ``in 2 sd'' is the share of test hours whose
 value lies within two predictive standard deviations.
 
-\paragraph{What PyTorch implements, as formulas}
-(\file{python/examples/torch_linear.py}, \code{make torch}).
-A linear layer (\code{torch.nn.Linear}: $Y = XW + \mathbf{1}b\T$) trained
+\subsection{What PyTorch implements, as formulas}\label{sec:torch}
+\file{python/examples/torch_linear.py} (\code{make torch}): a linear layer (\code{torch.nn.Linear}: $Y = XW + \mathbf{1}b\T$) trained
 by mini-batch gradient descent on the mean squared error: the forward
 pass, the gradients and the optimiser step written as formulas, the whole
 loop one ulm.lam function:
@@ -2782,7 +2785,8 @@ Homebrew's (NumPy's OpenBLAS, ulm.lam's OpenMP) is loaded too; the
 showcase therefore runs in a virtual environment with NumPy and PyTorch
 from pip (both on Accelerate) and builds ulm.lam without OpenMP.
 
-\paragraph{The same in Julia} (\file{julia/examples/ridge.jl},
+\subsection{The same in Julia}\label{sec:showcasesjulia}
+In Julia (\file{julia/examples/ridge.jl},
 \file{attention.jl}, \file{kalman_filter.jl}, \file{bayes.jl}, \code{make julia}), against
 what a Julia programmer writes (Julia 1.13 with its OpenBLAS on 4
 threads; ulm.lam on ulmBLAS, for attention also on OpenBLAS with 4
@@ -2826,6 +2830,7 @@ symmetric factors, so that $PH\T$ is found as the transpose of $HP$.
 Still possible: $FPF\T$ and $HPH\T$ are symmetric, so \code{gemmtr} would
 halve the second product.
 
+\addtocontents{toc}{\protect\setcounter{tocdepth}{1}}
 % =====================================================================
 \section{Testing strategy}
 % =====================================================================
