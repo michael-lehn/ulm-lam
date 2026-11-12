@@ -19,10 +19,12 @@ opt() {
 	"$LLVM/bin/mlir-opt" --load-dialect-plugin="$PLUGIN" \
 		--load-pass-plugin="$PLUGIN" "$@"
 }
-# LAPACK's L D L^T and QR where the backend has them (CBLAS/LAPACK)
+# LAPACK's L D L^T and QR where the backend has them (CBLAS/LAPACK);
+# ULM_LAM_SELECT_OPTIONS: further options of ulm-lam-select-kernels
+# (e.g. expand-factors=false)
 LAPACK=false
 [ "${BACKEND:-ulmblas}" = cblas ] && LAPACK=true
-SELECT="func.func(ulm-lam-normalize, ulm-lam-infer-properties${LICM-, loop-invariant-code-motion}, ulm-lam-select-kernels{lapack=$LAPACK}), ulm-lam-strip-properties, canonicalize"
+SELECT="func.func(ulm-lam-normalize, ulm-lam-infer-properties${LICM-, loop-invariant-code-motion}, ulm-lam-select-kernels{lapack=$LAPACK ${ULM_LAM_SELECT_OPTIONS:-}}), ulm-lam-strip-properties, canonicalize"
 BUFFERIZE='ulm-lam-results-to-out-params, eliminate-empty-tensors,
 	one-shot-bufferize{bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map},
 	buffer-results-to-out-params{hoist-static-allocs modify-public-functions add-result-attr},

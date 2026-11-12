@@ -48,8 +48,39 @@ What it shows:
   costs (polynomials in the sizes) and a set of plans that are optimal in
   different regions, instead of one extraction.
 
-Next: the syrk downdate of the Kalman step as a rule of `strategy=gmc`;
-the experiment driven by ulm.lam's IR (the traced `ulm_lam` functions
+## Back into the compiler
+
+The Kalman finding is now a rule of ulm.lam's kernel selection
+(`expand-factors`, on by default): a factor of a product that is itself a
+computed product (K in K H P) may be replaced by the factors of that
+product, if the longer chain is cheaper by the generalised matrix chain.
+In K H P = P Hᵀ S⁻¹ H P the chain then reads (H P)ᵀ L⁻ᵀ L⁻¹ (H P), which
+the chain algorithm already knew as a Gram matrix (as Xᵀ M⁻¹ X in GLS); H P,
+the factorisation of S and L⁻¹ H P are reused from computing K.  Two small
+changes made it work: a symmetric matrix counts as its own transpose when
+the chain looks for Zᵀ … Z, and the stored triangle of a syrk result is
+completed in tiles (`sycomplete`; element-wise, its transposed writes cost
+more than syrk saves for n = 3000).
+
+The Kalman filter (predict and update, Julia's OpenBLAS with 4 threads on an
+Apple M5, the two variants compiled side by side and timed alternately,
+best of 7):
+
+| n, m | without | with | faster | asymmetry of P after 20 steps (without / with) |
+|:--|--:|--:|--:|:--|
+| 1000, 100 | 29.14 ms/step | 28.73 ms/step | 1.4 % | 3.4e-16 / 0 |
+| 1000, 300 | 38.56 | 36.76 | 4.7 % | 1.2e-15 / 0 |
+| 2000, 200 | 219.5 | 214.8 | 2.1 % | 4.7e-16 / 0 |
+| 3000, 300 | 759.8 | 759.4 | 0.1 % | 5.2e-16 / 0 |
+
+The gain is real but small: the update is a few percent of a step, in which
+F P Fᵀ dominates (the 23 % of the experiment are of the measurement update
+alone), and at n = 3000 the completion of the triangle eats what syrk saves.
+The covariance, however, is now exactly symmetric in every step; without the
+rule it drifts away from symmetry by rounding, a known problem of Kalman
+filters.
+
+Next: the experiment driven by ulm.lam's IR (the traced `ulm_lam` functions
 instead of hand-written terms) and its plans lowered back to `ulm_lamk`, as
 `strategy=egraph`; MLIR's own equality saturation work (eqsat, DialEgg) as
 an alternative to egglog.

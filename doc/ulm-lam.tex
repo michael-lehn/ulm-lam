@@ -3253,10 +3253,21 @@ what solving it would take.
         The e-graphs stay small (at most 3212 nodes), but extraction needs
         the sizes: plans chosen at run time, as ulm.lam's, would need
         symbolic costs and a set of plans optimal in different regions.
-        Next: the \code{syrk} downdate as a rule of \code{strategy=gmc};
-        the experiment driven by the traced IR and its plans lowered back
-        to \code{ulm_lamk} (\code{strategy=egraph}); MLIR's own equality
-        saturation work as an alternative to egglog.
+        The finding went back into the compiler as a rule of
+        \code{strategy=gmc} (\code{expand-factors}): a factor that is a
+        computed product ($K$ in $KHP$) may be replaced by its factors if
+        the longer chain is cheaper; then $(HP)\T L^{-T} L\inv (HP)$ is a
+        Gram matrix for the chain algorithm, as $X\T M\inv X$ in GLS, with
+        $HP$, the factorisation of $S$ and $L\inv HP$ reused from $K$.
+        In the whole Kalman filter, where $FPF\T$ dominates, the gain is
+        small (1.4, 4.7, 2.1 and 0.1\,\% per step for
+        $(n, m) = (1000, 100)$, $(1000, 300)$, $(2000, 200)$,
+        $(3000, 300)$, the variants timed alternately), but the covariance
+        is now exactly symmetric in every step instead of drifting by
+        rounding.
+        Next: the experiment driven by the traced IR and its plans lowered
+        back to \code{ulm_lamk} (\code{strategy=egraph}); MLIR's own
+        equality saturation work as an alternative to egglog.
   \item \emph{A catalogue of kernels as data.}
         The ODS contains a kernel catalogue as TableGen records, but
         selection is written by hand kernel by kernel.

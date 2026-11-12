@@ -54,6 +54,7 @@ class _Renderer:
         self.ifname = {}   # an scf.if (line) -> the name of its result
         self.forced = {}   # a line yielded by an scf.if -> that if's line
         self.k = 0         # the line being rendered
+        self.lastuse = {}  # the last line that uses a value
 
     def fresh(self, c):
         self.counter[c] = self.counter.get(c, 0) + 1
@@ -80,7 +81,9 @@ class _Renderer:
         or a new name (a copy of a parameter, a factor, a new matrix)."""
         if self.k in self.forced and prefix == "T":
             self.names[res] = self.ifname[self.forced[self.k]]
-        elif fresh or out in self.params or prefix != "T":
+        elif (fresh or out in self.params or prefix != "T"
+              or self.lastuse.get(out, 0) > self.k):
+            # (a value still used later keeps its name: a new one here)
             self.names[res] = self.fresh(prefix)
         else:
             self.names[res] = self.name(out)
@@ -117,6 +120,11 @@ def render(fn: fe.Function, selected: str, infos: dict) -> str:
         r.names[a] = lab
         r.params.add(a)
     empties = set()
+    for k, line in enumerate(body):
+        d_ = _DEFINED.match(line)
+        for m in re.finditer(r"(%[\w#]+)", line):
+            if not (d_ and m.group(1) == d_.group(1)):
+                r.lastuse[m.group(1)] = k
     # the values an scf.if yields are its result: named as it
     stack = []
     for k, line in enumerate(body):
