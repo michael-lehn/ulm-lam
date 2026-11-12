@@ -1007,7 +1007,8 @@ class Selector
     struct Chain
     {
 	SmallVector<Leaf> leaves;
-	double alpha = 1.0; // constant factors moved out of the product
+	double alpha = 1.0;     // constant factors moved out of the product
+	bool symmetric = false; // the product is symmetric (F P F^T)
 	std::vector<std::vector<double>> cost;
 	std::vector<std::vector<Choice>> choice;
     };
@@ -1395,9 +1396,37 @@ class Selector
 	Choice ch = c.choice[i][j];
 	int s = ch.split;
 	switch (ch.kind) {
-	case Choice::Gemm:
-	    return gemm(operand(c, i, s, loc), operand(c, s + 1, j, loc), dest,
-	                alpha, beta, loc);
+	case Choice::Gemm: {
+	    Leaf l = operand(c, i, s, loc), r = operand(c, s + 1, j, loc);
+	    // the last product of a symmetric chain (F P F^T): one triangle
+	    // (gemmtr, half the flops), passed on as stored in the lower
+	    // triangle, as a syrk result; into a new matrix or added to a
+	    // symmetric one
+	    bool top = i == 0 && j + 1 == static_cast<int>(c.leaves.size());
+	    bool fresh =
+	        beta == 0 && (!dest || dest.getDefiningOp<tensor::EmptyOp>());
+	    bool update = beta != 0 && dest && symmetricAcc(dest);
+	    if (top && c.symmetric && !inBranch && l.kind == Leaf::Mat &&
+	        r.kind == Leaf::Mat && l.stored == Leaf::Full &&
+	        r.stored == Leaf::Full && !isVector(r.cols()) &&
+	        (fresh || update)) {
+		Type elt = elementType(l.v);
+		if (!dest)
+		    dest = empty(l, r, elt, loc);
+		auto t = [](bool x) {
+		    return x ? lk::Trans::trans : lk::Trans::none;
+		};
+		Value g =
+		    lk::GemmtrOp::create(
+		        b, loc, TypeRange{dest.getType()}, lk::Uplo::lower,
+		        t(l.trans), t(r.trans), constant(elt, alpha, loc), l.v,
+		        r.v, constant(elt, beta, loc), dest)
+		        ->getResult(0);
+		lowerOnly.insert(g);
+		return g;
+	    }
+	    return gemm(l, r, dest, alpha, beta, loc);
+	}
 	case Choice::Gram: {
 	    Leaf z = operand(c, s, j, loc);
 	    // the whole product into a new matrix, or added to a symmetric
@@ -1562,6 +1591,11 @@ class Selector
           ArrayRef<std::pair<Value, bool>> extraScales = {})
     {
 	Chain c;
+	{
+	    auto t = cast<RankedTensorType>(mul.getType());
+	    c.symmetric = bitEnumContainsAll(
+	        closure(propertiesOf(t), t.getShape()), Properties::symmetric);
+	}
 	dynScales.clear();
 	for (Value f : mul.getFactors())
 	    if (failed(leavesOf(f, mul, c.leaves, c.alpha)))

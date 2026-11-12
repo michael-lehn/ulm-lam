@@ -395,6 +395,31 @@ gemm(I m, I n, I k, T alpha, bool, const T *A, I incRowA, I incColA, bool,
 	             B, b.ld, A, a.ld, beta, C, c.ld);
 }
 
+// The lower (or upper) triangle of the n x n matrix C := beta C + alpha A B
+// (ulmBLAS::gemmtr; CBLAS's gemmt is not in every library): gemm on blocks
+// of columns, from the diagonal down (up), about half the flops of gemm.
+// The other triangle of the diagonal blocks is written too (it is not read
+// by ulm.lam's consumers of a triangle).
+template <typename I, typename T>
+void
+gemmtr(bool lower, I n, I k, T alpha, bool, const T *A, I incRowA, I incColA,
+       bool, const T *B, I incRowB, I incColB, T beta, T *C, I incRowC,
+       I incColC)
+{
+    const I nb = 128;
+    for (I j = 0; j < n; j += nb) {
+	I jb = std::min(nb, n - j);
+	if (lower) // C(j:n, j:j+jb)
+	    gemm(n - j, jb, k, alpha, false, A + j * incRowA, incRowA, incColA,
+	         false, B + j * incColB, incRowB, incColB, beta,
+	         C + j * incRowC + j * incColC, incRowC, incColC);
+	else // C(0:j+jb, j:j+jb)
+	    gemm(j + jb, jb, k, alpha, false, A, incRowA, incColA, false,
+	         B + j * incColB, incRowB, incColB, beta, C + j * incColC,
+	         incRowC, incColC);
+    }
+}
+
 // y := alpha A x + beta y
 template <typename I, typename T>
 void

@@ -3027,7 +3027,7 @@ SGD step & gemm, \code{ger} for the bias, gemm and gemv with $\alpha = -\mathrm{
 So in the mapping each has an advantage the other lacks: ulm.lam sees the
 Gram structure of the GP covariance (a third fewer FLOPs), Linnea makes
 $FPF\T$ symmetric through a Cholesky factorisation of $P$ (without a
-factorisation, \code{gemmtr} would bring ulm.lam to $3n^3$), and uses
+factorisation, ulm.lam's \code{gemmtr} brings it to $3n^3$), and uses
 \code{ger} for a rank-1 product.
 
 \emph{Memory for temporaries} is where the two differ most.
@@ -3089,8 +3089,11 @@ and arguments that are silently destroyed.
         A triangular factor of a product is a \code{trmm} (the other
         factor copied, then multiplied in place: half the flops of
         \code{gemm}).
-        Missing: \code{gemmtr} for symmetric products that are not
-        $Z\T Z$,
+        The last product of a symmetric chain that is not $Z\T Z$
+        ($FPF\T$ with $P$ symmetric) is a \code{gemmtr}: one triangle,
+        half the flops, passed on like a \code{syrk} result (the Kalman
+        filter of \cref{sec:kalmanfilter} is 17\,\% faster with it).
+        Missing:
         the catalogue backend, so that new kernels are added as records,
         and a fallback plan where a factorisation fails
         (\cref{sec:info}).
@@ -3113,8 +3116,9 @@ and arguments that are silently destroyed.
   \item \emph{Tests}: more \code{lit} tests, so that every rule of
         kernel selection has one (the examples and the frontends' tests
         check the whole pipeline numerically).
-  \item \emph{Kernels}: \code{gemmtr} for symmetric products that are
-        not $Z\T Z$, \code{ger} for rank-1 products, \code{trmm} for
+  \item \emph{Kernels}: \code{symm} for a symmetric first factor of a
+        chain ($FP$ with $P$ symmetric), \code{ger} for rank-1 products,
+        \code{trmm} for
         triangular factors that are computed (factors of a factorisation)
         and not only parameters.
   \item \emph{Reactant.jl and Enzyme-JAX}: their \code{enzymexla}

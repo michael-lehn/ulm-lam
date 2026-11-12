@@ -880,6 +880,7 @@ bytesOf(Operation *op)
 	return bytesOf(getOperation());                                        \
     }
 ULM_LAMK_COMMON(GemmOp)
+ULM_LAMK_COMMON(GemmtrOp)
 ULM_LAMK_COMMON(SymmOp)
 ULM_LAMK_COMMON(TrmmOp)
 ULM_LAMK_COMMON(TrsmOp)
@@ -923,6 +924,12 @@ mlir::ulm_lamk::TrsmOp::inferResultProperties(
 {
     // L^-1 B keeps the rank of B (operands: alpha, A, B)
     return has(ps.back(), P::full_rank) ? P::full_rank : P::general;
+}
+::mlir::ulm_lam::Properties
+mlir::ulm_lamk::GemmtrOp::inferResultProperties(
+    unsigned, ArrayRef<::mlir::ulm_lam::Properties>)
+{
+    return P::symmetric;
 }
 ::mlir::ulm_lam::Properties
 mlir::ulm_lamk::SyrkOp::inferResultProperties(
@@ -970,6 +977,34 @@ mlir::ulm_lamk::GemmOp::verify()
     return success();
 }
 
+LogicalResult
+mlir::ulm_lamk::GemmtrOp::verify()
+{
+    if (failed(verifyDps(getOperation())))
+	return failure();
+    auto [ar, ac] = shapeOf(getA());
+    auto [br, bc] = shapeOf(getB());
+    auto [cr, cc] = shapeOf(getC());
+    int64_t m = getTransA() == Trans::trans ? ac : ar;
+    int64_t k = getTransA() == Trans::trans ? ar : ac;
+    int64_t k2 = getTransB() == Trans::trans ? bc : br;
+    int64_t n = getTransB() == Trans::trans ? br : bc;
+    if (!dimsCompatible(k, k2) || !dimsCompatible(m, cr) ||
+        !dimsCompatible(n, cc) || !dimsCompatible(cr, cc))
+	return emitOpError("shapes of op(A), op(B) and the square C do not "
+	                   "match");
+    return success();
+}
+FailureOr<double>
+mlir::ulm_lamk::GemmtrOp::estimateFlops(const SizeAssignment &)
+{
+    auto [cr, cc] = shapeOf(getC());
+    auto [ar, ac] = shapeOf(getA());
+    int64_t k = getTransA() == Trans::trans ? ar : ac;
+    if (anyDynamic({cr, k}))
+	return failure();
+    return 1.0 * cr * cr * k;
+}
 FailureOr<double>
 mlir::ulm_lamk::GemmOp::estimateFlops(const SizeAssignment &)
 {
@@ -1191,9 +1226,9 @@ mlir::ulm_lam::registerBufferizationModels(DialectRegistry &registry)
 {
     registry.addExtension(+[](MLIRContext *ctx, ulm_lamk::UlmLamkDialect *) {
 	using namespace mlir::ulm_lamk;
-	attachAll<GemmOp, SymmOp, TrmmOp, TrsmOp, SyrkOp, GemvOp, SymvOp,
-	          SycompleteOp, TrsvOp, PotrfOp, GetrfOp, GetrsOp, GeaxpyOp,
-	          GescalOp, AdddiagOp, GecopyOp, CallOp>(ctx);
+	attachAll<GemmOp, GemmtrOp, SymmOp, TrmmOp, TrsmOp, SyrkOp, GemvOp,
+	          SymvOp, SycompleteOp, TrsvOp, PotrfOp, GetrfOp, GetrsOp,
+	          GeaxpyOp, GescalOp, AdddiagOp, GecopyOp, CallOp>(ctx);
     });
 }
 

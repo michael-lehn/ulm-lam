@@ -120,6 +120,27 @@ def UlmLamk_GemmOp : UlmLamk_Op<"gemm", "C",
   }];
 }
 
+def UlmLamk_GemmtrOp : UlmLamk_Op<"gemmtr", "C",
+    [ScalarOf<"alpha", "A">, ScalarOf<"beta", "C">]> {
+  let summary = "C := alpha * op(A) * op(B) + beta * C, one triangle of a symmetric C";
+  let description = [{
+    The product is known to be symmetric (e.g. F P F^T with P symmetric):
+    only the `uplo` triangle of C is computed (half the flops of gemm) and
+    read; consumers that need the full matrix get an explicit
+    symmetrisation inserted by kernel selection, as for syrk.
+  }];
+  let arguments = (ins UlmLamk_UploAttr:$uplo, UlmLamk_TransAttr:$trans_a,
+                       UlmLamk_TransAttr:$trans_b,
+                       UlmLamk_Float:$alpha, UlmLamk_Shaped:$A, UlmLamk_Shaped:$B,
+                       UlmLamk_Float:$beta, UlmLamk_Shaped:$C);
+  let assemblyFormat = [{
+    `uplo` `(` $uplo `)` `trans_a` `(` $trans_a `)` `trans_b` `(` $trans_b `)`
+    `alpha` `(` $alpha `)` `beta` `(` $beta `)`
+    `ins` `(` $A `,` $B `:` type($A) `,` type($B) `)`
+    `outs` `(` $C `:` type($C) `)` attr-dict (`->` type($result)^)?
+  }];
+}
+
 def UlmLamk_SymmOp : UlmLamk_Op<"symm", "C",
     [ScalarOf<"alpha", "A">, ScalarOf<"beta", "C">]> {
   let summary = "C := alpha A op(B) + beta C (left) or alpha op(B) A + beta C (right), A symmetric";

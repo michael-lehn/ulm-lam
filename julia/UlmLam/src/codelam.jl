@@ -273,6 +273,16 @@ function render_once(f::LamFunction, body, choice, flags, infos)
             rhs = accumulate_text(β, olds,
                                   coef(r, operands(line, "alpha")[1]), prod)
             emit!(r, d, op, "$c ← $rhs")
+        elseif op == "gemmtr"
+            a, bb = ins
+            ta, tb = T(attr(line, "trans_a")), T(attr(line, "trans_b"))
+            β = scal(r, operands(line, "beta")[1])
+            olds = β == "0" ? "" : name(r, out)
+            c, fc = result!(r, k, res, out)
+            push!(r.sym, c)
+            prod = fc ? disp(r, bb, !tb) * " " * disp(r, a, !ta) : disp(r, a, ta) * " " * disp(r, bb, tb)
+            rhs = accumulate_text(β, olds, coef(r, operands(line, "alpha")[1]), prod)
+            emit!(r, d, "gemmtr", "$c ← $rhs", "symmetric: one triangle only")
         elseif op == "syrk"
             a = ins[1]
             t = T(attr(line, "trans"))

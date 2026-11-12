@@ -589,6 +589,29 @@ ULM_LAMK_LOWERING(SyrkLowering, lk::SyrkOp)
                                                 : "ulmBLAS::syurk" kIndexType);
 }
 
+// C := beta C + alpha op(A) op(B), only the uplo triangle of C
+ULM_LAMK_LOWERING(GemmtrLowering, lk::GemmtrOp)
+{
+    View A = view(rw, o.getA(), o.getTransA() == lk::Trans::trans);
+    View B = view(rw, o.getB(), o.getTransB() == lk::Trans::trans);
+    View C = view(rw, o.getC());
+    return Args{rw}
+        .flag(o.getUplo() == lk::Uplo::lower)
+        .dim(C.rows)
+        .dim(A.cols)
+        .op(a.getAlpha())
+        .flag(false)
+        .op(a.getA())
+        .strides(A)
+        .flag(false)
+        .op(a.getB())
+        .strides(B)
+        .op(a.getBeta())
+        .op(a.getC())
+        .strides(C)
+        .call(o, "ulmBLAS::gemmtr" kIndexType);
+}
+
 // A := the whole symmetric matrix from its uplo triangle
 ULM_LAMK_LOWERING(SycompleteLowering, lk::SycompleteOp)
 {
@@ -1161,10 +1184,10 @@ struct ConvertUlmLamkToUlmBLAS
 	    .add<AllocLowering, DeallocLowering, CopyLowering, ViewLowering,
 	         CastLowering, LoadLowering, StoreLowering, IndexAndLowering,
 	         IndexMaxSILowering, GemmLowering, SymmLowering, SymvLowering,
-	         SycompleteLowering, SyrkLowering, GemvLowering, TrsmLowering,
-	         TrmmLowering, TrsvLowering, GeaxpyLowering, GescalLowering,
-	         AdddiagLowering, GecopyLowering, PotrfLowering, GetrfLowering,
-	         GetrsLowering, CallLowering>(tc, ctx);
+	         SycompleteLowering, SyrkLowering, GemmtrLowering, GemvLowering,
+	         TrsmLowering, TrmmLowering, TrsvLowering, GeaxpyLowering,
+	         GescalLowering, AdddiagLowering, GecopyLowering, PotrfLowering,
+	         GetrfLowering, GetrsLowering, CallLowering>(tc, ctx);
 	populateArithToEmitCPatterns(tc, patterns);
 	populateSCFToEmitCConversionPatterns(patterns, tc);
 	populateFuncToEmitCPatterns(tc, patterns, /*lowerToCpp=*/true);
