@@ -138,6 +138,15 @@ print(lib.gls.cpp)         # the generated C++
 | several results | a tuple | a tuple |
 | inspect | `@code_lam f(args...)` | `lib.f.cpp` |
 
+All vector-space operations on $\mathbb{R}^n$ and $\mathbb{R}^{m \times n}$
+work, also combined with products, transposes and solves: sums,
+differences, negation, constant and run-time scalars on either side,
+division by scalars, linear combinations; `julia/UlmLam/test/vectorspace.jl`
+checks 137 such expressions against Julia.  An inverse used as a value
+(`inv(A)` as a result, `inv(S) - I`) is formed by a factorisation and a
+solve with the identity; inside products it is never formed.  A scalar
+such as `x' * y` comes back as a vector of length 1.
+
 Properties: `symmetric`, `spd` (symmetric positive definite), `spsd`
 (symmetric positive semidefinite), `lower_tri`, `upper_tri`, `unit_diag`,
 `diagonal`, `full_rank`, `non_singular`, `orthogonal`, `permutation`,

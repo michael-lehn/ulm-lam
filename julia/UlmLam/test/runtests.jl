@@ -166,3 +166,5 @@ end
     @test !occursin("%", t)
     @test occursin("Cholesky factorisation of M", t)
 end
+
+include("vectorspace.jl")

@@ -118,6 +118,9 @@ factorisations instead of inverses, computed once and pulled out of
 loops, products parenthesised by cost, symmetric results computed as one
 triangle, no memory allocated inside nested calls, and errors reported as
 LAPACK's \code{info}.
+A training loop of a neural-network layer, written as formulas, runs as
+fast as PyTorch on the same BLAS, and $5\times$ faster than PyTorch's
+autograd for a small layer.
 The prediction of a Gaussian process, five lines of Python, runs
 $1.4\times$ faster than the same steps written by hand with SciPy and
 $8\times$ faster than the formula written in NumPy, and scales to
@@ -146,6 +149,36 @@ ulmBLAS~\cite{ulmblas}, or any CBLAS and LAPACK.
 % =====================================================================
 
 \paragraph{What you write.}
+A neural-network layer trained by gradient descent: a linear layer
+(PyTorch's \code{nn.Linear}, $Y \approx XW + \mathbf{1}b\T$), the forward
+pass, the gradient of the mean squared error and the update step written
+as formulas, the whole training loop one ulm.lam function:
+\begin{lstlisting}[style=py]
+from ulm import lam
+from ulm.lam import Float, Index, Matrix, Vector
+
+batch_x = lam.extern("batch_x", [Index], Matrix("B", "p"))   # Python callbacks
+batch_y = lam.extern("batch_y", [Index], Matrix("B", "k"))
+
+@lam.function
+def train(W0: Matrix("p", "k"), b0: Vector("k"), ones: Vector("B"),
+          step: Float, steps: Index):
+    with lam.loop(steps, carry=[W0, b0]) as L:
+        W, b = L.carried
+        X, Y = batch_x(L.index), batch_y(L.index)
+        R = X @ W + ones @ b.T - Y                      # forward, residual
+        L.next(W - step * (X.T @ R), b - step * (R.T @ ones))
+    return L.results
+\end{lstlisting}
+ulm.lam turns each step into four BLAS calls and allocates nothing in the
+loop: $XW - Y$ by one \code{gemm} into a copy of $Y$ ($\beta = -1$), the
+bias as a rank-1 \code{gemm}, the update $W - \mathrm{step}\,X\T R$ by one
+\code{gemm} with $\alpha = -\mathrm{step}$, $\beta = 1$ directly into $W$,
+and $b$ by one \code{gemv}.
+On the same BLAS it is as fast as PyTorch, and $5\times$ faster than
+PyTorch's autograd for a small layer (\cref{sec:torch}).
+
+\paragraph{A formula.}
 The prediction of a Gaussian process (GP), the textbook formula
 \[
   \mu = K_*\T (K + \sigma^2 I)\inv y, \qquad
@@ -2407,8 +2440,25 @@ The Pluto notebook \file{notebook/ulm-lam.jl} demonstrates all of this
 (GLS, GP regression against AbstractGPs.jl, the Kalman filter, linear
 attention).
 
+\paragraph{Vector spaces.}
+\file{julia/UlmLam/test/vectorspace.jl} checks 137 expressions on
+$\mathbb{R}^n$ and $\mathbb{R}^{m\times n}$ against Julia: sums,
+differences, negation, constant and run-time scalars on either side,
+division by scalars and linear combinations, combined with products,
+transposes, solves and inverses.
+Making all of them work needed four additions to kernel selection: a
+constant scale of a value used outside the algebra (a result, \code{x *
+2} after a solve) is a \code{gescal}; a transposed term of a sum is copied
+transposed before the \code{geaxpy}s; an inverse used as a value (a
+result, a term of a sum, also scaled) is formed as $A^{-1} = A^{-1} E$
+with $E$ the identity built by \code{gescal} with 0 and \code{adddiag},
+that is, by the factorisation and a solve that any $A^{-1}B$ gets (in
+products it is still never formed); and \code{gescal} with $\alpha = 0$
+sets the matrix to zero, as BLAS's \code{scal} does (also NaN).
+The frontend divides by run-time scalars ($x / a$, $a \backslash x$).
+
 \paragraph{Results.}
-\file{julia/UlmLam/test/runtests.jl} (75 tests) runs GLS with fixed and
+\file{julia/UlmLam/test/runtests.jl} (75 tests, and the 137 above) runs GLS with fixed and
 run-time sizes, solves from the left and from the right (Cholesky and
 LU), a chain chosen at run time, two results, a loop with callbacks, a
 loop-carried matrix, GP with \code{s2 * I} and a wrong assumption

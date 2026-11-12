@@ -89,6 +89,7 @@ mutable struct Renderer
     choice::Dict{Int,Int}
     ifname::Dict{Int,String}   # an scf.if -> the name of its result
     sym::Set{String}           # names of symmetric temporaries (no ᵀ shown)
+    inits::Set{String}         # initial values of loops
 end
 
 fresh!(r::Renderer, c) = (r.counter[c] = get(r.counter, c, 0) + 1; "$c$(r.counter[c])")
@@ -129,12 +130,16 @@ end
 # β C + α P as text: C + P, C − P, b C + a P
 function accumulate_text(β, c, αc, prod)
     β == "0" && return αc * prod
+    β == "-1" && !startswith(αc, "-") && return αc * prod * " − " * c
     c = (β == "1" ? "" : β * " ") * c
     startswith(αc, "-") ? c * " − " * αc[2:end] * prod : c * " + " * αc * prod
 end
 
 function render_once(f::LamFunction, body, choice, flags, infos)
-    r = Renderer(Dict(), Dict(), Dict(), String[], Set(), flags, choice, Dict(), Set())
+    r = Renderer(Dict(), Dict(), Dict(), String[], Set(), flags, choice, Dict(), Set(), Set())
+    for line in body, m in eachmatch(r"%\w+ = (%[\w#]+)", something(match(r"iter_args\((.*)\) ->", line), (captures=[""],)).captures[1])
+        push!(r.inits, m.captures[1])
+    end
     head = body[1]
     args = [m.captures[1] for m in eachmatch(r"(%arg\d+):", head)]
     # a Julia matrix is its transpose in the IR; a symmetric one is itself
@@ -163,8 +168,11 @@ function render_once(f::LamFunction, body, choice, flags, infos)
         if (m = match(r"^(%[\w#]+) = arith\.(\w+) (%[\w#]+), (%[\w#]+)", line)) !== nothing
             op = Dict("divf" => "/", "mulf" => "*", "addf" => "+", "subf" => "-")
             if haskey(op, m.captures[2])
-                r.consts[m.captures[1]] = "(" * scal(r, m.captures[3]) * " " * op[m.captures[2]] *
-                                          " " * scal(r, m.captures[4]) * ")"
+                x, y = scal(r, m.captures[3]), scal(r, m.captures[4])
+                r.consts[m.captures[1]] =
+                    m.captures[2] == "mulf" && y == "-1" ? "-" * x :
+                    m.captures[2] == "mulf" && x == "-1" ? "-" * y :
+                    "(" * x * " " * op[m.captures[2]] * " " * y * ")"
             end
             continue
         end
@@ -176,7 +184,9 @@ function render_once(f::LamFunction, body, choice, flags, infos)
                     a, init = strip.(split(pair, " = "))
                     n0, f0 = val(r, init)
                     # the state carried by the loop: x for the parameter x0
-                    n = init in r.params && endswith(n0, "0") && length(n0) > 1 ? n0[1:end-1] : fresh!(r, "T")
+                    # (a copy of it, or the initial value's own buffer)
+                    n = init in r.params && endswith(n0, "0") && length(n0) > 1 ? n0[1:end-1] :
+                        init in r.params ? fresh!(r, "T") : n0
                     init in r.params && emit!(r, d, "copy", "$n ← $n0", "the loop's state, in place")
                     r.vals[a] = (n, f0)
                     r.vals["$res#$(j-1)"] = (n, f0)
@@ -212,7 +222,8 @@ function render_once(f::LamFunction, body, choice, flags, infos)
             args_ = filter(a -> !(a in sizes), args_)
             if m.captures[1] !== nothing
                 v = fresh!(r, "z")
-                r.vals[m.captures[1]] = (v, false)
+                # a matrix from Julia is its transpose in the IR
+                r.vals[m.captures[1]] = (v, !occursin(r"-> tensor<[^>]*x1xf64>\s*$", line))
                 emit!(r, d, "call", "$v ← $(m.captures[2])($(join(args_, ", ")))", "your Julia function")
             else
                 emit!(r, d, "call", "$(m.captures[2])($(join(args_, ", ")))", "your Julia function")
@@ -222,7 +233,8 @@ function render_once(f::LamFunction, body, choice, flags, infos)
         if (m = match(r"^(%[\w#]+) = bufferization\.materialize_in_destination (%[\w#]+) in (?:writable )?(%[\w#]+)", line)) !== nothing
             src, dst = m.captures[2], m.captures[3]
             r.vals[m.captures[1]] = val(r, dst)
-            emit!(r, d, "copy", "$(name(r, dst)) ← $(disp(r, src, flag(r, dst)))")
+            s_ = disp(r, src, flag(r, dst))
+            s_ == name(r, dst) || emit!(r, d, "copy", "$(name(r, dst)) ← $s_")
             continue
         end
         if startswith(line, "return")
@@ -295,7 +307,15 @@ function render_once(f::LamFunction, body, choice, flags, infos)
         elseif op == "gecopy"
             src = ins[1]
             b, fb = result!(r, k, res, out)
-            emit!(r, d, "copy", "$b ← $(disp(r, src, T(attr(line, "trans")) ⊻ fb))")
+            # the initial value of a loop copied from the parameter W0: W
+            if res in r.inits && src in r.params && endswith(name(r, src), "0")
+                b = name(r, src)[1:end-1]
+                r.vals[res] = (b, fb)
+                emit!(r, d, "copy", "$b ← $(disp(r, src, T(attr(line, "trans")) ⊻ fb))",
+                      "the loop's state, in place")
+            else
+                emit!(r, d, "copy", "$b ← $(disp(r, src, T(attr(line, "trans")) ⊻ fb))")
+            end
         elseif op == "adddiag"
             old = name(r, out)
             a, _ = result!(r, k, res, out)
@@ -336,7 +356,7 @@ order they appear."""
 function renumber(text)
     seen = Dict{String,String}()
     count = Dict{String,Int}()
-    replace(text, r"\b(LU|T|L|z)(\d+)\b" => function (m)
+    replace(text, r"\b(LU|T|L|z)(\d+)(?![0-9A-Za-z_])" => function (m)
         get!(seen, m) do
             p = match(r"^[A-Za-z]+", m).match
             count[p] = get(count, p, 0) + 1

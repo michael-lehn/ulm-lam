@@ -234,8 +234,11 @@ Base.:*(alpha::Real, a::LamValue) =
 Base.:*(a::LamValue, alpha::Real) = alpha * a
 
 # scalar arithmetic of Float values (1 / beta, alpha / beta, ...)
-Base.:/(a::LamValue, b::LamValue) =
-    a.type isa FloatType && b.type isa FloatType ? scalar_op("divf", a, b) : a * inv(b)
+function Base.:/(a::LamValue, b::LamValue)
+    a.type isa FloatType && b.type isa FloatType && return scalar_op("divf", a, b)
+    b.type isa FloatType && return scalar_op("divf", 1.0, b) * a  # X / s
+    a * inv(b)
+end
 Base.:/(a::Real, b::LamValue) = scalar_op("divf", a, b)
 Base.:/(a::LamValue, b::Real) =
     a.type isa FloatType ? scalar_op("divf", a, b) : (1.0 / b) * a
@@ -257,7 +260,10 @@ function scalar_op(op, x, y)
     emit!(b, "$(v.name) = arith.$op $(use(vals[1])), $(use(vals[2])) : f64")
     v
 end
-Base.:\(a::LamValue, b::LamValue) = inv(a) * b
+Base.:\(a::LamValue, b::LamValue) =
+    a.type isa FloatType ? (b.type isa FloatType ? scalar_op("divf", b, a) :
+                            scalar_op("divf", 1.0, a) * b) : inv(a) * b
+Base.:\(a::Real, b::LamValue) = b / a
 
 
 function Base.:+(a::LamValue, b::LamValue)
@@ -471,8 +477,10 @@ function declaration(e::Extern)
     params = join(vcat(fill("index", length(sizes)), [mlir(p) for p in e.params]), ", ")
     res = ""
     if e.result !== nothing
-        d = dims_attr(e.result, pos)
-        res = " -> (" * mlir(e.result) * (isempty(d) ? "" : " {$d}") * ")"
+        # a matrix result is written by Julia column-major: the transposed type
+        rt = e.result.isvec ? e.result : abitype(e.result)
+        d = dims_attr(rt, pos)
+        res = " -> (" * mlir(rt) * (isempty(d) ? "" : " {$d}") * ")"
     end
     "func.func private @$(e.name)($params)$res"
 end
@@ -502,10 +510,11 @@ function (e::Extern)(args...)
         emit!(b, "func.call @$(e.name)($names) : ($ptypes) -> ()")
         return nothing
     end
-    v = LamValue(fresh!(b), e.result, region(b).id)
-    emit!(b, "$(v.name) = func.call @$(e.name)($names) : ($ptypes) -> " *
-             mlir(e.result))
-    v
+    rt = e.result.isvec ? e.result : abitype(e.result)
+    v = LamValue(fresh!(b), rt, region(b).id)
+    emit!(b, "$(v.name) = func.call @$(e.name)($names) : ($ptypes) -> " * mlir(rt))
+    # Julia's column-major matrix is the transpose of the row-major IR value
+    e.result.isvec ? v : transpose(v)
 end
 
 # ---------------------------------------------------------------------------

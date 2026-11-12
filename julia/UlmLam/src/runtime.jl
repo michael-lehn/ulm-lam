@@ -461,7 +461,12 @@ function bind!(lib::Library; impls...)
                 end
                 r = fn(args...)
                 if ext.result !== nothing
-                    dst = view_of(rest[np+1], ext.result, env)
+                    # a matrix result is written column-major (its IR type is
+                    # the transpose): contiguous, no transposing copy
+                    rt = ext.result
+                    dst = rt.isvec ? view_of(rest[np+1], rt, env) :
+                          unsafe_wrap(Array, Ptr{Float64}(rest[np+1]),
+                                      (resolve_dim(rt.rows, env), resolve_dim(rt.cols, env)))
                     size(dst) == size(r) ||
                         throw(LamError("$name returned $(size(r)) instead of $(size(dst))"))
                     dst .= r

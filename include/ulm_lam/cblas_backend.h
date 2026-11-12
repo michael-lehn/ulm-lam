@@ -576,9 +576,11 @@ template <typename I, typename T>
 void
 gescal(I m, I n, T alpha, T *X, I incRowX, I incColX)
 {
+    // as BLAS's scal: alpha = 0 sets X to zero (also NaN and Inf)
     for (I i = 0; i < m; ++i)
 	for (I j = 0; j < n; ++j)
-	    X[i * incRowX + j * incColX] *= alpha;
+	    X[i * incRowX + j * incColX] =
+	        alpha == T(0) ? T(0) : X[i * incRowX + j * incColX] * alpha;
 }
 
 // A = L L^T (lower) or U^T U, in place; returns LAPACK's info

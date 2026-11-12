@@ -56,8 +56,8 @@
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 #include <limits>
-#include <optional>
 #include <map>
+#include <optional>
 
 using namespace mlir;
 using namespace mlir::ulm_lam;
@@ -323,6 +323,7 @@ class Selector
     LogicalResult
     run()
     {
+	formInverses();
 	SmallVector<Operation *> ops;
 	func.walk([&](Operation *op) {
 	    if (isa<MulOp, AddOp>(op) || dynamicScale(op))
@@ -342,7 +343,8 @@ class Selector
 	    b.setInsertionPoint(op);
 	    if (auto sc = dyn_cast<ScaleOp>(op)) {
 		// (gescal scales both triangles: one stored triangle stays so)
-		replace(op, scaleBy(sc.getAlpha(), sc.getOperand(), op->getLoc()));
+		replace(op,
+		        scaleBy(sc.getAlpha(), sc.getOperand(), op->getLoc()));
 		continue;
 	    }
 	    FailureOr<Value> r = isa<AddOp>(op)
@@ -366,7 +368,8 @@ class Selector
 		b.setInsertionPoint(yield);
 		Value r = into(v, arg, yield.getLoc());
 		if (r.getType() != v.getType())
-		    r = AssumeOp::create(b, yield.getLoc(), v.getType(), r, false);
+		    r = AssumeOp::create(b, yield.getLoc(), v.getType(), r,
+		                         false);
 		o.set(r);
 	    }
 	});
@@ -446,9 +449,10 @@ class Selector
 	    // a symmetric matrix is its own transpose: P H^T is the transpose
 	    // of a computed H P
 	    auto ty = cast<RankedTensorType>(l.v.getType());
-	    bool sym = l.kind == Leaf::Mat &&
-	               bitEnumContainsAll(closure(propertiesOf(ty), ty.getShape()),
-	                                  Properties::symmetric);
+	    bool sym =
+	        l.kind == Leaf::Mat &&
+	        bitEnumContainsAll(closure(propertiesOf(ty), ty.getShape()),
+		                   Properties::symmetric);
 	    k.push_back(sym ? false : l.trans != transposed);
 	    k.push_back(l.lower);
 	}
@@ -457,7 +461,8 @@ class Selector
 
     /// A term s (A B) of a sum with s known at run time (possibly with
     /// constant scales): the product with alpha and its run-time scalars.
-    std::optional<std::tuple<MulOp, double, SmallVector<std::pair<Value, bool>>>>
+    std::optional<
+        std::tuple<MulOp, double, SmallVector<std::pair<Value, bool>>>>
     scaledProductParts(Value t)
     {
 	double alpha = 1;
@@ -490,6 +495,70 @@ class Selector
 	return P{m, a, sc};
     }
 
+    /// v (or an assume of it, or its transpose) is used outside the
+    /// algebra: returned, yielded by a loop, passed to a call.
+    static bool
+    usedAsValue(Value v, bool throughTranspose, bool sumIsValue = false)
+    {
+	for (Operation *u : v.getUsers()) {
+	    if (isa<AssumeOp>(u) || (throughTranspose && isa<TransposeOp>(u)) ||
+	        (sumIsValue && isa<ScaleOp>(u))) {
+		if (usedAsValue(u->getResult(0), throughTranspose, sumIsValue))
+		    return true;
+		continue;
+	    }
+	    if (!isUlmLamOp(u) || (sumIsValue && isa<AddOp>(u)))
+		return true;
+	}
+	return false;
+    }
+
+    /// An inverse used as a value (a result, a term of a sum, a loop's
+    /// value), not as a factor of a product: inv(A) = inv(A) * E with E
+    /// the identity, formed (gescal 0, adddiag 1), so that it is a solve
+    /// with the identity (Cholesky, LU or triangular, as for any solve).
+    void
+    formInverses()
+    {
+	SmallVector<Value> targets;
+	func.walk([&](InverseOp inv) {
+	    // as a value, or a term of a sum (also scaled): formed
+	    if (usedAsValue(inv.getResult(), false, true))
+		targets.push_back(inv.getResult());
+	    for (Operation *u : inv->getUsers())
+		if (auto t = dyn_cast<TransposeOp>(u))
+		    if (usedAsValue(t.getResult(), false, true))
+			targets.push_back(t.getResult());
+	});
+	for (Value v : targets) {
+	    // (inv(A))^T = (A^T)^-1: a transposed solve operand, as in products
+	    SmallVector<OpOperand *> uses;
+	    for (OpOperand &u : v.getUses())
+		if (!isa<MulOp, InverseOp, TransposeOp>(u.getOwner()))
+		    uses.push_back(&u);
+	    b.setInsertionPointAfter(v.getDefiningOp());
+	    Location loc = v.getLoc();
+	    Value a = v.getDefiningOp()->getOperand(0);
+	    if (auto inv = a.getDefiningOp<InverseOp>())
+		a = inv.getOperand();
+	    Leaf l;
+	    l.v = a;
+	    Type elt = elementType(l.v);
+	    Value e = empty(l, l, elt, loc);
+	    e = lk::GescalOp::create(b, loc, TypeRange{e.getType()},
+	                             constant(elt, 0.0, loc), e)
+	            ->getResult(0);
+	    e = lk::AdddiagOp::create(b, loc, TypeRange{e.getType()},
+	                              constant(elt, 1.0, loc), e)
+	            ->getResult(0);
+	    Value m =
+	        MulOp::create(b, loc, TypeRange{v.getType()}, ValueRange{v, e})
+	            .getResult();
+	    for (OpOperand *u : uses)
+		u->set(m);
+	}
+    }
+
     /// s * X with s known only at run time, used as a value (in a sum, a
     /// result, a loop): selected as gescal(s, X).  Inside products the
     /// scale is collected by leavesOf; s * I in a sum is adddiag.
@@ -497,8 +566,13 @@ class Selector
     dynamicScale(Operation *op)
     {
 	auto sc = dyn_cast<ScaleOp>(op);
-	if (!sc || matchPattern(sc.getAlpha(), m_Constant()))
+	if (!sc)
 	    return false;
+	// a constant scale is collected by the product or the sum it is in; one
+	// of a value used outside the algebra (a result, a loop's value, an
+	// argument of a call), e.g. A^-1 b * 2, is selected as gescal as well
+	if (matchPattern(sc.getAlpha(), m_Constant()))
+	    return usedAsValue(sc.getResult(), /*throughTranspose=*/false);
 	Value v = sc.getOperand();
 	while (true) {
 	    if (auto s2 = v.getDefiningOp<ScaleOp>())
@@ -992,8 +1066,7 @@ class Selector
 			double f = L[i].kind == Leaf::LUSolve ? 2 : 1;
 			double copy =
 			    transposedOperand(c, s + 1, j) ? m * n : 0;
-			consider(i, j,
-			         c.cost[s + 1][j] + f * m * m * n + copy,
+			consider(i, j, c.cost[s + 1][j] + f * m * m * n + copy,
 			         {Choice::SolveLeft, s});
 		    }
 		    // a triangular solve applied from the right to the left
@@ -1002,8 +1075,8 @@ class Selector
 		    if (s + 1 == j && L[j].isSolve() && solveOperand(c, i, s))
 			consider(i, j,
 			         c.cost[i][s] +
-			             (L[j].kind == Leaf::LUSolve ? 2 : 1) * m * n *
-			                 n +
+			             (L[j].kind == Leaf::LUSolve ? 2 : 1) * m *
+			                 n * n +
 			             (transposedOperand(c, i, s) ? m * n : 0),
 			         {Choice::SolveRight, s});
 		}
@@ -1087,12 +1160,11 @@ class Selector
 	               t.trans ? lk::Trans::trans : lk::Trans::none, t.v, t.piv,
 	               x)
 	        ->getResult(0);
-	return lk::TrsmOp::create(b, loc, TypeRange{x.getType()},
-	                          lk::Side::right,
-	                          t.lower ? lk::Uplo::lower : lk::Uplo::upper,
-	                          t.trans ? lk::Trans::trans : lk::Trans::none,
-	                          lk::Diag::non_unit,
-	                          constant(elementType(x), 1, loc), t.v, x)
+	return lk::TrsmOp::create(
+	           b, loc, TypeRange{x.getType()}, lk::Side::right,
+	           t.lower ? lk::Uplo::lower : lk::Uplo::upper,
+	           t.trans ? lk::Trans::trans : lk::Trans::none,
+	           lk::Diag::non_unit, constant(elementType(x), 1, loc), t.v, x)
 	    ->getResult(0);
     }
 
@@ -1110,8 +1182,7 @@ class Selector
 	    if (alpha == 1)
 		return x;
 	    return lk::GescalOp::create(b, loc, TypeRange{x.getType()},
-	                                constant(elementType(x), alpha, loc),
-	                                x)
+	                                constant(elementType(x), alpha, loc), x)
 	        ->getResult(0);
 	};
 	// interval [a, z] in dest: computed into it, or copied
@@ -1197,24 +1268,23 @@ class Selector
 	        a.stored == Leaf::Lower ? lk::Uplo::lower : lk::Uplo::upper;
 	    if (left && isVector(g.cols()) && !g.trans)
 		return lk::SymvOp::create(b, loc, TypeRange{dest.getType()},
-		                          uplo, alphaOf(), a.v,
-		                          g.v, constant(elt, beta, loc), dest)
+		                          uplo, alphaOf(), a.v, g.v,
+		                          constant(elt, beta, loc), dest)
 		    ->getResult(0);
 	    return lk::SymmOp::create(b, loc, TypeRange{dest.getType()},
 	                              left ? lk::Side::left : lk::Side::right,
-	                              uplo, t(g.trans),
-	                              alphaOf(), a.v, g.v,
+	                              uplo, t(g.trans), alphaOf(), a.v, g.v,
 	                              constant(elt, beta, loc), dest)
 	        ->getResult(0);
 	}
 	if (isVector(r.cols()) && !r.trans)
 	    return lk::GemvOp::create(b, loc, TypeRange{dest.getType()},
-	                              t(l.trans), alphaOf(),
-	                              l.v, r.v, constant(elt, beta, loc), dest)
+	                              t(l.trans), alphaOf(), l.v, r.v,
+	                              constant(elt, beta, loc), dest)
 	        ->getResult(0);
 	return lk::GemmOp::create(b, loc, TypeRange{dest.getType()}, t(l.trans),
-	                          t(r.trans), alphaOf(), l.v,
-	                          r.v, constant(elt, beta, loc), dest)
+	                          t(r.trans), alphaOf(), l.v, r.v,
+	                          constant(elt, beta, loc), dest)
 	    ->getResult(0);
     }
 
@@ -1261,10 +1331,11 @@ class Selector
 	    // one triangle (half the flops of gemm); the result is passed on
 	    // as stored in its lower triangle (lower_stored, see replace)
 	    bool top = i == 0 && j + 1 == static_cast<int>(c.leaves.size());
-	    bool fresh = beta == 0 &&
-	                 (!dest || dest.getDefiningOp<tensor::EmptyOp>());
+	    bool fresh =
+	        beta == 0 && (!dest || dest.getDefiningOp<tensor::EmptyOp>());
 	    bool update = beta != 0 && dest && symmetricAcc(dest);
-	    if (top && !inBranch && z.stored == Leaf::Full && (fresh || update)) {
+	    if (top && !inBranch && z.stored == Leaf::Full &&
+	        (fresh || update)) {
 		Type elt = elementType(z.v);
 		if (!dest) {
 		    Leaf zt = z;
@@ -1436,13 +1507,15 @@ class Selector
 		Location loc = mul.getLoc();
 		if (!dest)
 		    b.setInsertionPoint(mul);
-		Leaf l = operand(c, 0, s, loc), r = operand(c, s + 1, k - 1, loc);
+		Leaf l = operand(c, 0, s, loc),
+		     r = operand(c, s + 1, k - 1, loc);
 		Value sv = scalarOf(scales, loc);
 		Type elt = elementType(l.v);
 		Value av = arith::MulFOp::create(
 		    b, loc, constant(elt, alpha * c.alpha, loc), sv);
 		Value d = dest ? dest : *newDest(mul);
-		return gemm(l, r, d, alpha * c.alpha, dest ? beta : 0.0, loc, av);
+		return gemm(l, r, d, alpha * c.alpha, dest ? beta : 0.0, loc,
+		            av);
 	    }
 	    // otherwise: the product without s, then scaled, then added
 	    // (the product is emitted at its own position; scale and sum at
@@ -1475,8 +1548,8 @@ class Selector
 	if (plans.size() > 1)
 	    return choosePlan(c, plans, mul, dest, alpha, beta);
 	if (!dest && !inBranch)
-	    if (std::optional<Value> r = hoistOperator(c, plans.front(), mul,
-	                                               alpha, beta))
+	    if (std::optional<Value> r =
+	            hoistOperator(c, plans.front(), mul, alpha, beta))
 		return *r;
 	c.choice = plans.front();
 	Choice top = c.choice[0][k - 1];
@@ -1655,8 +1728,8 @@ class Selector
 	};
 	Value span = arith::SubIOp::create(b, loc, loop.getUpperBound(),
 	                                   loop.getLowerBound());
-	Value q =
-	    arith::CeilDivSIOp::create(b, loc, span, loop.getStep()).getResult();
+	Value q = arith::CeilDivSIOp::create(b, loc, span, loop.getStep())
+	              .getResult();
 	// lb < ub ? q : 0 (a max with 0 would become arith.maxsi, which has no
 	// EmitC lowering)
 	Value trips = arith::SelectOp::create(
@@ -1671,15 +1744,14 @@ class Selector
 	// Apple M5 as on Zen 4.  So a flop of the step counts kLevel2 times.
 	int64_t w = isVector(last.cols()) ? kLevel2 : 1;
 	Value apply = mulI(
-	    cst(2 * w),
-	    mulI(mulI(dimIndex(pre.leaves[0].rowsDim(), loc),
-	              dimIndex(pre.leaves[kp - 1].colsDim(), loc)),
-	         dimIndex(last.colsDim(), loc)));
+	    cst(2 * w), mulI(mulI(dimIndex(pre.leaves[0].rowsDim(), loc),
+	                          dimIndex(pre.leaves[kp - 1].colsDim(), loc)),
+	                     dimIndex(last.colsDim(), loc)));
 	c.choice = plan;
 	Value costStep = mulI(cst(w), costValue(c, 0, k - 1, loc));
-	Value cond = arith::CmpIOp::create(
-	    b, loc, arith::CmpIPredicate::ult,
-	    addI(costP, mulI(trips, apply)), mulI(trips, costStep));
+	Value cond = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::ult,
+	                                   addI(costP, mulI(trips, apply)),
+	                                   mulI(trips, costStep));
 
 	// before the loop: P, if the condition holds
 	Type elt = elementType(last.v);
@@ -1709,8 +1781,8 @@ class Selector
 	auto fit = [&](Value r) {
 	    return r.getType() == resultTy
 	               ? r
-	               : AssumeOp::create(b, loc, resultTy, r, false)
-	                     .getResult();
+		       : AssumeOp::create(b, loc, resultTy, r, false)
+		             .getResult();
 	};
 	// both variants computed into the same destination d (one buffer,
 	// hoisted out of the loop by bufferization)
@@ -1778,11 +1850,15 @@ class Selector
 		plain.push_back({inner, alpha});
 	}
 	for (auto &[v, alpha] : plain) {
-	    if (v.getDefiningOp<TransposeOp>() || v.getDefiningOp<InverseOp>())
-		return add.emitError(
-		           "ulm-lam-select-kernels: transposed or inverted "
-		           "term of a sum (not supported yet)"),
-		       failure();
+	    // a transposed term is copied transposed (O(mn)); an inverse in a
+	    // sum was formed before (formInverses)
+	    if (auto t = v.getDefiningOp<TransposeOp>()) {
+		Leaf l;
+		l.v = full(t.getOperand());
+		l.trans = true;
+		v = untransposed(l, add.getLoc()).v;
+		continue;
+	    }
 	    v = full(v); // geaxpy / gescal read the whole matrix
 	}
 	Location loc = add.getLoc();
@@ -1831,8 +1907,9 @@ class Selector
 	    if (!a)
 		a = constant(elt, 1.0, loc);
 	    bool lower = lowerOnly.contains(acc);
-	    acc = lk::AdddiagOp::create(b, loc, TypeRange{acc.getType()}, a, acc)
-	              ->getResult(0);
+	    acc =
+	        lk::AdddiagOp::create(b, loc, TypeRange{acc.getType()}, a, acc)
+	            ->getResult(0);
 	    if (lower) // the diagonal belongs to the stored triangle too
 		lowerOnly.insert(acc);
 	}
@@ -1883,10 +1960,10 @@ class Selector
 	        }))
 		continue;
 	    auto t = cast<RankedTensorType>(as.getType());
-	    as.getResult().setType(withProperties(
-	        t, propertiesOf(t) | Properties::symmetric |
-	               (st == 1 ? Properties::lower_stored
-	                        : Properties::upper_stored)));
+	    as.getResult().setType(
+	        withProperties(t, propertiesOf(t) | Properties::symmetric |
+		                      (st == 1 ? Properties::lower_stored
+		                               : Properties::upper_stored)));
 	    keepStorage(as.getResult());
 	}
     }

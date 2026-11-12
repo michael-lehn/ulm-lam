@@ -45,7 +45,173 @@ begin
 end
 ''')
 md(r'''
-## Write the formula
+## A Kalman filter, as in the textbook
+
+`@lam` defines a ulm.lam function.  The types of the parameters carry their
+sizes (`:n` and `:m` are known only at run time) and what you know about them
+(`:spsd`, `:spd`: symmetric positive (semi)definite).  `loop` carries the state
+``x, P`` from step to step; `extern` declares Julia functions the loop calls:
+here they deliver the measurements and receive the estimates.
+''')
+code(r'''
+begin
+    measure = extern(:measure, [Index], Vec(:m))
+    estimate = extern(:estimate, [Index, Vec(:n)])
+    @lam function kalman(F::Mat(:n, :n), Q::Mat(:n, :n, :spsd), H::Mat(:m, :n),
+                         R::Mat(:m, :m, :spd), x0::Vec(:n), P0::Mat(:n, :n, :spd),
+                         steps::Index)
+        loop(steps, x0, P0) do i, x, P
+            P = assume(P, :symmetric)        # a covariance stays symmetric
+            x = F * x                                       # predict
+            P = F * P * F' + Q
+            S = assume(H * P * H' + R, :spd)                # update
+            K = P * H' * inv(S)
+            x = x + K * (measure(i) - H * x)
+            P = P - K * H * P
+            estimate(i, x)
+            (x, P)
+        end
+    end
+end
+''')
+code(r'''
+@code_lam kalman(F, Q, H, R, x0, P0, steps)
+''')
+md(r'''
+``S^{-1}`` is never formed: ``K = P H^T S^{-1}`` is two triangular solves
+with the Cholesky factor of ``S``.  ``H P`` is computed once and reused
+(``P`` is symmetric, so ``P H^T = (H P)^T``), and ``K H P`` is evaluated as
+``K (H P)``, which costs ``n^2 m`` instead of ``n^3`` for ``(K H) P``.
+``x`` and ``P`` stay in place: no allocation inside the loop.
+
+The model: a field on a periodic grid, transported and diffused, observed by
+``m`` sensors.  Compared with the same formulas in plain Julia:
+''')
+code(r'''
+function model(n, m, steps)
+    c, ν = 0.4, 0.2
+    F = zeros(n, n)
+    for i in 1:n
+        F[i, i] = 1 - 2ν
+        F[i, mod1(i + 1, n)] = ν - c / 2
+        F[i, mod1(i - 1, n)] = ν + c / 2
+    end
+    d = [min(abs(i - j), n - abs(i - j)) for i in 1:n, j in 1:n]
+    Q = 0.01 .* exp.(-d ./ 10)
+    H = zeros(m, n)
+    for (k, s) in enumerate(sort(randperm(n)[1:m]))
+        H[k, s] = 1
+    end
+    R = 0.05 * Matrix(I, m, m)
+    Lq = cholesky(Symmetric(Q + 1e-12I)).L
+    truth = [sin(2π * i / n) + 0.5 * sin(6π * i / n) for i in 0:n-1]
+    zs = map(1:steps) do _
+        truth = F * truth + Lq * randn(n)
+        H * truth + sqrt(0.05) * randn(m)
+    end
+    F, Q, H, R, zeros(n), Matrix(1.0I, n, n), zs, truth
+end
+''')
+code(r'''
+begin
+    steps = 20
+    F, Q, H, R, x0, P0, zs, truth = model(1000, 100, steps)
+    estimates = zeros(1000, steps)
+    bind!(kalman; measure = i -> zs[i+1], estimate = (i, x) -> (estimates[:, i+1] .= x))
+end;
+''')
+code(r'''
+function kalman_literal(F, Q, H, R, x, P, zs)
+    for z in zs
+        x = F * x
+        P = F * P * F' + Q
+        S = H * P * H' + R
+        K = P * H' * inv(S)
+        x = x + K * (z - H * x)
+        P = P - K * H * P
+    end
+    x, P
+end
+''')
+code(r'''
+compare("ulm.lam" => () -> kalman(F, Q, H, R, x0, P0, steps),
+        "Julia, the formula as written" =>
+            () -> kalman_literal(F, Q, H, R, x0, P0, zs))
+''')
+code(r'''
+let (x, P) = kalman(F, Q, H, R, x0, P0, steps),
+    (x2, P2) = kalman_literal(F, Q, H, R, x0, P0, zs)
+    (norm(x - x2) / norm(x2), norm(P - P2) / norm(P2))
+end
+''')
+md(r'''
+## Training a linear layer: what PyTorch does, as formulas
+
+A linear layer ``Y \approx X W + \mathbf{1} b^T`` (PyTorch's `nn.Linear`)
+trained by mini-batch gradient descent on the mean squared error.  The forward
+pass, the gradients and the update step are written as formulas; the batches
+come from Julia functions:
+''')
+code(r'''
+begin
+    batch_x = extern(:batch_x, [Index], Mat(:B, :p))
+    batch_y = extern(:batch_y, [Index], Mat(:B, :k))
+    @lam function train(W0::Mat(:p, :k), b0::Vec(:k), ones::Vec(:B), step::Float,
+                        steps::Index)
+        loop(steps, W0, b0) do i, W, b
+            X, Y = batch_x(i), batch_y(i)
+            R = X * W + ones * b' - Y                       # forward pass, residual
+            (W - step * (X' * R), b - step * (R' * ones))   # gradient step
+        end
+    end
+end
+''')
+code(r'''
+@code_lam train(W0, b0, ones, step, steps)
+''')
+md(r'''
+Four BLAS calls per step and no allocation: the residual is computed into a
+copy of ``Y`` (`gemm` with ``\beta = -1``, then the bias as a rank-1 `gemm`),
+the update ``W - \text{step}\, X^T R`` is one `gemm` with
+``\alpha = -\text{step}``, ``\beta = 1`` directly into ``W``, and the bias
+update one `gemv`.  The batches Julia delivers are read in place
+(column-major), without copies.  From Python, the same function is as fast as
+PyTorch on the same BLAS and 5× faster than PyTorch's autograd for a small
+layer (`python/examples/torch_linear.py`).
+''')
+code(r'''
+begin
+    Random.seed!(6)
+    B, p, k, nsteps = 256, 1024, 256, 20
+    Wtrue = randn(p, k) / sqrt(p)
+    Xs = [randn(B, p) for _ in 1:nsteps]
+    Ys = [X * Wtrue + 0.1 * randn(B, k) for X in Xs]
+    bind!(train; batch_x = i -> Xs[i+1], batch_y = i -> Ys[i+1])
+    W0, b0, onesB, lr_step = zeros(p, k), zeros(k), ones(B), 2 * 0.01 / B
+end;
+''')
+code(r'''
+function train_julia(W, b, Xs, Ys, step)
+    for (X, Y) in zip(Xs, Ys)
+        R = X * W .+ b' .- Y
+        W = W - step * (X' * R)
+        b = b - step * vec(sum(R; dims = 1))
+    end
+    W, b
+end
+''')
+code(r'''
+compare("ulm.lam" => () -> train(W0, b0, onesB, lr_step, nsteps),
+        "Julia, the formulas as written" => () -> train_julia(W0, b0, Xs, Ys, lr_step))
+''')
+code(r'''
+let (W, b) = train(W0, b0, onesB, lr_step, nsteps),
+    (W2, b2) = train_julia(W0, b0, Xs, Ys, lr_step)
+    (norm(W - W2) / norm(W2), norm(b - b2) / norm(b2))
+end
+''')
+md(r'''
+## Inverses without inverses: generalised least squares
 
 Generalised least squares: the best linear unbiased estimate of ``\beta`` in
 ``y = X\beta + \varepsilon`` with ``\operatorname{cov}(\varepsilon) = M``:
@@ -111,23 +277,6 @@ function gls_by_hand(X, M, y)
 end
 ''')
 code(r'''
-"Time (best of several runs) and memory allocated per call, relative to the first case."
-function compare(cases...)
-    rows = map(cases) do (name, f)
-        f()
-        t = @belapsed $f() samples = 5 evals = 1 seconds = 20
-        (name, t, @allocated f())
-    end
-    t0 = rows[1][2]
-    s = "| | time | relative | allocated |\n|:--|--:|--:|--:|\n"
-    for (name, t, a) in rows
-        s *= @sprintf("| %s | %.2f ms | %.1f× | %s |\n", name, 1e3t, t / t0,
-                      Base.format_bytes(a))
-    end
-    Markdown.parse(s)
-end
-''')
-code(r'''
 compare("ulm.lam" => () -> gls(X, M, y),
         "Julia, the formula as written" => () -> gls_literal(X, M, y),
         "Julia, by hand" => () -> gls_by_hand(X, M, y))
@@ -186,103 +335,6 @@ end
 md(r'''
 As fast as the hand-written package, with half the memory: ulm.lam's
 temporaries live in one workspace that is reused across calls.
-
-## A loop: the Kalman filter
-
-Predict and update as in the textbook.  `loop` carries ``x`` and ``P`` from
-step to step; the measurements come from a Julia function and the estimates
-go to one (`extern`):
-''')
-code(r'''
-begin
-    measure = extern(:measure, [Index], Vec(:m))
-    estimate = extern(:estimate, [Index, Vec(:n)])
-    @lam function kalman(F::Mat(:n, :n), Q::Mat(:n, :n, :spsd), H::Mat(:m, :n),
-                         R::Mat(:m, :m, :spd), x0::Vec(:n), P0::Mat(:n, :n, :spd),
-                         steps::Index)
-        loop(steps, x0, P0) do i, x, P
-            P = assume(P, :symmetric)        # a covariance stays symmetric
-            x = F * x                                       # predict
-            P = F * P * F' + Q
-            S = assume(H * P * H' + R, :spd)                # update
-            K = P * H' * inv(S)
-            x = x + K * (measure(i) - H * x)
-            P = P - K * H * P
-            estimate(i, x)
-            (x, P)
-        end
-    end
-end
-''')
-code(r'''
-@code_lam kalman(F, Q, H, R, x0, P0, steps)
-''')
-md(r'''
-``S^{-1}`` is never formed: ``K = P H^T S^{-1}`` is two triangular solves
-with the Cholesky factor of ``S``.  ``H P`` is computed once and reused
-(``P`` is symmetric, so ``P H^T = (H P)^T``), and ``K H P`` is evaluated as
-``K (H P)``, which costs ``n^2 m`` instead of ``n^3`` for ``(K H) P``.
-``x`` and ``P`` stay in place: no allocation inside the loop.
-
-The model: a field on a periodic grid, transported and diffused, observed by
-``m`` sensors.
-''')
-code(r'''
-function model(n, m, steps)
-    c, ν = 0.4, 0.2
-    F = zeros(n, n)
-    for i in 1:n
-        F[i, i] = 1 - 2ν
-        F[i, mod1(i + 1, n)] = ν - c / 2
-        F[i, mod1(i - 1, n)] = ν + c / 2
-    end
-    d = [min(abs(i - j), n - abs(i - j)) for i in 1:n, j in 1:n]
-    Q = 0.01 .* exp.(-d ./ 10)
-    H = zeros(m, n)
-    for (k, s) in enumerate(sort(randperm(n)[1:m]))
-        H[k, s] = 1
-    end
-    R = 0.05 * Matrix(I, m, m)
-    Lq = cholesky(Symmetric(Q + 1e-12I)).L
-    truth = [sin(2π * i / n) + 0.5 * sin(6π * i / n) for i in 0:n-1]
-    zs = map(1:steps) do _
-        truth = F * truth + Lq * randn(n)
-        H * truth + sqrt(0.05) * randn(m)
-    end
-    F, Q, H, R, zeros(n), Matrix(1.0I, n, n), zs, truth
-end
-''')
-code(r'''
-begin
-    steps = 20
-    F, Q, H, R, x0, P0, zs, truth = model(1000, 100, steps)
-    estimates = zeros(1000, steps)
-    bind!(kalman; measure = i -> zs[i+1], estimate = (i, x) -> (estimates[:, i+1] .= x))
-end;
-''')
-code(r'''
-function kalman_literal(F, Q, H, R, x, P, zs)
-    for z in zs
-        x = F * x
-        P = F * P * F' + Q
-        S = H * P * H' + R
-        K = P * H' * inv(S)
-        x = x + K * (z - H * x)
-        P = P - K * H * P
-    end
-    x, P
-end
-''')
-code(r'''
-compare("ulm.lam" => () -> kalman(F, Q, H, R, x0, P0, steps),
-        "Julia, the formula as written" =>
-            () -> kalman_literal(F, Q, H, R, x0, P0, zs))
-''')
-code(r'''
-let (x, P) = kalman(F, Q, H, R, x0, P0, steps),
-    (x2, P2) = kalman_literal(F, Q, H, R, x0, P0, zs)
-    (norm(x - x2) / norm(x2), norm(P - P2) / norm(P2))
-end
 ''')
 md(r'''
 ## Decisions at run time: linear attention
@@ -374,6 +426,27 @@ In Python the same with `@lam.function`, `Matrix("n", "m", "spd")`, `@`,
 `.T`, `.inv`, `lam.eye`, `lam.assume`, `lam.loop`, `lam.extern`.
 
 So far: real double precision, dense matrices.
+''')
+
+md(r'''
+## Appendix: the timing helper
+''')
+code(r'''
+"Time (best of several runs) and memory allocated per call, relative to the first case."
+function compare(cases...)
+    rows = map(cases) do (name, f)
+        f()
+        t = @belapsed $f() samples = 5 evals = 1 seconds = 20
+        (name, t, @allocated f())
+    end
+    t0 = rows[1][2]
+    s = "| | time | relative | allocated |\n|:--|--:|--:|--:|\n"
+    for (name, t, a) in rows
+        s *= @sprintf("| %s | %.2f ms | %.1f× | %s |\n", name, 1e3t, t / t0,
+                      Base.format_bytes(a))
+    end
+    Markdown.parse(s)
+end
 ''')
 
 ids = [str(uuid.uuid4()) for _ in cells]
