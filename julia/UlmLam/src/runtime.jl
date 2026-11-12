@@ -354,10 +354,14 @@ function arguments(f::CompiledFunction, args, query::Bool)
         intent in ("work", "info") && continue
         if intent == "out"
             rt = popfirst!(results)
+            if query  # the workspace query writes no results
+                push!(cargs, C_NULL)
+                continue
+            end
             r, c = resolve_dim(rt.rows, env), resolve_dim(rt.cols, env)
             m = rt.isvec ? Vector{Float64}(undef, r) : Matrix{Float64}(undef, r, c)
             push!(outs, m)
-            push!(cargs, query ? C_NULL : Ptr{Cvoid}(pointer(m)))
+            push!(cargs, Ptr{Cvoid}(pointer(m)))
             continue
         end
         pname, pt = f.fn.params[k]
