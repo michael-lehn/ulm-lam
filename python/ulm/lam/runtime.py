@@ -35,6 +35,7 @@ Environment: LLVM_PREFIX (Homebrew llvm), ULMBLAS_DIR (default
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import os
 import re
 import shutil
@@ -150,12 +151,18 @@ def compile(functions, name: str | None = None, workdir=None,
     mlir = work / f"{name}.mlir"
     text = fe.module(functions)
     ext = ".dylib" if sys.platform == "darwin" else ".so"
-    lib = work / f"lib{name}{ext}"
-    # unchanged program, library present: reuse it (C++ compilation of the
-    # ulmBLAS templates takes seconds)
-    cached = (not os.environ.get("ULM_LAM_REBUILD") and lib.exists()
-              and mlir.exists() and mlir.read_text() == text
-              and lib.stat().st_mtime >= _newest_tool())
+    # The library is named after its program and the compiler version
+    # (the newest part of the compiler), so that
+    #  * an unchanged program reuses its library (C++ compilation of the
+    #    ulmBLAS templates takes seconds),
+    #  * a changed program never meets an old library, also not one that a
+    #    process has already loaded (dlopen returns the loaded image for a
+    #    path it knows), and
+    #  * an interrupted build leaves no library: it is built under a
+    #    temporary name and renamed when complete.
+    key = hashlib.sha256(f"{text}\n{_newest_tool()}".encode()).hexdigest()
+    lib = work / f"lib{name}.{key[:12]}{ext}"
+    cached = not os.environ.get("ULM_LAM_REBUILD") and lib.exists()
     mlir.write_text(text)
     if not cached:
         _run([str(ROOT / "scripts" / "ulm-lam-compile.sh"), str(mlir),
@@ -171,8 +178,13 @@ def compile(functions, name: str | None = None, workdir=None,
         sources.append(str(tramp))
     if not cached:
         cxx = os.environ.get("CXX", "c++")
+        partial = lib.with_name(lib.name + ".partial")
         _run([cxx, *_ulmblas_flags(), "-shared", "-fPIC", *sources, "-o",
-              str(lib)], "C++ compilation")
+              str(partial)], "C++ compilation")
+        partial.replace(lib)
+        for old in work.glob(f"lib{name}.*{ext}"):
+            if old != lib:
+                old.unlink(missing_ok=True)
     # the program's functions and externs, by name
     prog_fns = {}
     todo = list(functions)

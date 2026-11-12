@@ -272,6 +272,30 @@ except ImportError:
 
 
 @unittest.skipIf(np is None, "NumPy is not installed")
+class Cache(unittest.TestCase):
+
+    def test_interrupted_build_is_not_reused(self):
+        """A changed program whose build did not finish (only its .mlir was
+        written) must be compiled, not served from the old library."""
+        import tempfile
+
+        @lam.function
+        def square(A: Matrix(4, 4)):
+            return A @ A
+
+        @lam.function
+        def cube(A: Matrix(4, 4)):
+            return A @ A @ A
+
+        with tempfile.TemporaryDirectory() as d:
+            lam.compile(square, name="cached", workdir=d)
+            # the state an interrupted build of `cube` leaves behind
+            Path(d, "cached.mlir").write_text(lam.frontend.module([cube]))
+            lib = lam.compile(cube, name="cached", workdir=d)
+            A = [[2.0 * (i == j) for j in range(4)] for i in range(4)]
+            self.assertAlmostEqual(lib.cube(A)[0][0], 8.0)
+
+
 class WithNumPy(unittest.TestCase):
 
     def test_numpy_arrays(self):
