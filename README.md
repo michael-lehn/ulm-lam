@@ -133,6 +133,7 @@ print(lib.gls.cpp)         # the generated C++
 | product, sum | `*`, `+`, `-`, scalars | `@`, `+`, `-`, scalars |
 | transpose | `X'`, `transpose(X)` | `X.T` |
 | inverse, solve | `inv(A)`, `A \ B`, `B / A` | `A.inv`, `lam.inv(A)` |
+| least squares | `X \ y` for a rectangular `X`, `lstsq(X, y)` | `lam.lstsq(X, y)` |
 | identity | `I`, `eye(n)` (never formed) | `lam.eye(n)` |
 | facts | `assume(A, :spd)` | `lam.assume(A, "spd")` |
 | loops | `loop(n, carry...) do i, x... end` | `with lam.loop(n, carry=[...]) as L:` |
@@ -270,8 +271,8 @@ open":
   (the idea of ATLAS: measure on the machine what cannot be predicted);
   fallbacks when a method fails, and a check mode that estimates the error
   of a result (a factorisation with `info = 0` can still be useless for
-  what follows); QR and LDLᵀ; a search over whole programs, as Linnea
-  does; e-graphs; kernels described as data.
+  what follows); a search over whole programs, as Linnea does; e-graphs;
+  kernels described as data.
 - **Evaluation.** The LAMP benchmark and Linnea's application problems.
 - **Usability and reach.** `Pkg.add` without a local LLVM/MLIR and C++
   compiler; differentiation at the matrix level; a connection to

@@ -26,7 +26,7 @@ using Libdl
 using SHA: sha256
 
 export @lam, Mat, Vec, InOut, Index, Float, eye, assume, loop, extern,
-       bind!, InfoError, LamError, Workspace, workspace_size, cpp, code_lam,
+       bind!, InfoError, LamError, Workspace, workspace_size, cpp, code_lam, lstsq,
        @code_lam
 
 include("frontend.jl")

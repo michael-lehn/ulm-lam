@@ -104,8 +104,8 @@ struct UlmLamInfo : PassWrapper<UlmLamInfo, OperationPass<ModuleOp>>
     bool
     isCheck(Operation *op) const
     {
-	return isa<lk::PotrfOp, lk::GetrfOp>(op) || isDefinedCall(op) ||
-	       isErrorCall(op);
+	return isa<lk::PotrfOp, lk::GetrfOp, lk::GelsOp>(op) ||
+	       isDefinedCall(op) || isErrorCall(op);
     }
     bool
     containsCheck(Operation *op) const
@@ -218,15 +218,24 @@ struct UlmLamInfo : PassWrapper<UlmLamInfo, OperationPass<ModuleOp>>
 	// K + s^2 I is factorised, not K)
 	bool changed = llvm::any_of(m.getUsers(), [&](Operation *u) {
 	    auto d = dyn_cast<DestinationStyleOpInterface>(u);
-	    return d && !isa<ulm_lamk::PotrfOp, ulm_lamk::GetrfOp>(u) &&
+	    return d &&
+	           !isa<ulm_lamk::PotrfOp, ulm_lamk::GetrfOp, ulm_lamk::GelsOp,
+	                ulm_lamk::GecopyOp>(u) &&
 	           llvm::any_of(d.getDpsInits(),
 	                        [&](Value v) { return v == m; });
 	});
-	for (Operation *u : m.getUsers())
+	for (Operation *u : m.getUsers()) {
+	    Value src;
 	    if (auto c = dyn_cast<memref::CopyOp>(u); c && c.getTarget() == m)
-		if (std::string n = argName(c.getSource()); !n.empty())
+		src = c.getSource();
+	    // (also a copy that transposes: the matrix of a Julia array)
+	    if (auto g = dyn_cast<ulm_lamk::GecopyOp>(u); g && g.getB() == m)
+		src = g.getA();
+	    if (src)
+		if (std::string n = argName(src); !n.empty())
 		    // a copy of it (the function works on a copy)
 		    return changed ? "a matrix computed from " + n : n;
+	}
 	return "a computed matrix";
     }
 
@@ -237,7 +246,12 @@ struct UlmLamInfo : PassWrapper<UlmLamInfo, OperationPass<ModuleOp>>
 	    return "Cholesky factorisation of " + nameOf(f, p.getA()) +
 	           ": not positive definite";
 	if (auto p = dyn_cast<lk::GetrfOp>(op))
-	    return "LU factorisation of " + nameOf(f, p.getA()) + ": singular";
+	    return (p.getSymmetric() ? "LDL^T factorisation of "
+	                             : "LU factorisation of ") +
+	           nameOf(f, p.getA()) + ": singular";
+	if (auto g = dyn_cast<lk::GelsOp>(op))
+	    return "least squares (QR) with " + nameOf(f, g.getA()) +
+	           ": no full column rank";
 	auto c = cast<func::CallOp>(op);
 	return "call of " + c.getCallee().str() + " returned info != 0";
     }

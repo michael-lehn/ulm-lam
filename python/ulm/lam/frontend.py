@@ -458,6 +458,17 @@ def inv(x: Value) -> Value:
     return _as_value(x).inv
 
 
+def lstsq(a: Value, b: Value) -> Value:
+    """The X that minimises ||A X - B|| (A m x n with m >= n and full column
+    rank): QR (LAPACK's gels) where the backend has LAPACK, otherwise the
+    normal equations with a Cholesky factorisation."""
+    ta, tb = _as_value(a)._matrix("lstsq"), _as_value(b)._matrix("lstsq")
+    if ta.rows != tb.rows:
+        raise LamError(f"lstsq: A has {ta.rows} rows, B has {tb.rows}")
+    return _op("ulm_lam.lstsq", [_as_value(a), _as_value(b)],
+               MatrixType(ta.cols, tb.cols))
+
+
 # ---------------------------------------------------------------------------
 # Loops
 # ---------------------------------------------------------------------------

@@ -101,7 +101,7 @@ def _renumber(text):
             count[p] = count.get(p, 0) + 1
             seen[k] = f"{p}{count[p]}"
         return seen[k]
-    return re.sub(r"\b(LU|T|L|z)(\d+)(?![0-9A-Za-z_])", sub, text)
+    return re.sub(r"\b(LDL|LU|T|L|z)(\d+)(?![0-9A-Za-z_])", sub, text)
 
 
 def render(fn: fe.Function, selected: str, infos: dict) -> str:
@@ -263,14 +263,23 @@ def render(fn: fe.Function, selected: str, infos: dict) -> str:
             if _operands(line, "beta") else "0"
         if op in ("potrf", "getrf"):
             a = r.name(out)
-            lname = r.result(res, out, "L" if op == "potrf" else "LU")
+            sym = op == "getrf" and "symmetric" in line  # L D Lᵀ
+            lname = r.result(res, out, "L" if op == "potrf" else
+                             "LDL" if sym else "LU")
             r.names[res + "#0"] = lname
-            note = (f"P {a} = L U, LU" if op == "getrf" else
+            note = (f"{a} = L D Lᵀ, Bunch–Kaufman" if sym else
+                    f"P {a} = L U, LU" if op == "getrf" else
                     f"{a} = {lname} {lname}ᵀ, Cholesky"
                     if _attr(line, "uplo") == "lower" else
                     f"{a} = {lname}ᵀ {lname}, Cholesky")
-            r.emit(d, op, f"{lname} ← {'chol' if op == 'potrf' else 'lu'}"
-                   f"({a})", note)
+            fn_ = "chol" if op == "potrf" else "ldlt" if sym else "lu"
+            r.emit(d, "sytrf" if sym else op, f"{lname} ← {fn_}({a})", note)
+        elif op == "gels":
+            a, bb = outs
+            r.names[res] = r.names[res + "#0"] = r.name(a)
+            r.names[res + "#1"] = r.name(bb)
+            r.emit(d, "gels", f"{r.name(bb)} ← lstsq({r.name(a)}, "
+                   f"{r.name(bb)})", "QR; the solution in the leading rows")
         elif op in ("gemm", "gemv", "gemmtr"):
             a, b = ins
             ta = T("trans_a") if op != "gemv" else T("trans")
@@ -306,8 +315,9 @@ def render(fn: fe.Function, selected: str, infos: dict) -> str:
                 a + ("⁻ᵀ" if t else "⁻¹")
             al = alpha if op in ("trsm", "trmm") else ""
             left = _attr(line, "side") != "right"
-            r.emit(d, op, f"{b} ← {al}" + (f"{f} {old}" if left
-                                            else f"{old} {f}"),
+            kname = "sytrs" if op == "getrs" and "symmetric" in line else op
+            r.emit(d, kname, f"{b} ← {al}" + (f"{f} {old}" if left
+                                               else f"{old} {f}"),
                    f"{a} triangular" if op == "trmm" else "")
         elif op == "gecopy":
             b = r.result(res, out, fresh=True)

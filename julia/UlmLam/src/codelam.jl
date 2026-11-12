@@ -256,11 +256,19 @@ function render_once(f::LamFunction, body, choice, flags, infos)
             # the factors of A_ir = Aᵀ (a Julia matrix) are shown as those of A
             a = name(r, out)
             fa = flag(r, out)
-            l, _ = result!(r, k, res, out; prefix=op == "potrf" ? "L" : "LU")
-            r.vals[res] = r.vals["$res#0"] = (l, op == "getrf" ? fa : false)
-            note = op == "getrf" ? "P $a = L U, LU" :
+            sym = op == "getrf" && occursin("symmetric", line)  # L D Lᵀ
+            l, _ = result!(r, k, res, out; prefix=op == "potrf" ? "L" : sym ? "LDL" : "LU")
+            r.vals[res] = r.vals["$res#0"] = (l, op == "getrf" && !sym ? fa : false)
+            note = sym ? "$a = L D Lᵀ, Bunch–Kaufman" : op == "getrf" ? "P $a = L U, LU" :
                    attr(line, "uplo") == "lower" ? "$a = $l $(l)ᵀ, Cholesky" : "$a = $(l)ᵀ $l, Cholesky"
-            emit!(r, d, op, "$l ← $(op == "potrf" ? "chol" : "lu")($a)", note)
+            emit!(r, d, sym ? "sytrf" : op,
+                  "$l ← $(op == "potrf" ? "chol" : sym ? "ldlt" : "lu")($a)", note)
+        elseif op == "gels"
+            a, bb = outs
+            la, lb = disp(r, a), disp(r, bb)
+            r.vals[res] = r.vals["$res#0"] = val(r, a)
+            r.vals["$res#1"] = val(r, bb)
+            emit!(r, d, "gels", "$lb ← lstsq($la, $lb)", "QR; the solution in the leading rows")
         elseif op == "gemm" || op == "gemv"
             a, b = ins
             ta = T(attr(line, op == "gemm" ? "trans_a" : "trans"))
@@ -313,7 +321,7 @@ function render_once(f::LamFunction, body, choice, flags, infos)
             # the IR solves B_ir ← op(A)⁻¹ B_ir; with B_ir = Bᵀ that is B ← B op(A)⁻ᵀ
             inv = dispinv(r, a, t ⊻ fb)
             rhs = (left ⊻ fb) ? "$al$inv $old" : "$al$old $inv"
-            emit!(r, d, op, "$b ← $rhs")
+            emit!(r, d, op == "getrs" && occursin("symmetric", line) ? "sytrs" : op, "$b ← $rhs")
         elseif op == "trmm"
             a = ins[1]
             t = T(attr(line, "trans"))
@@ -379,7 +387,7 @@ order they appear."""
 function renumber(text)
     seen = Dict{String,String}()
     count = Dict{String,Int}()
-    replace(text, r"\b(LU|T|L|z)(\d+)(?![0-9A-Za-z_])" => function (m)
+    replace(text, r"\b(LDL|LU|T|L|z)(\d+)(?![0-9A-Za-z_])" => function (m)
         get!(seen, m) do
             p = match(r"^[A-Za-z]+", m).match
             count[p] = get(count, p, 0) + 1

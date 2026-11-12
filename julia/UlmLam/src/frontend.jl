@@ -260,9 +260,28 @@ function scalar_op(op, x, y)
     emit!(b, "$(v.name) = arith.$op $(use(vals[1])), $(use(vals[2])) : f64")
     v
 end
-Base.:\(a::LamValue, b::LamValue) =
-    a.type isa FloatType ? (b.type isa FloatType ? scalar_op("divf", b, a) :
-                            scalar_op("divf", 1.0, a) * b) : inv(a) * b
+function Base.:\(a::LamValue, b::LamValue)
+    a.type isa FloatType && return b.type isa FloatType ? scalar_op("divf", b, a) :
+                                   scalar_op("divf", 1.0, a) * b
+    t = mat(a, "\\")
+    t.rows == t.cols && return inv(a) * b
+    # a rectangular A: least squares, as Julia's A \ B
+    lstsq(a, b)
+end
+
+"""
+    lstsq(A, B)
+
+The X that minimises ||A X - B|| (A m x n with m >= n and full column rank),
+as `A \\ B` for a rectangular A: QR (LAPACK's gels) where the backend has
+LAPACK, otherwise the normal equations with a Cholesky factorisation.
+"""
+function lstsq(a::LamValue, b::LamValue)
+    ta, tb = mat(a, "lstsq"), mat(b, "lstsq")
+    ta.rows == tb.rows ||
+        throw(LamError("lstsq: A has $(ta.rows) rows, B has $(tb.rows)"))
+    op!("ulm_lam.lstsq", [a, b], newtype(ta.cols, tb.cols))
+end
 Base.:\(a::Real, b::LamValue) = b / a
 
 # A^k: products (k > 0), the identity (k = 0), inverses (k < 0)

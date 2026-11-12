@@ -391,6 +391,7 @@ ULM_LAM_COMPATIBLE(AddOp)
 ULM_LAM_COMPATIBLE(ScaleOp)
 ULM_LAM_COMPATIBLE(TransposeOp)
 ULM_LAM_COMPATIBLE(InverseOp)
+ULM_LAM_COMPATIBLE(LstsqOp)
 #undef ULM_LAM_COMPATIBLE
 
 LogicalResult
@@ -453,6 +454,18 @@ TransposeOp::inferReturnTypes(MLIRContext *, std::optional<Location>,
 }
 
 LogicalResult
+LstsqOp::inferReturnTypes(MLIRContext *, std::optional<Location>,
+                          ValueRange operands, DictionaryAttr, PropertyRef,
+                          RegionRange, SmallVectorImpl<Type> &inferred)
+{
+    auto a = tensorType(operands[0].getType());
+    auto bt = tensorType(operands[1].getType());
+    inferred.push_back(RankedTensorType::get(
+        {a.getDimSize(1), bt.getDimSize(1)}, a.getElementType()));
+    return success();
+}
+
+LogicalResult
 InverseOp::inferReturnTypes(MLIRContext *, std::optional<Location>,
                             ValueRange operands, DictionaryAttr, PropertyRef,
                             RegionRange, SmallVectorImpl<Type> &inferred)
@@ -488,6 +501,11 @@ TransposeOp::inferResultProperties(unsigned,
                                    ArrayRef<::mlir::ulm_lam::Properties> ps)
 {
     return transposeProperties(ps.front());
+}
+::mlir::ulm_lam::Properties
+LstsqOp::inferResultProperties(unsigned, ArrayRef<::mlir::ulm_lam::Properties>)
+{
+    return P::general;
 }
 ::mlir::ulm_lam::Properties
 InverseOp::inferResultProperties(unsigned,
@@ -536,6 +554,14 @@ AddOp::verify()
 	if (!dimsCompatible(rows(v.getType()), rows(t0)) ||
 	    !dimsCompatible(cols(v.getType()), cols(t0)))
 	    return emitOpError("terms have different shapes");
+    return success();
+}
+
+LogicalResult
+LstsqOp::verify()
+{
+    if (!dimsCompatible(rows(getA().getType()), rows(getB().getType())))
+	return emitOpError("A and B must have the same number of rows");
     return success();
 }
 
@@ -889,6 +915,7 @@ ULM_LAMK_COMMON(GemvOp)
 ULM_LAMK_COMMON(TrsvOp)
 ULM_LAMK_COMMON(PotrfOp)
 ULM_LAMK_COMMON(GetrfOp)
+ULM_LAMK_COMMON(GelsOp)
 ULM_LAMK_COMMON(GetrsOp)
 ULM_LAMK_COMMON(GeaxpyOp)
 ULM_LAMK_COMMON(GescalOp)
@@ -1085,6 +1112,16 @@ mlir::ulm_lamk::GetrfOp::estimateFlops(const SizeAssignment &)
     return 2.0 * n * n * n / 3.0;
 }
 FailureOr<double>
+mlir::ulm_lamk::GelsOp::estimateFlops(const SizeAssignment &)
+{
+    auto [m, n] = shapeOf(getA());
+    auto [m2, k] = shapeOf(getB());
+    if (anyDynamic({m, n, k}))
+	return failure();
+    // QR (2 m n^2 - 2 n^3 / 3), Q^T B and the triangular solve
+    return 2.0 * m * n * n - 2.0 * n * n * n / 3.0 + 4.0 * m * n * k;
+}
+FailureOr<double>
 mlir::ulm_lamk::GetrsOp::estimateFlops(const SizeAssignment &)
 {
     auto [n, n2] = shapeOf(getLU());
@@ -1227,8 +1264,9 @@ mlir::ulm_lam::registerBufferizationModels(DialectRegistry &registry)
     registry.addExtension(+[](MLIRContext *ctx, ulm_lamk::UlmLamkDialect *) {
 	using namespace mlir::ulm_lamk;
 	attachAll<GemmOp, GemmtrOp, SymmOp, TrmmOp, TrsmOp, SyrkOp, GemvOp,
-	          SymvOp, SycompleteOp, TrsvOp, PotrfOp, GetrfOp, GetrsOp,
-	          GeaxpyOp, GescalOp, AdddiagOp, GecopyOp, CallOp>(ctx);
+	          SymvOp, SycompleteOp, TrsvOp, PotrfOp, GetrfOp, GelsOp,
+	          GetrsOp, GeaxpyOp, GescalOp, AdddiagOp, GecopyOp, CallOp>(
+	    ctx);
     });
 }
 

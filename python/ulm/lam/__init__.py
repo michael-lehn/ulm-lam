@@ -15,13 +15,13 @@ See lam.frontend (the language) and lam.runtime (compiling, calling).
 """
 
 from .frontend import (Float, In, Index, InOut, LamError, Matrix, Vector,
-                       assume, extern, eye, function, inv, loop, module,
+                       assume, extern, eye, function, inv, loop, lstsq, module,
                        update)
 from .runtime import InfoError, Library, Workspace, compile
 
 __all__ = [
     "Float", "In", "Index", "InfoError", "InOut", "LamError", "Library",
     "Matrix", "Vector", "Workspace", "assume", "compile", "extern", "eye",
-    "function", "inv",
+    "function", "inv", "lstsq",
     "loop", "module", "update",
 ]

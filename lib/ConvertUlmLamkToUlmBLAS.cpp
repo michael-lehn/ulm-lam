@@ -812,7 +812,26 @@ ULM_LAMK_LOWERING(GetrfLowering, lk::GetrfOp)
         .strides(A)
         .op(a.getIpiv())
         .lit(1)
-        .call(o, "ulmBLAS::getrf" kIndexType, rw.getI64Type());
+        .call(o,
+              o.getSymmetric() ? "ulmBLAS::sytrf" kIndexType
+                               : "ulmBLAS::getrf" kIndexType,
+              rw.getI64Type());
+}
+
+// least squares by QR: A := its QR factors, B := the solution in its
+// leading rows (LAPACK's gels; only the CBLAS backend has it)
+ULM_LAMK_LOWERING(GelsLowering, lk::GelsOp)
+{
+    View A = view(rw, o.getA()), B = view(rw, o.getB());
+    return Args{rw}
+        .dim(A.rows)
+        .dim(A.cols)
+        .dim(B.cols)
+        .op(a.getA())
+        .strides(A)
+        .op(a.getB())
+        .strides(B)
+        .call(o, "ulmBLAS::gels" kIndexType, rw.getI64Type());
 }
 
 // B := op(A)^-1 B with the LU factors
@@ -833,7 +852,8 @@ ULM_LAMK_LOWERING(GetrsLowering, lk::GetrsOp)
         .lit(1)
         .op(a.getB())
         .strides(B)
-        .call(o, "ulmBLAS::getrs" kIndexType);
+        .call(o, o.getSymmetric() ? "ulmBLAS::sytrs" kIndexType
+                                  : "ulmBLAS::getrs" kIndexType);
 }
 
 #undef ULM_LAMK_LOWERING
@@ -1187,7 +1207,8 @@ struct ConvertUlmLamkToUlmBLAS
 	         SycompleteLowering, SyrkLowering, GemmtrLowering, GemvLowering,
 	         TrsmLowering, TrmmLowering, TrsvLowering, GeaxpyLowering,
 	         GescalLowering, AdddiagLowering, GecopyLowering, PotrfLowering,
-	         GetrfLowering, GetrsLowering, CallLowering>(tc, ctx);
+	         GetrfLowering, GelsLowering, GetrsLowering, CallLowering>(tc,
+	                                                                   ctx);
 	populateArithToEmitCPatterns(tc, patterns);
 	populateSCFToEmitCConversionPatterns(patterns, tc);
 	populateFuncToEmitCPatterns(tc, patterns, /*lowerToCpp=*/true);

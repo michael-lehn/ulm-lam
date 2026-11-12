@@ -66,3 +66,21 @@ class Code(unittest.TestCase):
         self.assertIn("syrk", t)
         self.assertNotIn("%", t)
         self.assertIn("info 1:  Cholesky factorisation of M", t)
+
+
+@unittest.skipIf(np is None, "needs NumPy")
+class Lstsq(unittest.TestCase):
+    """lam.lstsq: QR with LAPACK (backend cblas), normal equations without."""
+
+    def test_lstsq(self):
+        @lam.function
+        def ls(X: Matrix("m", "n", "full_rank"), y: Vector("m")):
+            return lam.lstsq(X, y)
+        rng = np.random.default_rng(3)
+        X, y = rng.normal(size=(120, 5)), rng.normal(size=120)
+        ref = np.linalg.lstsq(X, y, rcond=None)[0]
+        for backend in ("ulmblas", "cblas"):
+            lib = lam.compile(ls, name=f"lstsq_py_{backend}", backend=backend)
+            np.testing.assert_allclose(lib.ls(X, y).ravel(), ref, rtol=1e-10)
+            self.assertIn("gels" if backend == "cblas" else "potrf",
+                          lib.ls.code)

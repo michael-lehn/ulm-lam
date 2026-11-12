@@ -233,6 +233,7 @@ struct Leaf
     Value piv; // LUSolve: pivots
     bool trans = false; // Mat: op(v) = v^T ; solves: op(v)^-1 = v^-T
     bool lower = true;  // TriSolve: v is lower triangular
+    bool sym = false;   // LUSolve: the factors are L D L^T (sytrf)
     /// Mat: a symmetric matrix of which only one triangle is stored
     /// (lower_stored / upper_stored); never transposed (S^T = S).
     enum Storage
@@ -313,21 +314,31 @@ struct Factor
     Value f;   // triangular matrix, L, or LU
     Value piv; // LU
     bool lower = true;
+    bool sym = false; // LU: L D L^T of a symmetric matrix (sytrf)
 };
 
 class Selector
 {
   public:
-    explicit Selector(func::FuncOp f) : func(f), b(f.getContext()), dom(f) {}
+    explicit Selector(func::FuncOp f, bool lapack = false)
+        : func(f), b(f.getContext()), dom(f), lapack(lapack)
+    {
+    }
+    /// The backend has LAPACK (CBLAS/LAPACK): L D L^T (sytrf) for symmetric
+    /// matrices that are not known to be spd, instead of LU; least squares
+    /// by QR (gels) instead of the normal equations.
+    bool lapack = false;
 
     LogicalResult
     run()
     {
+	if (!lapack)
+	    normalEquations();
 	formIdentities();
 	formInverses();
 	SmallVector<Operation *> ops;
 	func.walk([&](Operation *op) {
-	    if (isa<MulOp, AddOp>(op) || dynamicScale(op))
+	    if (isa<MulOp, AddOp, LstsqOp>(op) || dynamicScale(op))
 		ops.push_back(op);
 	});
 	for (Operation *op : ops)
@@ -342,6 +353,10 @@ class Selector
 	                      [](Operation *u) { return isa<InverseOp>(u); })))
 		continue;
 	    b.setInsertionPoint(op);
+	    if (auto ls = dyn_cast<LstsqOp>(op)) {
+		replace(op, selectLstsq(ls));
+		continue;
+	    }
 	    if (auto sc = dyn_cast<ScaleOp>(op)) {
 		// (gescal scales both triangles: one stored triangle stays so)
 		replace(op,
@@ -512,6 +527,71 @@ class Selector
 		return true;
 	}
 	return false;
+    }
+
+    /// lstsq(A, B) without LAPACK: the normal equations (A^T A)^-1 A^T B,
+    /// A^T A asserted spd (A has full column rank), then selected as any
+    /// product (Cholesky, syrk).
+    void
+    normalEquations()
+    {
+	SmallVector<LstsqOp> ls;
+	func.walk([&](LstsqOp op) { ls.push_back(op); });
+	for (LstsqOp op : ls) {
+	    b.setInsertionPoint(op);
+	    Location loc = op.getLoc();
+	    Value a = op.getA();
+	    Value at = TransposeOp::create(b, loc, a).getResult();
+	    Value g = MulOp::create(b, loc, ValueRange{at, a}).getResult();
+	    auto gt = cast<RankedTensorType>(g.getType());
+	    g = AssumeOp::create(
+	        b, loc, withProperties(gt, propertiesOf(gt) | Properties::spd),
+	        g, false);
+	    Value gi = InverseOp::create(b, loc, g).getResult();
+	    Value x = MulOp::create(b, loc, ValueRange{gi, at, op.getB()})
+	                  .getResult();
+	    if (x.getType() != op.getType())
+		x = AssumeOp::create(b, loc, op.getType(), x, false);
+	    op.getResult().replaceAllUsesWith(x);
+	    op.erase();
+	}
+    }
+
+    /// lstsq(A, B) with LAPACK: copies of op(A) and op(B), gels (QR) in
+    /// place, the solution copied from the leading rows of B.
+    Value
+    selectLstsq(LstsqOp op)
+    {
+	Location loc = op.getLoc();
+	auto leaf = [](Value v) {
+	    while (auto as = v.getDefiningOp<AssumeOp>())
+		v = as.getOperand();
+	    Leaf l;
+	    l.v = v;
+	    if (auto t = v.getDefiningOp<TransposeOp>()) {
+		l.v = t.getOperand();
+		l.trans = true;
+	    }
+	    return l;
+	};
+	auto copyOf = [&](const Leaf &l) {
+	    Value e = empty(l, l, elementType(l.v), loc);
+	    return lk::GecopyOp::create(
+	               b, loc, TypeRange{e.getType()},
+	               l.trans ? lk::Trans::trans : lk::Trans::none, l.v, e)
+	        ->getResult(0);
+	};
+	Leaf la = leaf(op.getA()), lb = leaf(op.getB());
+	Value ac = copyOf(la), bc = copyOf(lb);
+	auto gels = lk::GelsOp::create(
+	    b, loc, TypeRange{ac.getType(), bc.getType(), b.getI64Type()}, ac,
+	    bc);
+	Leaf lat = la;
+	lat.trans = !la.trans;
+	Value x = empty(lat, lb, elementType(la.v), loc);
+	return lk::GecopyOp::create(b, loc, TypeRange{x.getType()},
+	                            lk::Trans::none, gels->getResult(1), x)
+	    ->getResult(0);
     }
 
     /// The identity used as a value (a result, A^0): formed (gescal 0,
@@ -810,6 +890,8 @@ class Selector
 	    return 0;
 	if (bitEnumContainsAll(p, Properties::spd))
 	    return n * n * n / 3;
+	if (lapack && bitEnumContainsAll(p, Properties::symmetric))
+	    return n * n * n / 3; // L D L^T
 	return 2 * n * n * n / 3;
     }
 
@@ -895,8 +977,13 @@ class Selector
 		auto getrf = lk::GetrfOp::create(
 		    b, loc, TypeRange{m.getType(), pivTy, b.getI64Type()}, m,
 		    piv);
-		f = {Factor::LU, getrf->getResult(0), getrf->getResult(1),
-		     true};
+		// symmetric, not known to be spd: L D L^T (half the flops)
+		bool sym =
+		    lapack && bitEnumContainsAll(p, Properties::symmetric);
+		if (sym)
+		    getrf.setSymmetric(true);
+		f = {Factor::LU, getrf->getResult(0), getrf->getResult(1), true,
+		     sym};
 	    }
 	}
 	factors[m] = f;
@@ -975,9 +1062,12 @@ class Selector
 	    out.push_back({Leaf::TriSolve, f.f, {}, f.lower, f.lower});
 	    out.push_back({Leaf::TriSolve, f.f, {}, !f.lower, f.lower});
 	    break;
-	case Factor::LU:
-	    out.push_back({Leaf::LUSolve, f.f, f.piv, trans, true});
+	case Factor::LU: {
+	    Leaf l{Leaf::LUSolve, f.f, f.piv, trans, true};
+	    l.sym = f.sym;
+	    out.push_back(l);
 	    break;
+	}
 	}
 	return success();
     }
@@ -1159,10 +1249,14 @@ class Selector
 	Type elt = elementType(rhs);
 	int64_t n = cast<RankedTensorType>(rhs.getType()).getDimSize(1);
 	auto trans = s.trans ? lk::Trans::trans : lk::Trans::none;
-	if (s.kind == Leaf::LUSolve)
-	    return lk::GetrsOp::create(b, loc, TypeRange{rhs.getType()},
-	                               lk::Side::left, trans, s.v, s.piv, rhs)
-	        ->getResult(0);
+	if (s.kind == Leaf::LUSolve) {
+	    auto g =
+	        lk::GetrsOp::create(b, loc, TypeRange{rhs.getType()},
+		                    lk::Side::left, trans, s.v, s.piv, rhs);
+	    if (s.sym)
+		g.setSymmetric(true);
+	    return g->getResult(0);
+	}
 	auto uplo = s.lower ? lk::Uplo::lower : lk::Uplo::upper;
 	if (isVector(n))
 	    return lk::TrsvOp::create(b, loc, TypeRange{rhs.getType()}, uplo,
@@ -1191,12 +1285,14 @@ class Selector
     Value
     solveRightInPlace(const Leaf &t, Value x, Location loc)
     {
-	if (t.kind == Leaf::LUSolve)
-	    return lk::GetrsOp::create(
-	               b, loc, TypeRange{x.getType()}, lk::Side::right,
-	               t.trans ? lk::Trans::trans : lk::Trans::none, t.v, t.piv,
-	               x)
-	        ->getResult(0);
+	if (t.kind == Leaf::LUSolve) {
+	    auto g = lk::GetrsOp::create(
+	        b, loc, TypeRange{x.getType()}, lk::Side::right,
+	        t.trans ? lk::Trans::trans : lk::Trans::none, t.v, t.piv, x);
+	    if (t.sym)
+		g.setSymmetric(true);
+	    return g->getResult(0);
+	}
 	return lk::TrsmOp::create(
 	           b, loc, TypeRange{x.getType()}, lk::Side::right,
 	           t.lower ? lk::Uplo::lower : lk::Uplo::upper,
@@ -2292,6 +2388,12 @@ struct UlmLamSelectKernels
     Option<std::string> strategy{*this, "strategy",
                                  llvm::cl::desc("gmc | search | egraph"),
                                  llvm::cl::init("gmc")};
+    Option<bool> lapack{
+        *this, "lapack",
+        llvm::cl::desc("the backend has LAPACK (CBLAS/LAPACK): L D L^T "
+	               "(sytrf) for symmetric matrices not known to be spd, "
+	               "least squares by QR (gels)"),
+        llvm::cl::init(false)};
     void
     runOnOperation() override
     {
@@ -2301,7 +2403,7 @@ struct UlmLamSelectKernels
 	        "implemented");
 	    return signalPassFailure();
 	}
-	if (failed(Selector(getOperation()).run()))
+	if (failed(Selector(getOperation(), lapack).run()))
 	    signalPassFailure();
     }
 };

@@ -291,12 +291,38 @@ def UlmLamk_GetrfOp : Op<UlmLamk_Dialect, "getrf", [
   let summary = "LU factorisation with partial pivoting P A = L U (in place)";
   let description = [{
     `info` is LAPACK's: 0, or i > 0 if U(i-1, i-1) is exactly zero (the
-    matrix is singular).
+    matrix is singular).  With `symmetric`: A symmetric (not positive
+    definite), A = L D L^T by Bunch-Kaufman pivoting (LAPACK's sytrf), half
+    the flops; getrs with `symmetric` solves with it (sytrs).
   }];
-  let arguments = (ins UlmLamk_Shaped:$A, UlmLamk_Pivots:$ipiv);
+  let arguments = (ins UlmLamk_Shaped:$A, UlmLamk_Pivots:$ipiv,
+                       UnitAttr:$symmetric);
   let results = (outs Variadic<AnyRankedTensor>:$result, I64:$info);
   let assemblyFormat = [{
     `outs` `(` $A `,` $ipiv `:` type($A) `,` type($ipiv) `)`
+    attr-dict (`->` type($result)^)?
+  }];
+  let extraClassDeclaration = [{
+    ::mlir::MutableOperandRange getDpsInitsMutable() {
+      return ::mlir::MutableOperandRange(getOperation(), 0, 2);
+    }
+  }];
+}
+
+def UlmLamk_GelsOp : Op<UlmLamk_Dialect, "gels", [
+    DestinationStyleOpInterface,
+    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+    DeclareOpInterfaceMethods<UlmLamk_KernelCostOpInterface>]> {
+  let summary = "least squares by QR: B := the X minimising ||A X - B|| in its leading rows (in place)";
+  let description = [{
+    A (m x n, m >= n) is overwritten by its QR factorisation, B (m x k) by
+    the solution in its leading n rows (LAPACK's gels).  `info` is LAPACK's:
+    0, or i > 0 if R(i-1, i-1) is exactly zero (A has no full column rank).
+  }];
+  let arguments = (ins UlmLamk_Shaped:$A, UlmLamk_Shaped:$B);
+  let results = (outs Variadic<AnyRankedTensor>:$result, I64:$info);
+  let assemblyFormat = [{
+    `outs` `(` $A `,` $B `:` type($A) `,` type($B) `)`
     attr-dict (`->` type($result)^)?
   }];
   let extraClassDeclaration = [{
@@ -316,7 +342,7 @@ def UlmLamk_GetrsOp : UlmLamk_Op<"getrs", "B"> {
   let arguments = (ins
       DefaultValuedAttr<UlmLamk_SideAttr, "::mlir::ulm_lamk::Side::left">:$side,
       UlmLamk_TransAttr:$trans, UlmLamk_Shaped:$LU, UlmLamk_Pivots:$ipiv,
-      UlmLamk_Shaped:$B);
+      UlmLamk_Shaped:$B, UnitAttr:$symmetric);
   let assemblyFormat = [{
     (`side` `(` $side^ `)`)? `trans` `(` $trans `)`
     `ins` `(` $LU `,` $ipiv `:` type($LU) `,` type($ipiv) `)`

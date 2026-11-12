@@ -111,6 +111,36 @@ void ULM_LAM_SYM(dgetrf_)(const ulm_lam_blasint *, const ulm_lam_blasint *,
 void ULM_LAM_SYM(sgetrf_)(const ulm_lam_blasint *, const ulm_lam_blasint *,
                           float *, const ulm_lam_blasint *, ulm_lam_blasint *,
                           ulm_lam_blasint *);
+void ULM_LAM_SYM(dgels_)(const char *, const ulm_lam_blasint *,
+                         const ulm_lam_blasint *, const ulm_lam_blasint *,
+                         double *, const ulm_lam_blasint *, double *,
+                         const ulm_lam_blasint *, double *,
+                         const ulm_lam_blasint *, ulm_lam_blasint *,
+                         std::size_t);
+void ULM_LAM_SYM(sgels_)(const char *, const ulm_lam_blasint *,
+                         const ulm_lam_blasint *, const ulm_lam_blasint *,
+                         float *, const ulm_lam_blasint *, float *,
+                         const ulm_lam_blasint *, float *,
+                         const ulm_lam_blasint *, ulm_lam_blasint *,
+                         std::size_t);
+void ULM_LAM_SYM(dsytrf_)(const char *, const ulm_lam_blasint *, double *,
+                          const ulm_lam_blasint *, ulm_lam_blasint *, double *,
+                          const ulm_lam_blasint *, ulm_lam_blasint *,
+                          std::size_t);
+void ULM_LAM_SYM(ssytrf_)(const char *, const ulm_lam_blasint *, float *,
+                          const ulm_lam_blasint *, ulm_lam_blasint *, float *,
+                          const ulm_lam_blasint *, ulm_lam_blasint *,
+                          std::size_t);
+void ULM_LAM_SYM(dsytrs_)(const char *, const ulm_lam_blasint *,
+                          const ulm_lam_blasint *, const double *,
+                          const ulm_lam_blasint *, const ulm_lam_blasint *,
+                          double *, const ulm_lam_blasint *, ulm_lam_blasint *,
+                          std::size_t);
+void ULM_LAM_SYM(ssytrs_)(const char *, const ulm_lam_blasint *,
+                          const ulm_lam_blasint *, const float *,
+                          const ulm_lam_blasint *, const ulm_lam_blasint *,
+                          float *, const ulm_lam_blasint *, ulm_lam_blasint *,
+                          std::size_t);
 void ULM_LAM_SYM(dgetrs_)(const char *, const ulm_lam_blasint *,
                           const ulm_lam_blasint *, const double *,
                           const ulm_lam_blasint *, const ulm_lam_blasint *,
@@ -715,6 +745,110 @@ getrs(bool trans, bool, I n, I nrhs, const T *LU, I incRowA, I incColA,
     }
     std::vector<T> c = toCol(n, nrhs, B, incRowB, incColB);
     detail::getrs(t, n, nrhs, LU, a.ld, p, c.data(),
+                  static_cast<ulm_lam_blasint>(std::max<I>(n, 1)));
+    fromCol(n, nrhs, c, B, incRowB, incColB);
+}
+
+namespace detail {
+// LAPACK's sytrf with its workspace (queried, then allocated here: LAPACK
+// has no fixed-size variant)
+#define ULM_LAM_SYTRF(T, F, R)                                                 \
+    inline ulm_lam_blasint sytrf(char u, ulm_lam_blasint n, T *A,              \
+                                 ulm_lam_blasint lda, ulm_lam_blasint *p)      \
+    {                                                                          \
+	ulm_lam_blasint info = 0, lwork = -1;                                  \
+	T q = 0;                                                               \
+	ULM_LAM_SYM(F)(&u, &n, A, &lda, p, &q, &lwork, &info, 1);              \
+	lwork = std::max<ulm_lam_blasint>(static_cast<ulm_lam_blasint>(q), 1); \
+	std::vector<T> w(static_cast<std::size_t>(lwork));                     \
+	ULM_LAM_SYM(F)(&u, &n, A, &lda, p, w.data(), &lwork, &info, 1);        \
+	return info;                                                           \
+    }                                                                          \
+    inline void sytrs(char u, ulm_lam_blasint n, ulm_lam_blasint nrhs,         \
+                      const T *A, ulm_lam_blasint lda,                         \
+                      const ulm_lam_blasint *p, T *B, ulm_lam_blasint ldb)     \
+    {                                                                          \
+	ulm_lam_blasint info = 0;                                              \
+	ULM_LAM_SYM(R)(&u, &n, &nrhs, A, &lda, p, B, &ldb, &info, 1);          \
+    }
+#define ULM_LAM_GELS(T, F)                                                     \
+    inline ulm_lam_blasint gels(char t, ulm_lam_blasint m, ulm_lam_blasint n,  \
+                                ulm_lam_blasint k, T *A, ulm_lam_blasint lda,  \
+                                T *B, ulm_lam_blasint ldb)                     \
+    {                                                                          \
+	ulm_lam_blasint info = 0, lwork = -1;                                  \
+	T q = 0;                                                               \
+	ULM_LAM_SYM(F)(&t, &m, &n, &k, A, &lda, B, &ldb, &q, &lwork, &info,    \
+	               1);                                                     \
+	lwork = std::max<ulm_lam_blasint>(static_cast<ulm_lam_blasint>(q), 1); \
+	std::vector<T> w(static_cast<std::size_t>(lwork));                     \
+	ULM_LAM_SYM(F)(&t, &m, &n, &k, A, &lda, B, &ldb, w.data(), &lwork,     \
+	               &info, 1);                                              \
+	return info;                                                           \
+    }
+ULM_LAM_GELS(double, dgels_)
+ULM_LAM_GELS(float, sgels_)
+#undef ULM_LAM_GELS
+ULM_LAM_SYTRF(double, dsytrf_, dsytrs_)
+ULM_LAM_SYTRF(float, ssytrf_, ssytrs_)
+#undef ULM_LAM_SYTRF
+} // namespace detail
+
+// Least squares by QR: A (m x n, m >= n) := its QR factors, B (m x k) := the
+// minimiser of ||A X - B|| in its leading n rows.  A row-major A is the
+// column-major A^T, for which gels with TRANS = 'T' solves the same least
+// squares problem.  B is passed column-major (copied if it is not).
+template <typename I, typename T>
+I
+gels(I m, I n, I k, T *A, I incRowA, I incColA, T *B, I incRowB, I incColB)
+{
+    using namespace detail;
+    Op a = orient(m, n, incRowA, incColA);
+    char t = a.col ? 'N' : 'T';
+    auto M = static_cast<ulm_lam_blasint>(a.col ? m : n);
+    auto N = static_cast<ulm_lam_blasint>(a.col ? n : m);
+    std::vector<T> c = toCol(m, k, B, incRowB, incColB);
+    I info =
+        detail::gels(t, M, N, static_cast<ulm_lam_blasint>(k), A, a.ld,
+	             c.data(), static_cast<ulm_lam_blasint>(std::max<I>(m, 1)));
+    fromCol(m, k, c, B, incRowB, incColB);
+    return info;
+}
+
+// A = L D L^T (Bunch-Kaufman), A symmetric, in place; the triangle of the
+// array that holds the lower triangle of A (row-major: the upper one of the
+// column-major view) is factorised, and sytrs uses the same one.
+template <typename I, typename T, typename P>
+I
+sytrf(I, I n, T *A, I incRowA, I incColA, P *piv, I)
+{
+    using namespace detail;
+    Op a = orient(n, n, incRowA, incColA);
+    std::vector<ulm_lam_blasint> p(n);
+    I info = detail::sytrf(a.col ? 'L' : 'U', static_cast<ulm_lam_blasint>(n),
+                           A, a.ld, p.data());
+    for (std::size_t k = 0; k < p.size(); ++k)
+	piv[k] = static_cast<P>(p[k]);
+    return info;
+}
+
+// B := A^-1 B with the factors of sytrf (A symmetric: trans is irrelevant)
+template <typename I, typename T, typename P>
+void
+sytrs(bool, bool, I n, I nrhs, const T *LDL, I incRowA, I incColA, const P *piv,
+      I, T *B, I incRowB, I incColB)
+{
+    using namespace detail;
+    Op a = orient(n, n, incRowA, incColA),
+       b = orient(n, nrhs, incRowB, incColB);
+    char u = a.col ? 'L' : 'U';
+    std::vector<ulm_lam_blasint> pv(piv, piv + n);
+    if (b.col) {
+	detail::sytrs(u, n, nrhs, LDL, a.ld, pv.data(), B, b.ld);
+	return;
+    }
+    std::vector<T> c = toCol(n, nrhs, B, incRowB, incColB);
+    detail::sytrs(u, n, nrhs, LDL, a.ld, pv.data(), c.data(),
                   static_cast<ulm_lam_blasint>(std::max<I>(n, 1)));
     fromCol(n, nrhs, c, B, incRowB, incColB);
 }

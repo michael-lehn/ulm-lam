@@ -3156,6 +3156,11 @@ what solving it would take.
         \code{info} $= 0$ and still be numerical nonsense for the
         operation that follows (a large growth factor, a matrix close to
         singular, the condition number squared by the normal equations).
+        An example from ulm.lam's own tests: least squares with
+        $X = (1\;2;\;2\;4;\;3\;6;\;4\;8)$, which has rank one.
+        QR returns \code{info} $= 0$, because $R_{22}$ is about
+        $10^{-16}$ and not exactly zero, and the solution is
+        $(5.6\cdot10^{14}, -2.8\cdot10^{14})$.
         So beyond \code{info}, a check mode, switched on by an attribute,
         would follow every method by a corresponding error estimate (a
         condition estimate such as \code{gecon}/\code{pocon}, the
@@ -3166,13 +3171,24 @@ what solving it would take.
         its \code{info} or on the estimate, as for the plans chosen at
         run time), the estimators as kernels, and the knowledge of which
         method follows which, as rules.
-  \item \emph{More factorisations: QR and $LDL\T$.}
-        Least squares with an ill-conditioned $X$ should use QR instead of
-        the normal equations; symmetric indefinite matrices need $LDL\T$.
-        Needed: the kernels (\code{geqrf}, \code{ormqr}, \code{sytrf},
-        \code{sytrs}), rules and lowerings; the CBLAS backend can call
-        LAPACK directly.
-        A matter of time.
+  \item \emph{More factorisations: QR and $LDL\T$} (now done, where the
+        backend has LAPACK).
+        A symmetric matrix that is not known to be spd is factorised as
+        $LDL\T$ (Bunch--Kaufman, LAPACK's \code{sytrf}/\code{sytrs}: half
+        the flops of LU).
+        Least squares is an operation of its own, \code{ulm_lam.lstsq}:
+        Julia's \code{X \textbackslash{} y} with a rectangular $X$, as in
+        Julia itself, and \code{lam.lstsq(X, y)} in Python.
+        It is computed by QR (\code{gels}), not by the normal equations,
+        which square the condition number: for a Vandermonde matrix with
+        condition $1.2\cdot10^8$ the error of the solution is
+        $5.6\cdot10^{-9}$ by QR against $1.6\cdot10^{-2}$ by the normal
+        equations.
+        On ulmBLAS, which has neither, ulm.lam uses LU and the normal
+        equations (\code{ulm-lam-select-kernels\{lapack=false\}}).
+        Still open: QR where the formula is written as the normal
+        equations, $(X\T X)\inv X\T y$; that is a decision about
+        stability, not cost, and belongs to the next item.
   \item \emph{Search over whole programs} (\code{strategy=search}).
         The current selection solves each product optimally (a
         generalised matrix chain) but separately: it shares no

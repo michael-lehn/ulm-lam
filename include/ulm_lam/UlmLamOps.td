@@ -116,6 +116,20 @@ def UlmLam_InverseOp : UlmLam_Op<"inverse"> {
   let hasCanonicalizer = 1;
 }
 
+def UlmLam_LstsqOp : UlmLam_Op<"lstsq"> {
+  let summary = "least squares: the X that minimises ||A X - B|| (A m x n, m >= n, full column rank)";
+  let description = [{
+    What Julia's `A \ B` is for a rectangular A.  Kernel selection computes
+    it by a QR factorisation where the backend has LAPACK (gels), otherwise
+    by the normal equations (A^T A)^-1 A^T B with a Cholesky factorisation.
+  }];
+  let arguments = (ins UlmLam_Matrix:$A, UlmLam_Matrix:$B);
+  let results = (outs UlmLam_Matrix:$result);
+  let assemblyFormat =
+      "$A `,` $B attr-dict `:` type($A) `,` type($B) `->` type($result)";
+  let hasVerifier = 1;
+}
+
 //===----------------------------------------------------------------------===//
 // Constants and assertions
 //===----------------------------------------------------------------------===//
