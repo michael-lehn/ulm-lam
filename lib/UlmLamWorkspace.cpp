@@ -222,7 +222,6 @@ struct UlmLamWorkspace : PassWrapper<UlmLamWorkspace, OperationPass<ModuleOp>>
     {
 	SmallVector<Value> ops;
 	Location loc = call.getLoc();
-	Value c0;
 	for (Value v : call.getOperands()) {
 	    if (auto t = dyn_cast<MemRefType>(v.getType())) {
 		SmallVector<Value> sizes;
@@ -238,10 +237,12 @@ struct UlmLamWorkspace : PassWrapper<UlmLamWorkspace, OperationPass<ModuleOp>>
 			       failure();
 		    sizes.push_back(s);
 		}
-		if (!c0)
-		    c0 = arith::ConstantIndexOp::create(b, loc, 0);
+		// each dummy at its own offset: identical views would be
+		// merged into one value, and a call with the same operand twice
+		// crashes LLVM 23's form-expressions
+		Value off = arith::ConstantIndexOp::create(b, loc, ops.size());
 		ops.push_back(
-		    memref::ViewOp::create(b, loc, t, work, c0, sizes));
+		    memref::ViewOp::create(b, loc, t, work, off, sizes));
 		continue;
 	    }
 	    if (auto a = dyn_cast<BlockArgument>(v);

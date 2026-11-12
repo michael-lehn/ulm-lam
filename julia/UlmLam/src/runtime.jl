@@ -258,7 +258,7 @@ function compile(functions::Vector{LamFunction}; name::AbstractString=string(fun
     eltype in (Float64, Float32) || throw(LamError("eltype must be Float64 or Float32"))
     work = joinpath(ROOT, "build", "julia", name)
     mkpath(work)
-    text, externs = lam_module(functions)
+    text, externs, allfunctions = lam_module(functions)
     # Float32: the same program on f32 (all kernels are generic in it)
     eltype == Float32 && (text = replace(text, "f64" => "f32"))  # (f64 occurs only as a type)
     flags = cxx_flags(backend)
@@ -302,7 +302,8 @@ function compile(functions::Vector{LamFunction}; name::AbstractString=string(fun
     L = Library(lib, src, handle, Dict{Symbol,CompiledFunction}(), externs, decls,
                 Dict{Symbol,Any}(), Workspace(), Any[], eltype)
     codes = info_codes(src)
-    byname = Dict(string(f.name) => f for f in functions)
+    # (the functions they call too: callable from Julia as well)
+    byname = Dict(string(f.name) => f for f in allfunctions)
     for (fname, rows) in ifaces
         haskey(byname, fname) || continue
         fptr = Libdl.dlsym(handle, fname)
@@ -569,8 +570,11 @@ end
 Call the ulm.lam function f with Julia arrays: compiled at the first call,
 for Float64, or for Float32 if all arrays are Float32.
 """
-(f::LamFunction)(args...; work::Union{Workspace,Nothing}=nothing) =
+function (f::LamFunction)(args...; work::Union{Workspace,Nothing}=nothing)
+    # called from another ulm.lam function while it is traced: a call in the IR
+    any(a -> a isa LamValue, args) && return call_lam(f, args)
     library(f, eltype_of(args)).functions[f.name](args...; work=work)
+end
 
 """
     bind!(f; name = g, ...)

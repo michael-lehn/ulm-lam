@@ -1,8 +1,8 @@
 # ULMBLAS_DIR (default ~/git/ulmBLAS) and ARCHFLAGS (default -mcpu=native)
 # select ulmBLAS and its micro kernels, see scripts/ulmblas-env.sh.
-.PHONY: all ods plugin tool check egraph stages loop gls kalman compose cases dynamic gp showcases torch python julia doc clean
+.PHONY: all ods plugin tool check egraph calls stages loop gls kalman compose cases dynamic gp showcases torch python julia doc clean
 
-all: ods plugin check stages loop gls kalman compose cases dynamic python julia doc
+all: ods plugin check stages loop gls kalman compose calls cases dynamic python julia doc
 
 ods:            ## run all mlir-tblgen backends on the dialect sketch
 	scripts/check-ods.sh
@@ -35,6 +35,9 @@ gls:            ## GLS from its ulm.lam normal form: derivation, C++ with ulmBLA
 kalman:         ## formula (1) in a loop with changing y: hoisting, C++ with ulmBLAS, run
 	examples/kalman/check.sh
 	examples/kalman/run.sh
+
+calls:          ## functions calling functions (examples/calls): Julia and Python, the same IR
+	examples/calls/run.sh
 
 compose:        ## functions with workspaces calling such functions: accumulated queries
 	examples/compose/run.sh

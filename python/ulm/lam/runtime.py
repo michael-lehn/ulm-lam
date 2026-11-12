@@ -242,7 +242,7 @@ def compile(functions, name: str | None = None, workdir=None,
     work = Path(workdir) if workdir else ROOT / "build" / "python" / name
     work.mkdir(parents=True, exist_ok=True)
     mlir = work / f"{name}.mlir"
-    text = fe.module(functions)
+    text, all_functions = fe.module_and_functions(functions)
     if dtype == "float32":  # (f64 occurs in the IR only as a type)
         text = text.replace("f64", "f32")
     ext = ".dylib" if sys.platform == "darwin" else ".so"
@@ -290,12 +290,8 @@ def compile(functions, name: str | None = None, workdir=None,
             if old != lib:
                 old.unlink(missing_ok=True)
     # the program's functions and externs, by name
-    prog_fns = {}
-    todo = list(functions)
-    while todo:
-        f = todo.pop()
-        if f.name not in prog_fns:
-            prog_fns[f.name] = f
+    # (also the functions they call: callable from Python too)
+    prog_fns = {f.name: f for f in all_functions}
     library = Library(lib, ifaces, decls, prog_fns, _externs_of(functions),
                       work / f"{name}.cpp", _ELT[dtype])
     library.selected = selected
@@ -733,6 +729,8 @@ class CompiledFunction:
 
     def workspace_size(self, *args) -> int:
         """The workspace this call needs (bytes)."""
+        if not self.has_workspace:  # (it takes no work, info parameters)
+            return 0
         env = self._sizes(args)
         key = tuple(env[x] for x in self.sizes) + tuple(
             a for a in args if isinstance(a, int))

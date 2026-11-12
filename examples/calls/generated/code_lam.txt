@@ -1,0 +1,16 @@
+foo(M::n×n spd, N::n×n spd, y::n)
+  call     z1 ← bar(N, y)                    a ulm.lam function: its part of the workspace
+  call     z2 ← bar(M, z1)                   a ulm.lam function: its part of the workspace
+  return z2
+if a factorisation fails, the call throws InfoError with
+  info 1:  call of bar returned info != 0
+  info 2:  call of bar returned info != 0
+
+bar(M::n×n spd, y::n)
+  potrf    L1 ← chol(M)                      M = L1 L1ᵀ, Cholesky
+  trsv     T1 ← L1⁻¹ y
+  trsv     T1 ← L1⁻ᵀ T1
+  return T1
+if a factorisation fails, the call throws InfoError with
+  info 1:  Cholesky factorisation of M: not positive definite
+
