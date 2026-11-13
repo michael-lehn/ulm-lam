@@ -49,6 +49,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/Dominance.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
@@ -121,6 +122,113 @@ struct ForwardDroppingAssume : OpRewritePattern<AssumeOp>
 // ulm-lam-normalize
 //===----------------------------------------------------------------------===//
 
+/// A loop whose state starts as transpose(P) carries P instead: the body
+/// reads transpose(state) and yields transpose(new state), and the
+/// transposes are pushed to the factors (PushTranspose), where they cost
+/// nothing (a flag of gemm).  The Julia frontend hands every matrix over
+/// transposed (a column-major array is a transposed row-major one); a
+/// loop carrying it so would copy it transposed on entry and exit.
+struct FlipTransposedLoopState : OpRewritePattern<scf::ForOp>
+{
+    using OpRewritePattern::OpRewritePattern;
+
+    static RankedTensorType
+    swapped(Type t)
+    {
+	auto r = cast<RankedTensorType>(t);
+	return RankedTensorType::get({r.getDimSize(1), r.getDimSize(0)},
+	                             r.getElementType());
+    }
+
+    /// x as type t (the same shape): an assume where the properties differ
+    static Value
+    as(PatternRewriter &rw, Location loc, Value x, Type t)
+    {
+	return x.getType() == t
+	           ? x
+		   : AssumeOp::create(rw, loc, t, x, false).getResult();
+    }
+
+    static Value
+    transposed(PatternRewriter &rw, Location loc, Value x, Type t)
+    {
+	Value r = TransposeOp::create(rw, loc, swapped(x.getType()), x);
+	return as(rw, loc, r, t);
+    }
+
+    LogicalResult
+    matchAndRewrite(scf::ForOp loop, PatternRewriter &rw) const override
+    {
+	SmallVector<bool> flip;
+	bool any = false;
+	for (auto [init, arg] :
+	     llvm::zip(loop.getInitArgs(), loop.getRegionIterArgs())) {
+	    auto t = dyn_cast<RankedTensorType>(init.getType());
+	    // (not a state the body declares symmetric: its orientation does
+	    // not matter, P = assume(P, :symmetric) in a Kalman filter)
+	    bool sym = llvm::any_of(arg.getUsers(), [](Operation *u) {
+		auto as = dyn_cast<AssumeOp>(u);
+		if (!as)
+		    return false;
+		auto at = cast<RankedTensorType>(as.getType());
+		return bitEnumContainsAll(
+		    closure(propertiesOf(at), at.getShape()),
+		    Properties::symmetric);
+	    });
+	    bool f = t && t.getRank() == 2 && !sym &&
+	             init.getDefiningOp<TransposeOp>();
+	    flip.push_back(f);
+	    any |= f;
+	}
+	if (!any)
+	    return failure();
+	Location loc = loop.getLoc();
+	SmallVector<Value> inits;
+	for (auto [k, init] : llvm::enumerate(loop.getInitArgs())) {
+	    if (!flip[k]) {
+		inits.push_back(init);
+		continue;
+	    }
+	    Value p = init.getDefiningOp<TransposeOp>().getOperand();
+	    inits.push_back(as(rw, loc, p, swapped(init.getType())));
+	}
+	auto nl = scf::ForOp::create(
+	    rw, loc, loop.getLowerBound(), loop.getUpperBound(), loop.getStep(),
+	    inits, [&](OpBuilder &, Location, Value, ValueRange) {});
+	Block *ob = loop.getBody(), *nb = nl.getBody();
+	IRMapping map;
+	map.map(loop.getInductionVar(), nl.getInductionVar());
+	rw.setInsertionPointToStart(nb);
+	for (auto [k, oa] : llvm::enumerate(loop.getRegionIterArgs())) {
+	    Value na = nl.getRegionIterArgs()[k];
+	    map.map(oa, flip[k] ? transposed(rw, loc, na, oa.getType()) : na);
+	}
+	for (Operation &op : ob->without_terminator())
+	    rw.clone(op, map);
+	auto yield = cast<scf::YieldOp>(ob->getTerminator());
+	SmallVector<Value> ys;
+	for (auto [k, y] : llvm::enumerate(yield.getOperands())) {
+	    Value v = map.lookupOrDefault(y);
+	    ys.push_back(flip[k]
+	                     ? transposed(rw, loc, v,
+			                  nl.getRegionIterArgs()[k].getType())
+			     : v);
+	}
+	// (the builder's empty body has a yield already)
+	if (!nb->empty() && isa<scf::YieldOp>(nb->back()))
+	    rw.eraseOp(&nb->back());
+	scf::YieldOp::create(rw, loc, ys);
+	rw.setInsertionPointAfter(nl);
+	SmallVector<Value> results;
+	for (auto [k, r] : llvm::enumerate(nl.getResults()))
+	    results.push_back(
+	        flip[k] ? transposed(rw, loc, r, loop.getResult(k).getType())
+		        : r);
+	rw.replaceOp(loop, results);
+	return success();
+    }
+};
+
 struct UlmLamNormalize
     : PassWrapper<UlmLamNormalize, OperationPass<func::FuncOp>>
 {
@@ -140,7 +248,8 @@ struct UlmLamNormalize
     {
 	MLIRContext *ctx = &getContext();
 	RewritePatternSet patterns(ctx);
-	patterns.add<ForwardDroppingAssume, FoldAssumeRoundTrip>(ctx);
+	patterns.add<ForwardDroppingAssume, FoldAssumeRoundTrip,
+	             FlipTransposedLoopState>(ctx);
 	MulOp::getCanonicalizationPatterns(patterns, ctx);
 	AddOp::getCanonicalizationPatterns(patterns, ctx);
 	ScaleOp::getCanonicalizationPatterns(patterns, ctx);
@@ -829,6 +938,9 @@ class Selector
     /// collected (leavesOf), and whether they are inverted.
     SmallVector<std::pair<Value, bool>> dynScales;
     bool scalingProduct = false;
+    /// chain() computes the transpose of the product: (F_1 ... F_k)^T =
+    /// F_k^T ... F_1^T (a sum computed transposed, see selectAdd)
+    bool transposedProduct = false;
 
     /// The product of the scalars (arith ops at the insertion point).
     Value
@@ -1924,9 +2036,15 @@ class Selector
 	        closure(propertiesOf(t), t.getShape()), Properties::symmetric);
 	}
 	dynScales.clear();
-	for (Value f : mul.getFactors())
-	    if (failed(leavesOf(f, mul, c.leaves, c.alpha)))
-		return failure();
+	{
+	    SmallVector<Value> fs(mul.getFactors());
+	    if (transposedProduct)
+		std::reverse(fs.begin(), fs.end());
+	    for (Value f : fs)
+		if (failed(
+		        leavesOf(f, mul, c.leaves, c.alpha, transposedProduct)))
+		    return failure();
+	}
 	dynScales.append(extraScales.begin(), extraScales.end());
 	if (dynScales.empty() && expand)
 	    expandFactors(c, mul);
@@ -2300,7 +2418,47 @@ class Selector
 	    else
 		plain.push_back({inner, alpha});
 	}
+	// Mostly transposed terms (a Julia matrix is the transpose of the
+	// row-major value): the sum is computed transposed, S^T = sum of the
+	// transposed terms, so that they need no transposed copy; its users
+	// (products) read S^T transposed (a gemm flag).  R = X W + 1 b^T - Y
+	// becomes R^T = W^T X^T + b 1^T - Y^T, as an expert computes it with
+	// column-major Y.
+	bool flip = false;
+	{
+	    int tr = 0, nt = 0;
+	    for (auto &[v, alpha] : plain)
+		++(v.getDefiningOp<TransposeOp>() ? tr : nt);
+	    auto at = cast<RankedTensorType>(add.getType());
+	    bool sym =
+	        bitEnumContainsAll(closure(propertiesOf(at), at.getShape()),
+		                   Properties::symmetric);
+	    // (a square or dynamic shape: the transposed products have the
+	    // types of the products)
+	    bool square = at.getDimSize(0) == at.getDimSize(1);
+	    // (products, or transposes read by products: R^T ones)
+	    bool users = llvm::all_of(add->getUsers(), [](Operation *u) {
+		return isa<MulOp>(u) ||
+		       (isa<TransposeOp>(u) &&
+		        llvm::all_of(u->getUsers(), [](Operation *w) {
+		            return isa<MulOp>(w);
+		        }));
+	    });
+	    flip = tr > nt && !products.empty() && identities.empty() && !sym &&
+	           square && users && !add->getUsers().empty() && !inBranch;
+	}
 	for (auto &[v, alpha] : plain) {
+	    if (flip) {
+		if (auto t = v.getDefiningOp<TransposeOp>()) {
+		    v = full(t.getOperand()); // S^T needs Y^T: Y itself
+		    continue;
+		}
+		Leaf l;
+		l.v = full(v);
+		l.trans = true;
+		v = untransposed(l, add.getLoc()).v;
+		continue;
+	    }
 	    // a transposed term is copied transposed (O(mn)); an inverse in a
 	    // sum was formed before (formInverses)
 	    if (auto t = v.getDefiningOp<TransposeOp>()) {
@@ -2334,15 +2492,25 @@ class Selector
 		beta = 1;
 	    }
 	}
+	bool savedSandwich = noSandwich;
+	if (flip) {
+	    transposedProduct = true;
+	    noSandwich = true;
+	}
 	for (Product &pr : products) {
 	    MulOp mul = pr.mul;
 	    FailureOr<Value> r = chain(mul, acc, pr.alpha, beta, pr.scales);
-	    if (failed(r))
+	    if (failed(r)) {
+		transposedProduct = false;
+		noSandwich = savedSandwich;
 		return failure();
+	    }
 	    acc = *r;
 	    beta = 1.0;
 	    consumed.insert(mul);
 	}
+	transposedProduct = false;
+	noSandwich = savedSandwich;
 	// (a product without accumulator is emitted at its own position; the
 	// scalars of the identity terms may be defined after it)
 	b.setInsertionPoint(add);
@@ -2364,6 +2532,8 @@ class Selector
 	    if (lower) // the diagonal belongs to the stored triangle too
 		lowerOnly.insert(acc);
 	}
+	if (flip) // S = (S^T)^T: its users read it transposed
+	    return TransposeOp::create(b, loc, acc).getResult();
 	return acc;
     }
 
@@ -2435,6 +2605,18 @@ class Selector
 		op->erase();
 		changed = true;
 	    }
+	}
+	// A transpose that no kernel absorbed (a flag of gemm, trsm, ...) is
+	// a transposed copy.
+	SmallVector<TransposeOp> left;
+	func.walk([&](TransposeOp t) { left.push_back(t); });
+	for (TransposeOp t : left) {
+	    b.setInsertionPoint(t);
+	    Leaf l;
+	    l.v = full(t.getOperand());
+	    l.trans = true;
+	    replace(t, untransposed(l, t.getLoc()).v);
+	    t->erase();
 	}
 	WalkResult res = func.walk([&](Operation *op) {
 	    if (isa<InverseOp>(op)) {
