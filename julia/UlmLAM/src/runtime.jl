@@ -54,8 +54,15 @@ function tool()
     TOOL[] = p
 end
 
-# ulm_lam_jll, once registered: its executable product
-jll_tool() = ""
+"""The executable of ulm_lam_jll if that package is installed, else "".
+(Until ulm_lam_jll is registered and a dependency of UlmLAM, it is found in
+the active environments.)"""
+function jll_tool()
+    id = Base.identify_package("ulm_lam_jll")
+    id === nothing && return ""
+    jll = Base.require(id)
+    Base.invokelatest(() -> String(getfield(jll, :ulm_lam_path)))
+end
 
 """clang-format for the generated C++ (\$LLVM_PREFIX, Homebrew's keg-only LLVM,
 then PATH), or "" if there is none: the C++ is then left unformatted."""
