@@ -160,8 +160,10 @@ work, also combined with products, transposes and solves: sums,
 differences, negation, constant and run-time scalars on either side,
 division by scalars, linear combinations; `julia/UlmLam/test/vectorspace.jl`
 checks 137 such expressions against Julia.  An inverse used as a value
-(`inv(A)` as a result, `inv(S) - I`) is formed by a factorisation and a
-solve with the identity; inside products it is never formed.  A scalar
+(`inv(A)` as a result, `inv(S) - I`) is formed from its factorisation
+(`potri`, `getri`); inside products it is never formed, and a sum with an
+inverse applied to a vector is distributed instead
+(`(C + inv(B)) * x = C * x + B \ x`).  A scalar
 such as `x' * y` comes back as a vector of length 1.
 
 Properties: `symmetric`, `spd` (symmetric positive definite), `spsd`
@@ -195,6 +197,40 @@ trained by gradient descent, written as formulas, is as fast as PyTorch on
 the same BLAS and 5× faster than PyTorch's autograd for a small layer.  On
 a cluster node (96 threads, MKL), GP regression with n = 100 000 runs as
 fast as the same steps written by hand with MKL.
+
+**K-FAC in PyTorch.**  K-FAC (Kronecker-factored approximate curvature) is
+a second-order optimizer: each linear layer's gradient is preconditioned
+with two small matrices, `W ← W − lr (G + γI)⁻¹ ∇W (A + γI)⁻¹`, with
+running averages `A ← ρA + c aᵀa`, `G ← ρG + c gᵀg` of the layer's inputs
+`a` and output gradients `g`.  In
+[`python/examples/kfac.py`](python/examples/kfac.py) these are four
+functions of two or three lines each, the symmetric matrices declared as
+stored in their lower triangle.  ulm.lam turns them into `syrk` with
+run-time α for the running averages, `potrf` + `potri` for the damped
+inverses (every T steps), and for the step the cheapest order of the chain
+`Gi gᵀ a Ai` with `symm`: with a batch smaller than the layer, the
+n × n gradient is never multiplied by an n × n inverse.  Compared with the
+method of [kfac-pytorch](https://github.com/gpauloski/kfac-pytorch)
+(`torch.linalg.inv` of the damped factors, `g_inv @ grad @ a_inv`),
+reproduced operation by operation in float64, and with a version written
+by hand in PyTorch (Cholesky-based inverses, the thin order of the chain);
+Apple M5, PyTorch 2.15 and ulm.lam on Accelerate, the same iterates (to
+1e-14):
+
+| | ulm.lam | kfac-pytorch's method | by hand |
+|:--|--:|--:|--:|
+| one layer, n = 1024, batch 128, T = 10: ms per step | 6.2 | 16.5 (2.7×) | 7.7 (1.3×) |
+| one layer, n = 2048 | 30.6 | 121.2 (4.0×) | 34.1 (1.1×) |
+| MLP (multilayer perceptron) 256-1024-1024-10, K-FAC's part of a step | 14.3 ms | 28.3 ms (2.0×) | 16.1 ms (1.1×) |
+
+The example found three things on the way: a bug in ulm.lam (a run-time
+scalar times a Gram matrix added to a whole matrix missed the upper
+triangle; fixed), completions of symmetric matrices that LAPACK-style
+one-triangle storage makes unnecessary (now kept as one triangle through
+updates, `adddiag` and `potri`), and a race condition in Accelerate's
+multithreaded `dlauum` with `UPLO = 'U'` (wrong inverses from `dpotri`,
+nondeterministically, on macOS 26.6; the CBLAS backend calls it with
+`'L'`).
 
 ## How it works
 

@@ -802,13 +802,31 @@ ULM_LAM_GELS(double, dgels_)
 ULM_LAM_GELS(float, sgels_)
 #undef ULM_LAM_GELS
 // the inverse from the Cholesky factor (potri) and from the LU factors
-// (getri, with its workspace queried as for sytrf)
+// (getri, with its workspace queried as for sytrf).  An upper factor is
+// transposed into a lower one first (n^2 copies): Accelerate's
+// multithreaded dlauum with UPLO = 'U', which dpotri calls, gives wrong
+// results nondeterministically (macOS 26.6; e.g. n = 511, 512, 700), with
+// UPLO = 'L' and single-threaded it is correct.
 #define ULM_LAM_INVERSE(T, P, G)                                               \
     inline ulm_lam_blasint potri(char u, ulm_lam_blasint n, T *A,              \
                                  ulm_lam_blasint lda)                          \
     {                                                                          \
 	ulm_lam_blasint info = 0;                                              \
-	ULM_LAM_SYM(P)(&u, &n, A, &lda, &info, 1);                             \
+	if (u == 'L') {                                                        \
+	    ULM_LAM_SYM(P)(&u, &n, A, &lda, &info, 1);                         \
+	    return info;                                                       \
+	}                                                                      \
+	std::size_t m = static_cast<std::size_t>(n);                           \
+	std::vector<T> l(m * m);                                               \
+	for (std::size_t j = 0; j < m; ++j)                                    \
+	    for (std::size_t i = 0; i <= j; ++i)                               \
+		l[j + i * m] = A[i + j * static_cast<std::size_t>(lda)];       \
+	char lo = 'L';                                                         \
+	ulm_lam_blasint ld = std::max<ulm_lam_blasint>(n, 1);                  \
+	ULM_LAM_SYM(P)(&lo, &n, l.data(), &ld, &info, 1);                      \
+	for (std::size_t j = 0; j < m; ++j)                                    \
+	    for (std::size_t i = 0; i <= j; ++i)                               \
+		A[i + j * static_cast<std::size_t>(lda)] = l[j + i * m];       \
 	return info;                                                           \
     }                                                                          \
     inline ulm_lam_blasint getri(ulm_lam_blasint n, T *A, ulm_lam_blasint lda, \

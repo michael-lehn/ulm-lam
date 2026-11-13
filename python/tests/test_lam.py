@@ -763,8 +763,18 @@ class Selection(unittest.TestCase):
                         R: Matrix(K, K, "spd")):
             return (P.inv + H.T @ R.inv @ H).inv
 
+        @lam.function
+        def running_average(A: InOut(Matrix("n", "n", "spd")),
+                            a: Matrix("B", "n"), rho: Float, c: Float):
+            lam.update(A, rho * A + c * (a.T @ a))
+
+        @lam.function
+        def plus_gram(A: Matrix("n", "n"), a: Matrix("B", "n"), c: Float):
+            return A + c * (a.T @ a)
+
         cls.lib = lam.compile([lora, solve_in_sum, gram_left, inverses,
-                               information], name="selection")
+                               information, running_average, plus_gram],
+                              name="selection")
         cls.r = np.random.default_rng(3)
 
     def spd(self, n):
@@ -809,6 +819,21 @@ class Selection(unittest.TestCase):
         src = self.lib.inverses.cpp
         self.assertIn("potri", src)
         self.assertIn("getri", src)
+
+    def test_gram_with_runtime_scalar(self):
+        """c a^T a with c known at run time: one syrk (alpha = c), whose
+        one triangle is completed before it is added to a whole matrix
+        (K-FAC's running averages; the upper triangle used to miss the
+        update)."""
+        a, M = self.r.standard_normal((5, N)), self.r.standard_normal((N, N))
+        A = self.spd(N)
+        A2 = A.copy()
+        self.lib.running_average(A2, a, 0.9, 0.1)
+        ref = 0.9 * A + 0.1 * a.T @ a
+        self.assertLess(np.abs(A2 - ref).max() / np.abs(ref).max(), 1e-14)
+        ref = M + 0.1 * a.T @ a
+        got = self.lib.plus_gram(M, a, 0.1)
+        self.assertLess(np.abs(got - ref).max() / np.abs(ref).max(), 1e-14)
 
     def test_information_form(self):
         P, H, R = self.spd(N), self.r.standard_normal((K, N)), self.spd(K)

@@ -1,6 +1,6 @@
 # ULMBLAS_DIR (default ~/git/ulmBLAS) and ARCHFLAGS (default -mcpu=native)
 # select ulmBLAS and its micro kernels, see scripts/ulmblas-env.sh.
-.PHONY: all ods plugin tool check egraph egraph-ir egraph-fuzz calls stages loop gls kalman compose cases dynamic gp showcases torch python julia doc clean
+.PHONY: all ods plugin tool check egraph egraph-ir egraph-fuzz calls stages loop gls kalman compose cases dynamic gp showcases torch kfac python julia doc clean
 
 all: ods plugin check stages loop gls kalman compose calls cases dynamic python julia doc
 
@@ -70,6 +70,12 @@ torch:          ## a linear layer trained as formulas against PyTorch (venv buil
 		build/venv-torch/bin/pip install --quiet numpy torch)
 	ULM_LAM_BLAS_LIBS="-framework Accelerate" OPENMP=0 \
 		build/venv-torch/bin/python python/examples/torch_linear.py
+
+kfac:           ## K-FAC (second-order optimizer) as formulas against kfac-pytorch's method (venv build/venv-torch)
+	test -x build/venv-torch/bin/python || (python3 -m venv build/venv-torch && \
+		build/venv-torch/bin/pip install --quiet numpy torch)
+	ULM_LAM_BLAS_LIBS="-framework Accelerate" OPENMP=0 \
+		build/venv-torch/bin/python python/examples/kfac.py
 
 python:         ## the Python frontend: unit tests and the Kalman examples
 	python3 -m unittest discover -s python/tests
