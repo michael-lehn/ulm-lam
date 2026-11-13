@@ -105,6 +105,18 @@ void ULM_LAM_SYM(dpotrf_)(const char *, const ulm_lam_blasint *, double *,
 void ULM_LAM_SYM(spotrf_)(const char *, const ulm_lam_blasint *, float *,
                           const ulm_lam_blasint *, ulm_lam_blasint *,
                           std::size_t);
+void ULM_LAM_SYM(dpotri_)(const char *, const ulm_lam_blasint *, double *,
+                          const ulm_lam_blasint *, ulm_lam_blasint *,
+                          std::size_t);
+void ULM_LAM_SYM(spotri_)(const char *, const ulm_lam_blasint *, float *,
+                          const ulm_lam_blasint *, ulm_lam_blasint *,
+                          std::size_t);
+void ULM_LAM_SYM(dgetri_)(const ulm_lam_blasint *, double *,
+                          const ulm_lam_blasint *, const ulm_lam_blasint *,
+                          double *, const ulm_lam_blasint *, ulm_lam_blasint *);
+void ULM_LAM_SYM(sgetri_)(const ulm_lam_blasint *, float *,
+                          const ulm_lam_blasint *, const ulm_lam_blasint *,
+                          float *, const ulm_lam_blasint *, ulm_lam_blasint *);
 void ULM_LAM_SYM(dgetrf_)(const ulm_lam_blasint *, const ulm_lam_blasint *,
                           double *, const ulm_lam_blasint *, ulm_lam_blasint *,
                           ulm_lam_blasint *);
@@ -789,10 +801,60 @@ namespace detail {
 ULM_LAM_GELS(double, dgels_)
 ULM_LAM_GELS(float, sgels_)
 #undef ULM_LAM_GELS
+// the inverse from the Cholesky factor (potri) and from the LU factors
+// (getri, with its workspace queried as for sytrf)
+#define ULM_LAM_INVERSE(T, P, G)                                               \
+    inline ulm_lam_blasint potri(char u, ulm_lam_blasint n, T *A,              \
+                                 ulm_lam_blasint lda)                          \
+    {                                                                          \
+	ulm_lam_blasint info = 0;                                              \
+	ULM_LAM_SYM(P)(&u, &n, A, &lda, &info, 1);                             \
+	return info;                                                           \
+    }                                                                          \
+    inline ulm_lam_blasint getri(ulm_lam_blasint n, T *A, ulm_lam_blasint lda, \
+                                 const ulm_lam_blasint *p)                     \
+    {                                                                          \
+	ulm_lam_blasint info = 0, lwork = -1;                                  \
+	T q = 0;                                                               \
+	ULM_LAM_SYM(G)(&n, A, &lda, p, &q, &lwork, &info);                     \
+	lwork = std::max<ulm_lam_blasint>(static_cast<ulm_lam_blasint>(q), 1); \
+	std::vector<T> w(static_cast<std::size_t>(lwork));                     \
+	ULM_LAM_SYM(G)(&n, A, &lda, p, w.data(), &lwork, &info);               \
+	return info;                                                           \
+    }
+ULM_LAM_INVERSE(double, dpotri_, dgetri_)
+ULM_LAM_INVERSE(float, spotri_, sgetri_)
+#undef ULM_LAM_INVERSE
 ULM_LAM_SYTRF(double, dsytrf_, dsytrs_)
 ULM_LAM_SYTRF(float, ssytrf_, ssytrs_)
 #undef ULM_LAM_SYTRF
 } // namespace detail
+
+// A^-1 from the Cholesky factor of potrf (same uplo and strides), in place:
+// the uplo triangle of A^-1
+template <typename I, typename T>
+I
+potri(bool lower, I n, T *A, I incRowA, I incColA)
+{
+    using namespace detail;
+    Op a = orient(n, n, incRowA, incColA);
+    bool lo = triangle(lower, n, incRowA, incColA) == Lower;
+    return detail::potri(lo ? 'L' : 'U', static_cast<ulm_lam_blasint>(n), A,
+                         a.ld);
+}
+
+// A^-1 from the factors of getrf (same strides), in place.  A row-major A
+// was factorised as the column-major A^T, whose inverse, read row-major, is
+// A^-1.
+template <typename I, typename T, typename P>
+I
+getri(I n, T *A, I incRowA, I incColA, const P *piv, I)
+{
+    using namespace detail;
+    Op a = orient(n, n, incRowA, incColA);
+    std::vector<ulm_lam_blasint> pv(piv, piv + n);
+    return detail::getri(static_cast<ulm_lam_blasint>(n), A, a.ld, pv.data());
+}
 
 // Least squares by QR: A (m x n, m >= n) := its QR factors, B (m x k) := the
 // minimiser of ||A X - B|| in its leading n rows.  A row-major A is the

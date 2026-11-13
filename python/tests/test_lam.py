@@ -731,6 +731,93 @@ class WithNumPy(unittest.TestCase):
 
 
 @unittest.skipIf(np is None, "NumPy is not installed")
+class Selection(unittest.TestCase):
+    """Plans found by comparing the selection with an e-graph
+    (experiments/egraph/lamp_fuzz.py): a product with a sum as a factor is
+    distributed where that is cheaper, a Gram matrix inside a longer product
+    is a syrk, and an inverse used as a value is formed by potri / getri."""
+
+    @classmethod
+    def setUpClass(cls):
+        @lam.function
+        def lora(W: Matrix("n", "n"), B: Matrix("n", "r"),
+                 A: Matrix("r", "n"), x: Vector("n")):
+            return (W + B @ A) @ x
+
+        @lam.function
+        def solve_in_sum(C: Matrix(N, N), B: Matrix(N, N, "non_singular"),
+                         D: Matrix(N, K), u: Vector(K)):
+            return (C + B.T.inv) @ D @ u
+
+        @lam.function
+        def gram_left(A: Matrix(K, N), B: Matrix(K, K)):
+            return A @ A.T @ B
+
+        @lam.function
+        def inverses(S: Matrix(N, N, "spd"), A: Matrix(N, N, "non_singular"),
+                     C: Matrix(N, N)):
+            return S.inv, A.inv, C + A.inv.T
+
+        @lam.function
+        def information(P: Matrix(N, N, "spd"), H: Matrix(K, N),
+                        R: Matrix(K, K, "spd")):
+            return (P.inv + H.T @ R.inv @ H).inv
+
+        cls.lib = lam.compile([lora, solve_in_sum, gram_left, inverses,
+                               information], name="selection")
+        cls.r = np.random.default_rng(3)
+
+    def spd(self, n):
+        a = self.r.standard_normal((n, n))
+        return a @ a.T + n * np.eye(n)
+
+    def test_lora_distributed(self):
+        for n, r in ((60, 4), (8, 30)):
+            W, B = self.r.standard_normal((n, n)), self.r.standard_normal((n, r))
+            A, x = self.r.standard_normal((r, n)), self.r.standard_normal(n)
+            ref = (W + B @ A) @ x
+            got = self.lib.lora(W, B, A, x).ravel()
+            self.assertLess(np.abs(got - ref).max() / np.abs(ref).max(), 1e-12)
+        # W x + B (A x): no n x n product is formed
+        self.assertNotIn("gemm", self.lib.lora.cpp)
+
+    def test_solve_in_sum_needs_no_inverse(self):
+        C, B = self.r.standard_normal((N, N)), self.spd(N)
+        D, u = self.r.standard_normal((N, K)), self.r.standard_normal(K)
+        ref = (C + np.linalg.inv(B.T)) @ D @ u
+        got = self.lib.solve_in_sum(C, B, D, u).ravel()
+        self.assertLess(np.abs(got - ref).max() / np.abs(ref).max(), 1e-10)
+        self.assertNotIn("getri", self.lib.solve_in_sum.cpp)
+
+    def test_gram_inside_product(self):
+        A, B = self.r.standard_normal((K, N)), self.r.standard_normal((K, K))
+        ref = A @ A.T @ B
+        got = self.lib.gram_left(A, B)
+        self.assertLess(np.abs(got - ref).max() / np.abs(ref).max(), 1e-12)
+        src = self.lib.gram_left.cpp
+        self.assertRegex(src, r"syrk|sylrk")   # one triangle
+        self.assertRegex(src, r"symm|sylmm")   # read by symm
+
+    def test_explicit_inverses(self):
+        S, A, C = self.spd(N), self.r.standard_normal((N, N)), \
+            self.r.standard_normal((N, N))
+        si, ai, s = self.lib.inverses(S, A, C)
+        for got, ref in ((si, np.linalg.inv(S)), (ai, np.linalg.inv(A)),
+                         (s, C + np.linalg.inv(A).T)):
+            self.assertLess(np.abs(got - ref).max() / np.abs(ref).max(),
+                            1e-9)
+        src = self.lib.inverses.cpp
+        self.assertIn("potri", src)
+        self.assertIn("getri", src)
+
+    def test_information_form(self):
+        P, H, R = self.spd(N), self.r.standard_normal((K, N)), self.spd(K)
+        ref = np.linalg.inv(np.linalg.inv(P) + H.T @ np.linalg.solve(R, H))
+        got = self.lib.information(P, H, R)
+        self.assertLess(np.abs(got - ref).max() / np.abs(ref).max(), 1e-10)
+
+
+@unittest.skipIf(np is None, "NumPy is not installed")
 class Identity(unittest.TestCase):
     """alpha * I in sums (lam.eye), alpha a constant or a Float parameter
     known at run time: added to the diagonal (adddiag), never formed."""

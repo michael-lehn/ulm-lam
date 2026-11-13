@@ -182,6 +182,29 @@ end
     @test_throws LamError UlmLam.lam_module([@lam bad_upd(A::Mat(:n, :n), y::Vec(:n)) = update!(y, A * y)])
 end
 
+@testset "selection: distribution, Gram, explicit inverses" begin
+    @lam lora(W::Mat(:n, :n), B::Mat(:n, :r), A::Mat(:r, :n), x::Vec(:n)) = (W + B * A) * x
+    @lam gramleft(A::Mat(:k, :n), B::Mat(:k, :k)) = A * A' * B
+    @lam invs(S::Mat(:n, :n, :spd), A::Mat(:n, :n), C::Mat(:n, :n)) = (inv(S), inv(A), C + inv(A)')
+    @lam information(P::Mat(:n, :n, :spd), H::Mat(:k, :n), R::Mat(:k, :k, :spd)) =
+        inv(inv(P) + H' * inv(R) * H)
+    for backend in (:julia, :ulmblas, :cblas)
+        lib = UlmLam.compile([lora, gramleft, invs, information]; name="selection_$backend",
+                             backend=backend)
+        W, B, A, x = randn(50, 50), randn(50, 3), randn(3, 50), randn(50)
+        @test rel(lib.lora(W, B, A, x), (W + B * A) * x) < 1e-12
+        @test !occursin("gemm", cpp(lib.lora))          # W x + B (A x)
+        A2, B2 = randn(5, 40), randn(5, 5)
+        @test rel(lib.gramleft(A2, B2), A2 * A2' * B2) < 1e-12
+        S, M, C = spd(30), randn(30, 30), randn(30, 30)
+        si, ai, s = lib.invs(S, M, C)
+        @test rel(si, inv(S)) < 1e-10 && rel(ai, inv(M)) < 1e-9 && rel(s, C + inv(M)') < 1e-9
+        @test occursin("potri", cpp(lib.invs)) && occursin("getri", cpp(lib.invs))
+        P, H, R = spd(30), randn(4, 30), spd(4)
+        @test rel(lib.information(P, H, R), inv(inv(P) + H' * (R \ H))) < 1e-10
+    end
+end
+
 @testset "frontend" begin
     @test_throws LamError Mat(3, 3, :spdd)
     @lam bad(A::Mat(3, 4), B::Mat(3, 4)) = A * B

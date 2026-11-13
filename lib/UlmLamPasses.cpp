@@ -55,6 +55,7 @@
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/Support/SaveAndRestore.h"
 
 #include <limits>
 #include <map>
@@ -461,6 +462,8 @@ class Selector
     }
     /// expandFactors: computed factors of a product may be expanded
     bool expand = true;
+    /// distribute: a product with a sum as a factor may be distributed
+    bool distributeSums = true;
     /// The backend has LAPACK (CBLAS/LAPACK): L D L^T (sytrf) for symmetric
     /// matrices that are not known to be spd, instead of LU; least squares
     /// by QR (gels) instead of the normal equations.
@@ -471,6 +474,8 @@ class Selector
     {
 	if (!lapack)
 	    normalEquations();
+	if (distributeSums)
+	    distribute();
 	formIdentities();
 	formInverses();
 	SmallVector<Operation *> ops;
@@ -508,6 +513,24 @@ class Selector
 	    if (auto m = dyn_cast<MulOp>(op))
 		origin[*r] = m;
 	    replace(op, *r);
+	}
+	// identities formed for inverses that became explicit (adddiag 1 on
+	// gescal 0 on tensor.empty): erased once unused
+	for (Value e : unusedIdentities) {
+	    // (the replaced product A^-1 E itself)
+	    for (Operation *u : llvm::make_early_inc_range(e.getUsers()))
+		if (isa<MulOp>(u) && u->use_empty())
+		    eraseDead(u);
+	    while (e && e.use_empty()) {
+		Operation *d = e.getDefiningOp();
+		if (!d || !isa<lk::AdddiagOp, lk::GescalOp, tensor::EmptyOp>(d))
+		    break;
+		Value next;
+		if (auto dps = dyn_cast<DestinationStyleOpInterface>(d))
+		    next = dps.getDpsInits()[0];
+		d->erase();
+		e = next;
+	    }
 	}
 	// A loop-carried value that is not computed in the buffer of its
 	// iteration argument (x = F x cannot be in place) is copied into it at
@@ -785,6 +808,233 @@ class Selector
 	}
     }
 
+    // ---- distributivity -----------------------------------------------------
+
+    /// The cost of a product by the generalised matrix chain at the current
+    /// sample sizes (a sum among its factors counts as formed); kInf if it
+    /// has no plan.
+    /// Leaves for costing only: no factorisation is created (it would be
+    /// on values not selected yet, whose types may still change).
+    bool dryRun = false;
+
+    /// The factorisation factorise would choose for m, standing for it.
+    Factor
+    kindOfFactor(Value m)
+    {
+	auto it = factors.find(m);
+	if (it != factors.end())
+	    return it->second;
+	auto t = cast<RankedTensorType>(m.getType());
+	Properties p = closure(propertiesOf(t), t.getShape());
+	bool lo = bitEnumContainsAll(p, Properties::lower_tri),
+	     up = bitEnumContainsAll(p, Properties::upper_tri);
+	if (lo || up)
+	    return {Factor::Triangular, m, {}, lo};
+	if (bitEnumContainsAll(p, Properties::spd))
+	    return {Factor::Cholesky, m, {}, true};
+	return {Factor::LU, m, m, true,
+	        lapack && bitEnumContainsAll(p, Properties::symmetric)};
+    }
+
+    double
+    productCost(MulOp m)
+    {
+	llvm::SaveAndRestore<bool> dry(dryRun, true);
+	Chain c;
+	SmallVector<std::pair<Value, bool>> saved = std::move(dynScales);
+	dynScales.clear();
+	bool ok = true;
+	for (Value f : m.getFactors())
+	    if (failed(leavesOf(f, m, c.leaves, c.alpha))) {
+		ok = false;
+		break;
+	    }
+	dynScales = std::move(saved);
+	if (!ok || c.leaves.empty())
+	    return kInf;
+	solveChain(c, m);
+	return c.cost[0][c.leaves.size() - 1];
+    }
+
+    double
+    sizeOf(Value v, unsigned d)
+    {
+	return sz(dimOf(v, d));
+    }
+
+    /// A term of a sum without its constant scales: (scales, the term).
+    static std::pair<SmallVector<Value>, Value>
+    unscaled(Value t)
+    {
+	SmallVector<Value> scales;
+	while (auto sc = t.getDefiningOp<ScaleOp>()) {
+	    scales.push_back(sc.getAlpha());
+	    t = sc.getOperand();
+	}
+	return {scales, t};
+    }
+
+    /// The cost of forming a term of a sum (a product, or an inverse as a
+    /// solve with the identity), plus adding it.
+    double
+    termCost(Value t)
+    {
+	Value u = unscaled(t).second;
+	double add = sizeOf(t, 0) * sizeOf(t, 1);
+	if (auto m = u.getDefiningOp<MulOp>())
+	    return productCost(m) + add;
+	if (auto tr = u.getDefiningOp<TransposeOp>())
+	    u = tr.getOperand();
+	if (auto inv = u.getDefiningOp<InverseOp>()) {
+	    auto ty = cast<RankedTensorType>(inv.getOperand().getType());
+	    Properties p = closure(propertiesOf(ty), ty.getShape());
+	    double n = sizeOf(u, 0);
+	    bool tri = bitEnumContainsAll(p, Properties::lower_tri) ||
+	               bitEnumContainsAll(p, Properties::upper_tri);
+	    // (formInverses: potri, getri, or triangular solves with the
+	    // identity; the factorisation is shared with solves)
+	    double f = tri                                      ? 1.0
+	               : bitEnumContainsAll(p, Properties::spd) ? 1.0 / 3.0
+	                                                        : 4.0 / 3.0;
+	    return f * n * n * n + add;
+	}
+	return add;
+    }
+
+    /// L (T_1 + ... + T_k) R = L T_1 R + ... + L T_k R when that is
+    /// cheaper and a term is computed (never for a sum of given matrices,
+    /// whose parentheses may be set for accuracy): a sum applied to a
+    /// vector or a narrow matrix, as the
+    /// adapted weight of LoRA, (W + B A) x = W x + B (A x), or a solve
+    /// inside a sum, (C + B^-1) x = C x + B^-1 x, which then needs no
+    /// explicit inverse.  Both sides are costed by the generalised matrix
+    /// chain at the sample sizes of plansOf (all must agree, so with sizes
+    /// known only at run time a distribution is never wrong by much); the
+    /// sum must have no other use (otherwise it is formed anyway).
+    void
+    distribute()
+    {
+	SmallVector<MulOp> work;
+	func.walk([&](MulOp m) { work.push_back(m); });
+	while (!work.empty()) {
+	    MulOp m = work.pop_back_val();
+	    auto factors = llvm::to_vector(m.getFactors());
+	    for (auto [i, f] : llvm::enumerate(factors)) {
+		auto add = f.getDefiningOp<AddOp>();
+		if (!add || !add->hasOneUse())
+		    continue;
+		// (a scaled identity is adddiag, already cheap; a run-time
+		// scale stays with the sum)
+		bool plain = llvm::all_of(add.getTerms(), [](Value t) {
+		    auto [scales, u] = unscaled(t);
+		    if (u.getDefiningOp<IdentityOp>())
+			return false;
+		    return llvm::all_of(scales, [](Value s) {
+			return matchPattern(s, m_Constant());
+		    });
+		});
+		// a sum of given matrices, A (B - C) x, stays formed: its
+		// parentheses may have been set for accuracy (B - C exact or
+		// nearly so when B and C are close; A B x - A C x subtracts
+		// rounded products).  Only a sum with a computed term (a
+		// product, an inverse) is distributed.
+		bool computedTerm = llvm::any_of(add.getTerms(), [](Value t) {
+		    Value u = unscaled(t).second;
+		    if (auto tr = u.getDefiningOp<TransposeOp>())
+			u = tr.getOperand();
+		    return u.getDefiningOp<MulOp>() ||
+		           u.getDefiningOp<InverseOp>();
+		});
+		if (!plain || !computedTerm)
+		    continue;
+		// the distributed products, built before m (erased if not
+		// cheaper)
+		b.setInsertionPoint(m);
+		Location loc = m.getLoc();
+		auto rt = cast<RankedTensorType>(m.getType());
+		Type plainTy = stripProperties(rt);
+		SmallVector<Value> terms;
+		SmallVector<Operation *> created;
+		SmallVector<MulOp> products;
+		for (Value t : add.getTerms()) {
+		    auto [scales, u] = unscaled(t);
+		    SmallVector<Value> fs(factors.begin(), factors.begin() + i);
+		    if (auto um = u.getDefiningOp<MulOp>())
+			llvm::append_range(fs, um.getFactors());
+		    else
+			fs.push_back(u);
+		    fs.append(factors.begin() + i + 1, factors.end());
+		    auto p = MulOp::create(b, loc, TypeRange{plainTy}, fs);
+		    created.push_back(p);
+		    products.push_back(p);
+		    Value v = p.getResult();
+		    for (Value s : llvm::reverse(scales)) {
+			auto sc =
+			    ScaleOp::create(b, loc, TypeRange{plainTy}, s, v);
+			created.push_back(sc);
+			v = sc.getResult();
+		    }
+		    terms.push_back(v);
+		}
+		// the sizes known only at run time, sampled as in plansOf
+		llvm::SetVector<Value> syms;
+		auto collect = [&](Value v) {
+		    for (unsigned d = 0; d < 2; ++d)
+			if (auto s = dyn_cast_if_present<Value>(dimOf(v, d)))
+			    syms.insert(s);
+		};
+		for (MulOp p : products)
+		    for (Value g : p.getFactors())
+			collect(g);
+		bool cheaper = syms.size() <= 4;
+		unsigned masks = 1u << syms.size();
+		for (unsigned mask = 0; cheaper && mask < masks; ++mask) {
+		    sample.clear();
+		    for (auto [k, v] : llvm::enumerate(syms))
+			sample[v] = (mask >> k) & 1 ? 1000.0 : 10.0;
+		    double keep = productCost(m);
+		    for (Value t : add.getTerms())
+			keep += termCost(t);
+		    double dist = 0;
+		    for (MulOp p : products)
+			dist += productCost(p) + sizeOf(m, 0) * sizeOf(m, 1);
+		    cheaper = dist < keep;
+		}
+		sample.clear();
+		if (!cheaper) {
+		    for (Operation *op : llvm::reverse(created))
+			op->erase();
+		    continue;
+		}
+		Value sum = AddOp::create(b, loc, TypeRange{rt}, terms);
+		m.getResult().replaceAllUsesWith(sum);
+		m->erase();
+		if (add->use_empty())
+		    eraseDead(add);
+		for (MulOp p : products)
+		    work.push_back(p);
+		break;
+	    }
+	}
+    }
+
+    /// Erases op and the ulm_lam ops that only it used.
+    static void
+    eraseDead(Operation *op)
+    {
+	SmallVector<Value> operands(op->getOperands());
+	op->erase();
+	for (Value v : operands)
+	    if (Operation *d = v.getDefiningOp();
+	        d && v.use_empty() && isUlmLamOp(d) && d->use_empty())
+		eraseDead(d);
+    }
+
+    /// The identities formed by formInverses: A^-1 = A^-1 E.
+    llvm::SmallPtrSet<Value, 4> identityRhs;
+    /// ... not needed by an explicit inverse (erased at the end of run).
+    SmallVector<Value> unusedIdentities;
+
     /// An inverse used as a value (a result, a term of a sum, a loop's
     /// value), not as a factor of a product: inv(A) = inv(A) * E with E
     /// the identity, formed (gescal 0, adddiag 1), so that it is a solve
@@ -823,6 +1073,7 @@ class Selector
 	    e = lk::AdddiagOp::create(b, loc, TypeRange{e.getType()},
 	                              constant(elt, 1.0, loc), e)
 	            ->getResult(0);
+	    identityRhs.insert(e);
 	    Value m =
 	        MulOp::create(b, loc, TypeRange{v.getType()}, ValueRange{v, e})
 	            .getResult();
@@ -1210,7 +1461,9 @@ class Selector
 		    return failure();
 	    return success();
 	}
-	Factor f = factorise(v);
+	// (costing only, see distribute: the kind of factorisation without
+	// creating it; the leaves stand for v)
+	Factor f = dryRun ? kindOfFactor(v) : factorise(v);
 	switch (f.kind) {
 	case Factor::Triangular:
 	    out.push_back({Leaf::TriSolve, f.f, {}, trans, f.lower});
@@ -1400,7 +1653,10 @@ class Selector
 	            {},
 	            c.choice[i][j].trans,
 	            true};
-	return {Leaf::Mat, emit(c, i, j, {}, 1, 0, loc), {}, false, true};
+	Leaf r{Leaf::Mat, emit(c, i, j, {}, 1, 0, loc), {}, false, true};
+	if (lowerOnly.contains(r.v)) // a Gram matrix, one triangle (syrk)
+	    r.stored = Leaf::Lower;
+	return r;
     }
 
     Value
@@ -1689,12 +1945,15 @@ class Selector
 	    // one (C = beta C + alpha Z^T Z, e.g. K** - V^T V): syrk computes
 	    // one triangle (half the flops of gemm); the result is passed on
 	    // as stored in its lower triangle (lower_stored, see replace)
+	    // (also a part of a longer product, A A^T B: its one triangle is
+	    // read by symm, or completed for kernels that read the whole
+	    // matrix; see operand)
 	    bool top = i == 0 && j + 1 == static_cast<int>(c.leaves.size());
 	    bool fresh =
 	        beta == 0 && (!dest || dest.getDefiningOp<tensor::EmptyOp>());
 	    bool update = beta != 0 && dest && symmetricAcc(dest);
-	    if (top && !inBranch && z.stored == Leaf::Full &&
-	        (fresh || update)) {
+	    if (!inBranch && z.stored == Leaf::Full &&
+	        (fresh || (top && update))) {
 		Type elt = elementType(z.v);
 		if (!dest) {
 		    Leaf zt = z;
@@ -2147,6 +2406,39 @@ class Selector
 	return any;
     }
 
+    /// A^-1 E with E an identity of formInverses (an inverse used as a
+    /// value) formed explicitly from the factorisation of A, shared with
+    /// the solves with A: potri (Cholesky; the other triangle completed),
+    /// 2 n^3 / 3 flops with potrf, or getri (LU), 2 n^3 with getrf; solving
+    /// with the identity costs 7 n^3 / 3 and 8 n^3 / 3.  (Triangular
+    /// matrices, L D L^T and transposed LU factors: solved with E.)
+    std::optional<Value>
+    explicitInverse(Chain &c, Location loc)
+    {
+	auto &L = c.leaves;
+	if (L.empty() || L.back().kind != Leaf::Mat ||
+	    !identityRhs.contains(L.back().v))
+	    return std::nullopt;
+	if (L.size() == 3 && L[0].kind == Leaf::TriSolve &&
+	    L[1].kind == Leaf::TriSolve && L[0].v == L[1].v &&
+	    L[0].trans != L[1].trans) {
+	    // only a Cholesky factor appears twice, as L^-T L^-1
+	    auto uplo = L[0].lower ? lk::Uplo::lower : lk::Uplo::upper;
+	    Value x = lk::PotriOp::create(b, loc, TypeRange{L[0].v.getType()},
+	                                  uplo, L[0].v)
+	                  ->getResult(0);
+	    return lk::SycompleteOp::create(b, loc, TypeRange{x.getType()},
+	                                    uplo, x)
+	        ->getResult(0);
+	}
+	if (L.size() == 2 && L[0].kind == Leaf::LUSolve && !L[0].sym &&
+	    !L[0].trans)
+	    return lk::GetriOp::create(b, loc, TypeRange{L[0].v.getType()},
+	                               L[0].piv, L[0].v)
+	        ->getResult(0);
+	return std::nullopt;
+    }
+
     /// beta * dest + alpha * (product), dest null: a new value.
     FailureOr<Value>
     chain(MulOp mul, Value dest, double alpha, double beta,
@@ -2224,6 +2516,18 @@ class Selector
 	    if (!dest)
 		return x;
 	    return accumulate(x, dest, 1.0, beta, mul.getLoc());
+	}
+	if (dynScales.empty()) {
+	    if (!dest)
+		b.setInsertionPoint(mul);
+	    if (std::optional<Value> x = explicitInverse(c, mul.getLoc())) {
+		Value r = *x;
+		unusedIdentities.push_back(c.leaves.back().v);
+		if (r.getType() != mul.getType())
+		    r = AssumeOp::create(b, mul.getLoc(), mul.getType(), r,
+		                         false);
+		return accumulate(r, dest, alpha * c.alpha, beta, mul.getLoc());
+	    }
 	}
 	SmallVector<Plan> plans = plansOf(c, mul);
 	int k = c.leaves.size();
@@ -2800,6 +3104,11 @@ struct UlmLamSelectKernels
 	               "by its factors where that is cheaper (K H P with "
 	               "K = P H^T S^-1: syrk)"),
         llvm::cl::init(true)};
+    Option<bool> distributeSums{
+        *this, "distribute",
+        llvm::cl::desc("a product with a sum as a factor may be distributed "
+	               "where that is cheaper ((W + B A) x = W x + B (A x))"),
+        llvm::cl::init(true)};
     void
     runOnOperation() override
     {
@@ -2809,7 +3118,9 @@ struct UlmLamSelectKernels
 	        "implemented");
 	    return signalPassFailure();
 	}
-	if (failed(Selector(getOperation(), lapack, expandFactors).run()))
+	Selector sel(getOperation(), lapack, expandFactors);
+	sel.distributeSums = distributeSums;
+	if (failed(sel.run()))
 	    signalPassFailure();
     }
 };

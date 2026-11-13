@@ -923,6 +923,8 @@ ULM_LAMK_COMMON(AdddiagOp)
 ULM_LAMK_COMMON(GecopyOp)
 ULM_LAMK_COMMON(SymvOp)
 ULM_LAMK_COMMON(SycompleteOp)
+ULM_LAMK_COMMON(PotriOp)
+ULM_LAMK_COMMON(GetriOp)
 #undef ULM_LAMK_COMMON
 
 #define ULM_LAMK_GENERAL(OP)                                                   \
@@ -943,6 +945,7 @@ ULM_LAMK_GENERAL(GescalOp)
 ULM_LAMK_GENERAL(AdddiagOp)
 ULM_LAMK_GENERAL(GecopyOp)
 ULM_LAMK_GENERAL(SymvOp)
+ULM_LAMK_GENERAL(GetriOp)
 #undef ULM_LAMK_GENERAL
 
 ::mlir::ulm_lam::Properties
@@ -984,6 +987,8 @@ ULM_LAMK_VERIFY_DPS(AdddiagOp)
 ULM_LAMK_VERIFY_DPS(GecopyOp)
 ULM_LAMK_VERIFY_DPS(SymvOp)
 ULM_LAMK_VERIFY_DPS(SycompleteOp)
+ULM_LAMK_VERIFY_DPS(PotriOp)
+ULM_LAMK_VERIFY_DPS(GetriOp)
 #undef ULM_LAMK_VERIFY_DPS
 
 LogicalResult
@@ -1102,6 +1107,28 @@ mlir::ulm_lamk::PotrfOp::estimateFlops(const SizeAssignment &)
     if (anyDynamic({n}))
 	return failure();
     return 1.0 * n * n * n / 3.0;
+}
+FailureOr<double>
+mlir::ulm_lamk::PotriOp::estimateFlops(const SizeAssignment &)
+{
+    auto [n, n2] = shapeOf(getA());
+    if (anyDynamic({n}))
+	return failure();
+    return 1.0 * n * n * n / 3.0; // trtri and lauum, n^3 / 6 each
+}
+::mlir::ulm_lam::Properties
+mlir::ulm_lamk::PotriOp::inferResultProperties(
+    unsigned, ArrayRef<::mlir::ulm_lam::Properties>)
+{
+    return P::spd; // (in the uplo triangle)
+}
+FailureOr<double>
+mlir::ulm_lamk::GetriOp::estimateFlops(const SizeAssignment &)
+{
+    auto [n, n2] = shapeOf(getA());
+    if (anyDynamic({n}))
+	return failure();
+    return 4.0 * n * n * n / 3.0;
 }
 FailureOr<double>
 mlir::ulm_lamk::GetrfOp::estimateFlops(const SizeAssignment &)
@@ -1264,9 +1291,9 @@ mlir::ulm_lam::registerBufferizationModels(DialectRegistry &registry)
     registry.addExtension(+[](MLIRContext *ctx, ulm_lamk::UlmLamkDialect *) {
 	using namespace mlir::ulm_lamk;
 	attachAll<GemmOp, GemmtrOp, SymmOp, TrmmOp, TrsmOp, SyrkOp, GemvOp,
-	          SymvOp, SycompleteOp, TrsvOp, PotrfOp, GetrfOp, GelsOp,
-	          GetrsOp, GeaxpyOp, GescalOp, AdddiagOp, GecopyOp, CallOp>(
-	    ctx);
+	          SymvOp, SycompleteOp, TrsvOp, PotrfOp, PotriOp, GetrfOp,
+	          GetriOp, GelsOp, GetrsOp, GeaxpyOp, GescalOp, AdddiagOp,
+	          GecopyOp, CallOp>(ctx);
     });
 }
 

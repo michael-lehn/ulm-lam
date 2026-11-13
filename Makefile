@@ -1,6 +1,6 @@
 # ULMBLAS_DIR (default ~/git/ulmBLAS) and ARCHFLAGS (default -mcpu=native)
 # select ulmBLAS and its micro kernels, see scripts/ulmblas-env.sh.
-.PHONY: all ods plugin tool check egraph egraph-ir calls stages loop gls kalman compose cases dynamic gp showcases torch python julia doc clean
+.PHONY: all ods plugin tool check egraph egraph-ir egraph-fuzz calls stages loop gls kalman compose cases dynamic gp showcases torch python julia doc clean
 
 all: ods plugin check stages loop gls kalman compose calls cases dynamic python julia doc
 
@@ -18,12 +18,16 @@ check: tool     ## the pass tests in test/ (lit, FileCheck; lit from PyPI into b
 	build/venv-lit/bin/lit -sv test
 
 egraph:         ## equality saturation experiment (egglog, experiments/egraph; Python 3.12)
-	@test -x build/venv-egglog/bin/python || (python3.12 -m venv build/venv-egglog && build/venv-egglog/bin/pip install -q egglog numpy)
+	@test -x build/venv-egglog/bin/python || (python3.12 -m venv build/venv-egglog && build/venv-egglog/bin/pip install -q egglog numpy scipy)
 	build/venv-egglog/bin/python experiments/egraph/lamp_egraph.py
 
 egraph-ir: tool  ## e-graph vs. ulm.lam's selection on problems traced from the Python frontend
-	@test -x build/venv-egglog/bin/python || (python3.12 -m venv build/venv-egglog && build/venv-egglog/bin/pip install -q egglog numpy)
+	@test -x build/venv-egglog/bin/python || (python3.12 -m venv build/venv-egglog && build/venv-egglog/bin/pip install -q egglog numpy scipy)
 	build/venv-egglog/bin/python experiments/egraph/lamp_ir.py
+
+egraph-fuzz: tool ## random problems: ulm.lam's selection against the e-graph (optimal extraction)
+	@test -x build/venv-egglog/bin/python || (python3.12 -m venv build/venv-egglog && build/venv-egglog/bin/pip install -q egglog numpy scipy)
+	build/venv-egglog/bin/python experiments/egraph/lamp_fuzz.py 200 1
 
 stages:         ## GLS stages 1-4 parse/verify; stage 3 bufferizes as stage 4 predicts
 	scripts/check-stages.sh

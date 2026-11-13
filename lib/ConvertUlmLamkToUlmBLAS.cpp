@@ -801,6 +801,31 @@ ULM_LAMK_LOWERING(PotrfLowering, lk::PotrfOp)
         .call(o, "ulmBLAS::potrf" kIndexType, rw.getI64Type());
 }
 
+// A^-1 from the Cholesky factor, in place (the uplo triangle)
+ULM_LAMK_LOWERING(PotriLowering, lk::PotriOp)
+{
+    View A = view(rw, o.getA());
+    return Args{rw}
+        .flag(o.getUplo() == lk::Uplo::lower)
+        .dim(A.rows)
+        .op(a.getA())
+        .strides(A)
+        .call(o, "ulmBLAS::potri" kIndexType); // (info: as potrf's)
+}
+
+// A^-1 from the LU factors, in place
+ULM_LAMK_LOWERING(GetriLowering, lk::GetriOp)
+{
+    View A = view(rw, o.getA());
+    return Args{rw}
+        .dim(A.rows)
+        .op(a.getA())
+        .strides(A)
+        .op(a.getIpiv())
+        .lit(1)
+        .call(o, "ulmBLAS::getri" kIndexType); // (info: as getrf's)
+}
+
 // P A = L U in place
 ULM_LAMK_LOWERING(GetrfLowering, lk::GetrfOp)
 {
@@ -1192,7 +1217,8 @@ struct ConvertUlmLamkToUlmBLAS
 
 	// Which ulmBLAS LAPACK headers and info checks the output needs.
 	bool potrf = false, getrf = false, getrs = false, sycomplete = false,
-	     trtrs = false, copy = false, adddiag = false, gecopy = false;
+	     potri = false, getri = false, trtrs = false, copy = false,
+	     adddiag = false, gecopy = false;
 	module.walk([&](Operation *op) {
 	    gecopy |= isa<lk::GecopyOp>(op);
 	    adddiag |= isa<lk::AdddiagOp>(op);
@@ -1201,6 +1227,8 @@ struct ConvertUlmLamkToUlmBLAS
 	    if (auto t = dyn_cast<lk::TrsmOp>(op))
 		trtrs |= isOne(t.getAlpha());
 	    getrf |= isa<lk::GetrfOp>(op);
+	    potri |= isa<lk::PotriOp>(op);
+	    getri |= isa<lk::GetriOp>(op);
 	    getrs |= isa<lk::GetrsOp>(op);
 	    sycomplete |= isa<lk::SycompleteOp>(op);
 	});
@@ -1213,8 +1241,8 @@ struct ConvertUlmLamkToUlmBLAS
 	         SycompleteLowering, SyrkLowering, GemmtrLowering, GemvLowering,
 	         TrsmLowering, TrmmLowering, TrsvLowering, GeaxpyLowering,
 	         GescalLowering, AdddiagLowering, GecopyLowering, PotrfLowering,
-	         GetrfLowering, GelsLowering, GetrsLowering, CallLowering>(tc,
-	                                                                   ctx);
+	         GetrfLowering, GelsLowering, GetrsLowering, PotriLowering,
+	         GetriLowering, CallLowering>(tc, ctx);
 	populateArithToEmitCPatterns(tc, patterns);
 	populateSCFToEmitCConversionPatterns(patterns, tc);
 	populateFuncToEmitCPatterns(tc, patterns, /*lowerToCpp=*/true);
@@ -1267,7 +1295,7 @@ struct ConvertUlmLamkToUlmBLAS
 	    include(h);
 	if (cblasBackend) {
 	    include("ulm_lam/cblas_backend.h");
-	    potrf = getrf = getrs = trtrs = false;
+	    potrf = getrf = getrs = trtrs = potri = getri = false;
 	} else {
 	    include("ulmblas/ulmblas.h");
 	}
@@ -1275,6 +1303,10 @@ struct ConvertUlmLamkToUlmBLAS
 	    include("ulmblas/lapack/potrf.h");
 	if (getrf)
 	    include("ulmblas/lapack/getrf.h");
+	if (potri)
+	    include("ulmblas/lapack/potri.h");
+	if (getri)
+	    include("ulmblas/lapack/getri.h");
 	if (getrs)
 	    include("ulmblas/lapack/getrs.h");
 	if (trtrs)

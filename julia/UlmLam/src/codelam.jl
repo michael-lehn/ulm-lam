@@ -448,6 +448,14 @@ function render_once(f::LamFunction, body, choice, flags, infos, selected="",
             y, fy = result!(r, k, res, out)
             emit!(r, d, "axpy", accumulate_text("1", "$y ← $olds", coef(r, operands(line, "alpha")[1]),
                                                 disp(r, ins[1], fy)))
+        elseif op == "potri" || op == "getri"
+            f = name(r, out)
+            x, _ = result!(r, k, res, out; prefix="X")
+            if op == "potri"
+                emit!(r, d, op, "$x ← ($f $(f)ᵀ)⁻¹", "explicit inverse, one triangle")
+            else
+                emit!(r, d, op, "$x ← inv($f)", "explicit inverse from the LU factors")
+            end
         elseif op == "sycomplete"
             old = name(r, out)
             a, _ = result!(r, k, res, out)
