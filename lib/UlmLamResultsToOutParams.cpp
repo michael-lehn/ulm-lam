@@ -46,7 +46,9 @@
 //       bufferization.materialize_in_destination %Xn in restrict writable %X
 //
 //     so X is updated in place through the reference and never copied.
-//     Such functions must not have callers inside the module.
+//     A call of such a function passes X by reference (a copy where the
+//     caller must not overwrite it) and takes the buffer after the call as
+//     the new value: a chain of calls updates one buffer (LAPACK style).
 //
 //  3. The other tensor results of public functions without callers in the
 //     module become out parameters (appended, attribute bufferize.result):
@@ -234,6 +236,27 @@ struct UlmLamResultsToOutParams
 		                       out);
 	    return;
 	}
+	// the new value of an argument a callee updated, which got a copy:
+	// the copy goes into `out` instead, and the callee works there
+	// (x = copy(y); foo!(..., x) for a MATLAB-style wrapper of foo!)
+	if (auto tt = result.getDefiningOp<bufferization::ToTensorOp>())
+	    if (auto tb =
+	            tt.getBuffer().getDefiningOp<bufferization::ToBufferOp>())
+		if (auto mat =
+		        tb.getTensor()
+		            .getDefiningOp<
+		                bufferization::MaterializeInDestinationOp>())
+		    if (mat.getDest().getDefiningOp<tensor::EmptyOp>() &&
+		        !isa<scf::IfOp>(
+		            result.getParentBlock()->getParentOp())) {
+			OpBuilder b(mat);
+			auto t = bufferization::ToTensorOp::create(
+			    b, mat.getLoc(), mat.getDest().getType(), out);
+			t.setRestrict(true);
+			t.setWritable(true);
+			mat.getDestMutable().set(t.getResult());
+			return;
+		    }
 	Value v = result;
 	OpOperand *first = nullptr;
 	while (auto dps = v.getDefiningOp<DestinationStyleOpInterface>()) {
@@ -487,8 +510,13 @@ struct UlmLamResultsToOutParams
 		if (i >= f.getNumArguments())
 		    return f.emitError()
 		           << kInOutAttr << " = " << i << ": no such argument";
-		Type at = f.getArgumentTypes()[i], rt = f.getResultTypes()[j];
-		if (!isPlainTensor(at) || at != rt)
+		// (the parameter may carry properties, e.g. spd, its new value
+		// not)
+		auto at = dyn_cast<RankedTensorType>(f.getArgumentTypes()[i]);
+		auto rt = dyn_cast<RankedTensorType>(f.getResultTypes()[j]);
+		if (!at || !rt || !isPlainTensor(rt) ||
+		    at.getShape() != rt.getShape() ||
+		    at.getElementType() != rt.getElementType())
 		    return f.emitError()
 		           << "result " << j << " and argument " << i
 		           << " must have the same tensor type";
@@ -496,11 +524,6 @@ struct UlmLamResultsToOutParams
 	    }
 	    if (inout.empty())
 		continue;
-	    if (auto uses = SymbolTable::getSymbolUses(f, module);
-	        uses && !uses->empty())
-		return f.emitError("functions with ")
-		       << kInOutAttr
-		       << " results must not be called inside the module";
 
 	    // Arguments become memrefs, read once through to_tensor.
 	    Block &entry = f.getBody().front();
@@ -551,6 +574,87 @@ struct UlmLamResultsToOutParams
 	        FunctionType::get(f.getContext(), inputs, f.getResultTypes()));
 	    if (failed(f.eraseResults(drop)))
 		return f.emitError("cannot drop in/out results");
+	    if (failed(rewriteUpdatingCalls(module, f, inout)))
+		return failure();
+	}
+	return success();
+    }
+
+    /// May the caller let a callee overwrite v?  Not an argument of its own
+    /// that is only read ({ulm_lam.in}, or without inout), not a value it
+    /// still uses after the call.
+    static bool
+    overwritable(Value v)
+    {
+	if (!v.hasOneUse())
+	    return false;
+	if (auto a = dyn_cast<BlockArgument>(v))
+	    if (auto f = dyn_cast<func::FuncOp>(a.getOwner()->getParentOp()))
+		return static_cast<bool>(
+		    f.getArgAttr(a.getArgNumber(), kInOutAttr));
+	return true;
+    }
+
+    /// The calls of f, which updates the arguments in `inout` in place:
+    ///   %r..., %X1 = call @f(..., %X0, ...)
+    /// becomes
+    ///   %m = bufferization.to_buffer %X0     (a copy if the caller must not
+    ///   call @f(..., %m, ...)                 overwrite X0)
+    ///   %X1 = bufferization.to_tensor %m restrict writable
+    /// so a chain of such calls (LAPACK style: y updated by every call)
+    /// works in one buffer, without copies.
+    static LogicalResult
+    rewriteUpdatingCalls(ModuleOp module, func::FuncOp f,
+                         ArrayRef<std::pair<unsigned, unsigned>> inout)
+    {
+	SmallVector<func::CallOp> calls;
+	module.walk([&](func::CallOp c) {
+	    if (c.getCallee() == f.getSymName())
+		calls.push_back(c);
+	});
+	for (func::CallOp call : calls) {
+	    OpBuilder b(call);
+	    Location loc = call.getLoc();
+	    SmallVector<Value> ops(call.getOperands());
+	    SmallVector<std::pair<unsigned, Value>> bufs; // (result, buffer)
+	    for (auto [j, i] : inout) {
+		Value v = ops[i];
+		auto vt = cast<RankedTensorType>(v.getType());
+		if (!overwritable(v)) {
+		    FailureOr<SmallVector<Value>> sizes =
+		        ulm_lam::dynamicSizes(b, loc, vt, v, 0, v, 1);
+		    if (failed(sizes))
+			return call.emitError("unknown size of an argument");
+		    Value e = tensor::EmptyOp::create(
+		        b, loc, vt.getShape(), vt.getElementType(), *sizes);
+		    v = bufferization::MaterializeInDestinationOp::create(
+		            b, loc, v.getType(), v, e)
+		            .getResult();
+		}
+		Value m = bufferization::ToBufferOp::create(
+		    b, loc, bufferTypeFor(vt), v);
+		ops[i] = m;
+		bufs.push_back({j, m});
+	    }
+	    SmallVector<Type> kept;
+	    SmallVector<unsigned> keptIdx;
+	    for (unsigned j = 0, e = call.getNumResults(); j < e; ++j)
+		if (llvm::none_of(bufs,
+		                  [&](auto &p) { return p.first == j; })) {
+		    kept.push_back(call.getResult(j).getType());
+		    keptIdx.push_back(j);
+		}
+	    auto n = func::CallOp::create(b, loc, call.getCallee(), kept, ops);
+	    for (auto [j, r] : llvm::zip(keptIdx, n.getResults()))
+		call.getResult(j).replaceAllUsesWith(r);
+	    for (auto [j, m] : bufs) {
+		auto t = bufferization::ToTensorOp::create(
+		    b, loc, call.getResult(j).getType(), m);
+		t.setRestrict(true);
+		t.setWritable(true);
+		call.getResult(j).replaceAllUsesWith(t.getResult());
+	    }
+	    call.erase();
 	}
 	return success();
     }

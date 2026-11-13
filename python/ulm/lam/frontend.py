@@ -769,6 +769,9 @@ class Function:
                        for k, v in ups]
             self.results = [v.type for v in outs]
             self.updated = [k for k, _ in ups]
+            # the types of the new values of the updated parameters (after
+            # the results: a call returns them so)
+            self.update_types = [v.type for _, v in ups]
             ret = ", ".join(v._use() for v in results)
             rett = ", ".join(v.type.mlir() for v in results)
             b.emit(f"return {ret} : {rett}" if results else "return")
@@ -816,9 +819,6 @@ class Function:
     def _call(self, *args):
         """A call from another ulm.lam function."""
         self.trace()
-        if self.updated:
-            raise LamError(f"{self.name} updates parameters; calling it from "
-                            "a ulm.lam function is not supported yet")
         b = _builder()
         prog = _Program.current
         if self not in prog.functions:
@@ -839,7 +839,10 @@ class Function:
                           [v._use() for v in vals])
         ptypes = ", ".join(["index"] * len(self.sizes) +
                            [t.mlir() for _, t in self.params])
-        rtypes = [t.mlir() for t in self.results]
+        # the results, then the new values of the parameters it updates
+        # (y = bar(M, y) for a bar that overwrites y with the solution)
+        types = list(self.results) + list(self.update_types)
+        rtypes = [t.mlir() for t in types]
         if not rtypes:
             b.emit(f"func.call @{self.name}({names}) : ({ptypes}) -> ()")
             return None
@@ -848,9 +851,9 @@ class Function:
         b.emit(f"{res} = func.call @{self.name}({names}) : ({ptypes}) -> "
                f"({', '.join(rtypes)})")
         if len(rtypes) == 1:
-            return Value(v, self.results[0], b.region.id)
+            return Value(v, types[0], b.region.id)
         return tuple(Value(f"{v}#{j}", t, b.region.id)
-                     for j, t in enumerate(self.results))
+                     for j, t in enumerate(types))
 
 
 def function(fn) -> Function:

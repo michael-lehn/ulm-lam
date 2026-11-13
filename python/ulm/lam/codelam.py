@@ -55,6 +55,7 @@ class _Renderer:
         self.forced = {}   # a line yielded by an scf.if -> that if's line
         self.k = 0         # the line being rendered
         self.lastuse = {}  # the last line that uses a value
+        self.updated = set()  # parameters the function updates in place
 
     def fresh(self, c):
         self.counter[c] = self.counter.get(c, 0) + 1
@@ -81,7 +82,8 @@ class _Renderer:
         or a new name (a copy of a parameter, a factor, a new matrix)."""
         if self.k in self.forced and prefix == "T":
             self.names[res] = self.ifname[self.forced[self.k]]
-        elif (fresh or out in self.params or prefix != "T"
+        elif (fresh or (out in self.params and out not in self.updated)
+              or prefix != "T"
               or self.lastuse.get(out, 0) > self.k):
             # (a value still used later keeps its name: a new one here)
             self.names[res] = self.fresh(prefix)
@@ -92,6 +94,25 @@ class _Renderer:
 
 def _tr(s, t):
     return s + "ᵀ" if t else s
+
+
+def _updates(sig):
+    """(result, argument) for the results of the function with this
+    signature that are the new values of arguments ({ulm_lam.inout = k})."""
+    i = sig.find(") -> (")
+    if i < 0:
+        return []
+    out = []
+    for j, piece in enumerate(sig[i:].split("tensor<")[1:]):
+        m = re.search(r"ulm_lam\.inout = (\d+)", piece)
+        if m:
+            out.append((j, int(m.group(1))))
+    return out
+
+
+def _nresults(sig):
+    i = sig.find(") -> (")
+    return 0 if i < 0 else len(sig[i:].split("tensor<")) - 1
 
 
 def _renumber(text):
@@ -113,6 +134,11 @@ def render(fn: fe.Function, selected: str, infos: dict) -> str:
     if i < 0:
         raise fe.LamError(f"no function {fn.name} in the IR")
     body = [line.strip() for line in selected[i:].split("\n")]
+    # (only this function: the next one uses the same names again)
+    for j in range(1, len(body)):
+        if body[j].startswith("func.func"):
+            body = body[:j]
+            break
     r = _Renderer()
     args = re.findall(r"(%arg\d+):", body[0])
     labels = list(fn.sizes) + [n for n, _ in fn.params]
@@ -120,6 +146,9 @@ def render(fn: fe.Function, selected: str, infos: dict) -> str:
         r.names[a] = lab
         r.params.add(a)
     empties = set()
+    # parameters it updates (LAPACK style: y holds the solution on exit)
+    ups = _updates(body[0])
+    r.updated = {args[a] for _, a in ups if a < len(args)}
     # parameters the function may overwrite (passed on to an inout callee
     # without a copy)
     inout = {m.group(1) for m in re.finditer(r"(%arg\d+): [^{,]*\{([^}]*)\}",
@@ -233,8 +262,8 @@ def render(fn: fe.Function, selected: str, infos: dict) -> str:
             continue
         if line.startswith("scf.yield"):
             continue
-        m = re.match(r"^(?:(%[\w#]+) = )?(?:func\.)?call @(\w+)\(([^)]*)\)",
-                     line)
+        m = re.match(r"^(?:(%[\w#]+)(?::\d+)? = )?(?:func\.)?call "
+                     r"@(\w+)\(([^)]*)\)", line)
         if m:
             # a ulm.lam function (defined in the module) or a callback
             defined = f"func.func @{m.group(2)}(" in selected
@@ -243,9 +272,11 @@ def render(fn: fe.Function, selected: str, infos: dict) -> str:
             # caller must not overwrite (a parameter of its own, or a value
             # it still uses): bufferization inserts that copy
             ops_ = [x.strip() for x in m.group(3).split(",") if x.strip()]
+            cups, nres = [], 0
             if defined:
                 sig = selected[selected.index(f"func.func @{m.group(2)}("):]
                 sig = sig[:sig.index("{\n")]
+                cups, nres = _updates(sig), _nresults(sig)
                 cargs = re.findall(r"%arg\d+: [^{,]*(?:\{([^}]*)\})?", sig)
                 for j, x in enumerate(ops_):
                     if j < len(cargs) and "ulm_lam.inout" in cargs[j] and (
@@ -260,7 +291,25 @@ def render(fn: fe.Function, selected: str, infos: dict) -> str:
             a = [r.names[x] if x.endswith("@copy") else r.name(x)
                  for x in ops_]
             a = [x for x in a if x not in sizes]
-            if m.group(1):
+            if cups:
+                # the new values of the arguments it updates are those
+                # arguments (in place); the other results are new
+                upd = dict(cups)
+                own, changed = [], []
+                for j in range(nres):
+                    key = m.group(1) if nres == 1 else f"{m.group(1)}#{j}"
+                    if j in upd:
+                        x = ops_[upd[j]]
+                        n_ = r.names[x] if x.endswith("@copy") else r.name(x)
+                        r.names[key] = n_
+                        changed.append(n_)
+                    else:
+                        r.names[key] = r.fresh("z")
+                        own.append(r.names[key])
+                lhs = f"{', '.join(own)} ← " if own else ""
+                r.emit(d, "call", f"{lhs}{m.group(2)}({', '.join(a)})",
+                       f"{note}, overwrites {', '.join(changed)}")
+            elif m.group(1):
                 v = r.fresh("z")
                 r.names[m.group(1)] = v
                 r.emit(d, "call", f"{v} ← {m.group(2)}({', '.join(a)})",
@@ -279,7 +328,16 @@ def render(fn: fe.Function, selected: str, infos: dict) -> str:
         if line.startswith("return"):
             vs = [x.strip() for x in line[6:].split(" : ")[0].split(",")
                   if x.strip()]
-            r.lines.append(ind + "return " + ", ".join(r.name(v) for v in vs))
+            # the new values of updated parameters: in place, or copied
+            upd = dict(ups)
+            for j, v in enumerate(vs):
+                if j in upd:
+                    p_ = r.name(args[upd[j]])
+                    if r.name(v) != p_:
+                        r.emit(ind, "copy", f"{p_} ← {r.name(v)}")
+            own = [r.name(v) for j, v in enumerate(vs) if j not in upd]
+            if own or not ups:
+                r.lines.append(ind + "return " + ", ".join(own))
             continue
         m = _KERNEL.match(line)
         if not m:

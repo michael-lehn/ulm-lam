@@ -93,6 +93,8 @@ mutable struct Renderer
     lastuse::Dict{String,Int}  # the last line that uses a value
     selected::String           # the whole module (callees are defined in it)
     inout::Set{String}         # parameters the function may overwrite
+    updated::Set{String}       # parameters it updates in place (update!)
+    jnames::Dict{String,String}  # C name -> Julia name (foo_ -> foo!)
 end
 
 fresh!(r::Renderer, c) = (r.counter[c] = get(r.counter, c, 0) + 1; "$c$(r.counter[c])")
@@ -122,7 +124,8 @@ function result!(r::Renderer, k, res, out; prefix="T")
         c = r.choice[k]
         n = c == k ? fresh!(r, prefix) : r.ifname[c]
         r.vals[res] = (n, r.flags[c])
-    elseif out in r.params || prefix != "T" || get(r.lastuse, out, 0) > k
+    elseif (out in r.params && !(out in r.updated)) || prefix != "T" ||
+           get(r.lastuse, out, 0) > k
         # a parameter, a factor, or a value still used later: a new name
         r.vals[res] = (fresh!(r, prefix), flag(r, out))
     else
@@ -139,9 +142,26 @@ function accumulate_text(β, c, αc, prod)
     startswith(αc, "-") ? c * " − " * αc[2:end] * prod : c * " + " * αc * prod
 end
 
-function render_once(f::LamFunction, body, choice, flags, infos, selected="")
+"""(result, argument) for the results of the function with this signature
+that are the new values of arguments ({ulm_lam.inout = k}), and the number
+of results."""
+function updates_of(sig)
+    i = findfirst(") -> (", sig)
+    i === nothing && return Tuple{Int,Int}[], 0
+    pieces = split(sig[first(i):end], "tensor<")[2:end]
+    ups = Tuple{Int,Int}[]
+    for (j, p) in enumerate(pieces)
+        m = match(r"ulm_lam\.inout = (\d+)", p)
+        m === nothing || push!(ups, (j - 1, parse(Int, m.captures[1])))
+    end
+    ups, length(pieces)
+end
+
+function render_once(f::LamFunction, body, choice, flags, infos, selected="",
+                     jnames=Dict{String,String}())
     r = Renderer(Dict(), Dict(), Dict(), String[], Set(), flags, choice, Dict(), Set(), Set(),
-                 Dict{String,Int}(), selected, Set{String}())
+                 Dict{String,Int}(), selected, Set{String}(), Set{String}(), jnames)
+    jname(c) = get(r.jnames, c, c)
     for m in eachmatch(r"(%arg\d+): [^{,]*\{([^}]*)\}", body[1])
         occursin("ulm_lam.inout", m.captures[2]) && push!(r.inout, m.captures[1])
     end
@@ -162,6 +182,11 @@ function render_once(f::LamFunction, body, choice, flags, infos, selected="")
     for (a, l) in zip(args, labels)
         r.vals[a] = l
         push!(r.params, a)
+    end
+    # parameters it updates (LAPACK style: y holds the solution on exit)
+    ups, _ = updates_of(head)
+    for (_, a) in ups
+        a < length(args) && push!(r.updated, args[a+1])
     end
     sig = join(["$n::" * (t isa MatType ? (t.isvec ? "$(t.rows)" : "$(t.rows)×$(t.cols)") *
                 (isempty(t.props) ? "" : " " * join(t.props, ",")) *
@@ -230,7 +255,7 @@ function render_once(f::LamFunction, body, choice, flags, infos, selected="")
             continue
         end
         startswith(line, "scf.yield") && continue
-        if (m = match(r"^(?:(%[\w#]+) = )?(?:func\.)?call @(\w+)\(([^)]*)\)", line)) !== nothing
+        if (m = match(r"^(?:(%[\w#]+)(?::\d+)? = )?(?:func\.)?call @(\w+)\(([^)]*)\)", line)) !== nothing
             # a ulm.lam function (defined in the module) or a callback
             defined = occursin("func.func @$(m.captures[2])(", r.selected)
             note = defined ? "a ulm.lam function" : "your Julia function"
@@ -238,16 +263,18 @@ function render_once(f::LamFunction, body, choice, flags, infos, selected="")
             # caller must not overwrite (a parameter of its own, or a value
             # it still uses): bufferization inserts that copy
             ops_ = [strip(x) for x in split(m.captures[3], ",") if !isempty(strip(x))]
+            cups, nres = Tuple{Int,Int}[], 0
             if defined
                 sig = r.selected[first(findfirst("func.func @$(m.captures[2])(", r.selected)):end]
                 sig = sig[1:first(findfirst("{\n", sig))]
+                cups, nres = updates_of(sig)
                 cargs = [something(c.captures[1], "") for c in
                          eachmatch(r"%arg\d+: [^{,]*(?:\{([^}]*)\})?", sig)]
                 for (j, x) in enumerate(ops_)
                     if j <= length(cargs) && occursin("ulm_lam.inout", cargs[j]) &&
                        ((x in r.params && !(x in r.inout)) || get(r.lastuse, x, 0) > k)
                         c_ = fresh!(r, "T")
-                        emit!(r, d, "copy", "$c_ ← $(disp(r, x))", "$(m.captures[2]) may overwrite it")
+                        emit!(r, d, "copy", "$c_ ← $(disp(r, x))", "$(jname(m.captures[2])) may overwrite it")
                         r.vals[x * "@copy"] = (c_, flag(r, x))
                         ops_[j] = x * "@copy"
                     end
@@ -256,13 +283,32 @@ function render_once(f::LamFunction, body, choice, flags, infos, selected="")
             sizes = Set(string.(f.sizes))
             args_ = [disp(r, a) for a in ops_]
             args_ = filter(a -> !(a in sizes), args_)
-            if m.captures[1] !== nothing
+            callee = jname(m.captures[2])
+            if !isempty(cups)
+                # the new values of the arguments it updates are those
+                # arguments (in place); the other results are new
+                upd = Dict(cups)
+                own, changed = String[], String[]
+                for j in 0:nres-1
+                    key = nres == 1 ? m.captures[1] : "$(m.captures[1])#$j"
+                    if haskey(upd, j)
+                        r.vals[key] = val(r, ops_[upd[j]+1])
+                        push!(changed, name(r, key))
+                    else
+                        r.vals[key] = (fresh!(r, "z"), true)
+                        push!(own, name(r, key))
+                    end
+                end
+                lhs = isempty(own) ? "" : join(own, ", ") * " ← "
+                emit!(r, d, "call", "$lhs$callee($(join(args_, ", ")))",
+                      "$note, overwrites $(join(changed, ", "))")
+            elseif m.captures[1] !== nothing
                 v = fresh!(r, "z")
                 # a matrix from Julia is its transpose in the IR
                 r.vals[m.captures[1]] = (v, !occursin(r"-> tensor<[^>]*x1xf64>\s*$", line))
-                emit!(r, d, "call", "$v ← $(m.captures[2])($(join(args_, ", ")))", note)
+                emit!(r, d, "call", "$v ← $callee($(join(args_, ", ")))", note)
             else
-                emit!(r, d, "call", "$(m.captures[2])($(join(args_, ", ")))", note)
+                emit!(r, d, "call", "$callee($(join(args_, ", ")))", note)
             end
             continue
         end
@@ -276,11 +322,17 @@ function render_once(f::LamFunction, body, choice, flags, infos, selected="")
         if startswith(line, "return")
             vs = [strip(v) for v in split(split(replace(line, "return" => ""), " : ")[1], ",") if !isempty(strip(v))]
             types = split(split(line, " : ")[end], ", ")
-            out = map(zip(vs, types)) do (v, t)
-                vec = occursin(r"x1xf64", t)
-                vec ? name(r, v) : disp(r, v, true)  # Julia gets the IR's transpose
+            # the new values of updated parameters: in place, or copied
+            upd = Dict(ups)
+            for (j, v) in enumerate(vs)
+                haskey(upd, j - 1) || continue
+                p_ = args[upd[j-1]+1]
+                name(r, v) == name(r, p_) ||
+                    emit!(r, ind, "copy", "$(name(r, p_)) ← $(disp(r, v, flag(r, p_)))")
             end
-            push!(r.lines, ind * "return " * join(out, ", "))
+            out = [occursin(r"x1xf64", t) ? name(r, v) : disp(r, v, true)  # Julia gets the IR's transpose
+                   for (j, (v, t)) in enumerate(zip(vs, types)) if !haskey(upd, j - 1)]
+            (isempty(out) && !isempty(ups)) || push!(r.lines, ind * "return " * join(out, ", "))
             continue
         end
         (m = match(KERNEL, line)) === nothing && continue
@@ -432,10 +484,14 @@ function renumber(text)
     end)
 end
 
-function render(f::LamFunction, selected::String, infos::Dict{Int,String})
-    i = findfirst("func.func @$(f.name)(", selected)
+function render(f::LamFunction, selected::String, infos::Dict{Int,String},
+                jnames=Dict{String,String}())
+    i = findfirst("func.func @$(cname(f))(", selected)
     i === nothing && throw(LamError("no function $(f.name) in the IR"))
     body = [strip(l) for l in split(selected[first(i):end], '\n')]
+    # (only this function: the next one uses the same names again)
+    nxt = findnext(l -> startswith(l, "func.func"), body, 2)
+    nxt === nothing || (body = body[1:nxt-1])
     choice = choices(body)
     vars = sort(unique(values(choice)))
     best, score = String[], typemax(Int)
@@ -443,7 +499,7 @@ function render(f::LamFunction, selected::String, infos::Dict{Int,String})
     n = length(vars) <= 12 ? length(vars) : 0
     for bits in 0:(2^n-1)
         flags = Dict(v => (j <= n && (bits >> (j - 1)) & 1 == 1) for (j, v) in enumerate(vars))
-        lines = render_once(f, body, choice, flags, infos, selected)
+        lines = render_once(f, body, choice, flags, infos, selected, jnames)
         s = sum(l -> count(==('ᵀ'), l), lines)
         s < score && ((best, score) = (lines, s))
     end
@@ -457,9 +513,10 @@ The derivation ulm.lam found for the ulm.lam function f: its BLAS and LAPACK
 calls in order, loops, decisions taken at run time, and what info means.
 """
 function code_lam(f::LamFunction; backend::Union{Symbol,Nothing}=nothing)
-    lib = backend === nothing ? library(f) : compile(f; name="code_lam_$(f.name)", backend=backend)
+    lib = backend === nothing ? library(f) : compile(f; name="code_lam_$(cname(f))", backend=backend)
     file = replace(lib.path, r"^(.*)/lib([^/]*)\.[^.]+$" => s"\1/\2.selected.mlir")
-    CodeLam(render(f, read(file, String), lib.functions[f.name].codes))
+    jnames = Dict(cname(c.fn) => string(c.fn.name) for c in values(lib.functions))
+    CodeLam(render(f, read(file, String), lib.functions[f.name].codes, jnames))
 end
 
 """

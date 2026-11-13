@@ -151,6 +151,37 @@ for backend in (:julia, :ulmblas, :cblas)
     end
 end
 
+@testset "LAPACK style: update! and calls" begin
+    @lam ubar!(M::InOut(Mat(:n, :n, :spd)), y::InOut(Vec(:n))) = update!(y, M \ y)
+    @lam ufoo!(M::InOut(Mat(:n, :n, :spd)), N::InOut(Mat(:n, :n, :spd)), y::InOut(Vec(:n))) =
+        update!(y, ubar!(M, ubar!(N, y)))
+    @lam ufoo(M::Mat(:n, :n, :spd), N::Mat(:n, :n, :spd), y::Vec(:n)) = ufoo!(M, N, y)
+    @lam uadd!(A::Mat(:m, :n), Y::InOut(Mat(:m, :n))) = update!(Y, Y + 2A)
+    @lam ukeep(M::InOut(Mat(:n, :n, :spd)), y::Vec(:n)) = ubar!(M, y) + y
+    lib = UlmLam.compile([ufoo, uadd!, ukeep]; name="test_update")
+    n = 30
+    A, B = randn(n, n), randn(n, n)
+    M, N, y = A * A' + n * I, B * B' + n * I, randn(n)
+    ref = M \ (N \ y)
+    M1, N1, y1 = copy(M), copy(N), copy(y)
+    @test lib.ufoo!(M1, N1, y1) === nothing
+    @test norm(y1 - ref) / norm(ref) < 1e-12              # y is the solution
+    @test triu(M1) ≈ cholesky(Symmetric(M)).U               # M its factor
+    @test workspace_size(lib.ubar!, M, y) == 0
+    @test workspace_size(lib.ufoo!, M, N, y) == 0
+    @test workspace_size(lib.ufoo, M, N, y) == 2 * cld(8 * n^2, 64) * 64  # copies of M, N (64-byte blocks)
+    M2 = copy(M); y2 = copy(y)
+    @test norm(lib.ufoo(M2, N, y2) - ref) / norm(ref) < 1e-12
+    @test M2 == M && y2 == y                                # MATLAB style: unchanged
+    C, Y = randn(4, 7), randn(4, 7); Y0 = copy(Y)
+    lib.uadd!(C, Y)
+    @test Y ≈ Y0 + 2C
+    M3 = copy(M)
+    @test lib.ukeep(M3, y) ≈ M \ y + y
+    @test occursin("ubar!(N, y)", string(code_lam(ufoo!)))
+    @test_throws LamError UlmLam.lam_module([@lam bad_upd(A::Mat(:n, :n), y::Vec(:n)) = update!(y, A * y)])
+end
+
 @testset "frontend" begin
     @test_throws LamError Mat(3, 3, :spdd)
     @lam bad(A::Mat(3, 4), B::Mat(3, 4)) = A * B

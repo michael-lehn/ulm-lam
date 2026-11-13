@@ -7,7 +7,7 @@ cd "$ROOT"
 julia --project=julia/UlmLam examples/calls/calls.jl | tee build/calls_jl.out
 python3 examples/calls/calls.py | tee build/calls_py.out
 "$ROOT/scripts/build-tool.sh" >/dev/null
-for m in calls calls_inout; do
+for m in calls calls_inout calls_lapack; do
 	for f in jl py; do
 		build/bin/ulm-lam-opt examples/calls/generated/${m}_$f.mlir \
 			--pass-pipeline='builtin.module(func.func(ulm-lam-normalize))' \

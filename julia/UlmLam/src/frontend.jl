@@ -576,6 +576,10 @@ mutable struct LamFunction
     sizes::Vector{Symbol}
     results::Vector{MatType}  # Julia types of the results
     text::Union{String,Nothing}
+    updated::Vector{Int}           # parameters that update! sets (indices)
+    update_types::Vector{MatType}  # Julia types of their new values
+    args::Vector{Any}              # while tracing: the parameters as values
+    updates::Dict{Int,Any}         # while tracing: update!(param, value)
 end
 
 function LamFunction(name::Symbol, params::Vector, fn::Function)
@@ -589,8 +593,13 @@ function LamFunction(name::Symbol, params::Vector, fn::Function)
     for (_, t) in ps, x in symbols(t)
         x in sizes || push!(sizes, x)
     end
-    LamFunction(name, ps, fn, sizes, MatType[], nothing)
+    LamFunction(name, ps, fn, sizes, MatType[], nothing, Int[], MatType[], Any[],
+                Dict{Int,Any}())
 end
+
+"""The name of f in the IR and in C: Julia's `foo!` (a function that
+overwrites an argument) is `foo_` there."""
+cname(f::LamFunction) = replace(string(f.name), "!" => "_")
 
 Base.show(io::IO, f::LamFunction) =
     print(io, "ulm.lam function ", f.name, "(", join(["$n::$t" for (n, t) in f.params], ", "), ")")
@@ -623,6 +632,7 @@ function trace!(f::LamFunction)
             p = LamValue("%p.$n", t isa MatType ? abitype(t) : t, region(b).id)
             (t isa MatType && !t.isvec) ? transpose(p) : p
         end
+        f.args, f.updates = collect(Any, args), Dict{Int,Any}()
         out = try
             f.fn(args...)
         catch e
@@ -654,11 +664,25 @@ function trace!(f::LamFunction)
             d = dims_attr(at, pos)
             push!(rtypes, mlir(r.type) * " {ulm_lam.out" * (isempty(d) ? "" : ", $d") * "}")
         end
+        # the new values of the parameters set with update!, after the
+        # results: {ulm_lam.inout = k} (k counts the size arguments too)
+        f.updated, f.update_types = Int[], MatType[]
+        for k in sort!(collect(keys(f.updates)))
+            o, (n, t) = f.updates[k], f.params[k]
+            r = t.isvec ? plainvalue(o) : plainvalue(transpose(o))
+            push!(f.updated, k)
+            push!(f.update_types, MatType(o.type.rows, o.type.cols, Symbol[], :in, t.isvec))
+            push!(results, use(r))
+            d = dims_attr(abitype(t), pos)
+            push!(rtypes, mlir(r.type) * " {ulm_lam.inout = $(length(f.sizes) + k - 1) : i64" *
+                          (isempty(d) ? "" : ", $d") * "}")
+        end
         emit!(b, isempty(results) ? "return" :
                  "return " * join(results, ", ") * " : " *
                  join([split(t, " {")[1] for t in rtypes], ", "))
     finally
         CURRENT[], TRACING[] = outer_b, outer_f
+        f.args = Any[]
     end
     args = ["%s.$x: index" for x in f.sizes]
     for (n, t) in f.params
@@ -673,8 +697,32 @@ function trace!(f::LamFunction)
         end
     end
     res = isempty(rtypes) ? "" : " -> (" * join(rtypes, ", ") * ")"
-    head = "func.func @$(f.name)(" * join(args, ", ") * ")$res {"
+    head = "func.func @$(cname(f))(" * join(args, ", ") * ")$res {"
     f.text = join(vcat([head], region(b).lines, ["}"]), "\n")
+end
+
+"""
+    update!(param, value)
+
+In a `@lam` function: on exit, the `InOut` parameter `param` holds `value`
+(LAPACK style: `update!(y, M \\ y)` overwrites `y` with the solution).  A call
+of such a function from another `@lam` function returns the new values after
+its results: `y = bar(M, y)`.
+"""
+function update!(param, value)
+    f = TRACING[]
+    f === nothing && throw(LamError("update! outside a @lam function"))
+    k = findfirst(a -> a === param, f.args)
+    k === nothing && throw(LamError("$(f.name): update!: the first argument must be a " *
+                                    "parameter of the function"))
+    n, t = f.params[k]
+    (t isa MatType && t.intent == :inout) ||
+        throw(LamError("$(f.name): update!: parameter $n must be InOut(...)"))
+    v = value isa LamValue ? value : throw(LamError("$(f.name): update!: $n: not a matrix"))
+    (v.type isa MatType && (v.type.rows, v.type.cols) == (param.type.rows, param.type.cols)) ||
+        throw(LamError("$(f.name): update!: $n: $(v.type) instead of $(param.type)"))
+    f.updates[k] = v
+    nothing
 end
 
 """
@@ -734,7 +782,7 @@ function lam_module(functions::Vector{LamFunction})
         f.name in seen && return
         push!(seen, f.name)
         for g in all
-            g !== f && occursin("@$(g.name)(", f.text) && visit(g)
+            g !== f && occursin("@$(cname(g))(", f.text) && visit(g)
         end
         push!(order, f)
     end
@@ -809,12 +857,15 @@ function call_lam(f::LamFunction, args)
         end
     end
     sub(d) = d isa Symbol ? env[d] : d
-    rts = [MatType(sub(rt.rows), sub(rt.cols), Symbol[], :in, rt.isvec) for rt in f.results]
+    # the results, then the new values of the parameters f updates (y =
+    # bar(M, y) for a bar that overwrites y with the solution, LAPACK style)
+    rts = [MatType(sub(rt.rows), sub(rt.cols), Symbol[], :in, rt.isvec)
+           for rt in vcat(f.results, f.update_types)]
     irts = [rt.isvec ? rt : abitype(rt) for rt in rts]
     name = fresh!(b)
     nres = length(rts)
     lhs = nres == 0 ? "" : nres == 1 ? "$name = " : "$name:$nres = "
-    emit!(b, lhs * "func.call @$(f.name)(" * join(vcat(sizes, vals), ", ") * ") : (" *
+    emit!(b, lhs * "func.call @$(cname(f))(" * join(vcat(sizes, vals), ", ") * ") : (" *
              join(vcat(fill("index", length(sizes)), types), ", ") * ") -> (" *
              join(mlir.(irts), ", ") * ")")
     nres == 0 && return nothing
