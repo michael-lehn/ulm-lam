@@ -487,6 +487,12 @@ function view_of(p::Ptr{Cvoid}, t::MatType, env, T::DataType=Float64)
     transpose(unsafe_wrap(Array, Ptr{T}(p), (c, r)))
 end
 
+"""A callback's result into the buffer of the generated code: a plain
+array of the same element type as one memcpy, anything else broadcast
+(a function barrier: `r`'s type is known only at run time)."""
+store!(dst::Array{T}, r::Array{T}) where {T} = copyto!(dst, r)
+store!(dst, r) = (dst .= r; nothing)
+
 """
     bind!(lib; name = f, ...)
 
@@ -521,7 +527,7 @@ function bind!(lib::Library; impls...)
                                       (resolve_dim(rt.rows, env), resolve_dim(rt.cols, env)))
                     size(dst) == size(r) ||
                         throw(LamError("$name returned $(size(r)) instead of $(size(dst))"))
-                    dst .= r
+                    store!(dst, r)
                 end
             catch e
                 # (a callback runs on the task of the call)

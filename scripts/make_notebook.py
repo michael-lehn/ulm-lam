@@ -198,14 +198,16 @@ code(r'''
 @code_lam train(W0, b0, ones, step, steps)
 ''')
 md(r'''
-Four BLAS calls per step and no allocation: the residual is computed into a
-copy of ``Y`` (`gemm` with ``\beta = -1``, then the bias as a rank-1 `gemm`),
-the update ``W - \text{step}\, X^T R`` is one `gemm` with
-``\alpha = -\text{step}``, ``\beta = 1`` directly into ``W``, and the bias
-update one `gemv`.  The batches Julia delivers are read in place
-(column-major), without copies.  From Python, the same function is as fast as
-PyTorch on the same BLAS and 5× faster than PyTorch's autograd for a small
-layer (`python/examples/torch_linear.py`).
+Four BLAS calls per step, as an expert writes them, and no allocation: the
+residual ``R = X W + \mathbf{1} b^T - Y`` is computed in the buffer into
+which the callback delivered ``Y`` (`gemm` with ``\beta = -1``, then the
+bias as a rank-1 `gemm`), the update ``W - \text{step}\, X^T R`` is one
+`gemm` with ``\alpha = -\text{step}``, ``\beta = 1`` directly into ``W``,
+and the bias update one `gemv`.  ``W`` stays in Julia's column-major layout
+during the whole loop, and every transpose is a flag of a `gemm` (the
+callbacks copy each batch into the function's buffers once).  From Python,
+the same function is as fast as PyTorch on the same BLAS and 5× faster than
+PyTorch's autograd for a small layer (`python/examples/torch_linear.py`).
 ''')
 code(r'''
 begin
@@ -233,8 +235,20 @@ function train_julia(W, b, Xs, Ys, step)
 end
 ''')
 code(r'''
+function train_expert(W, b, Xs, Ys, step)    # in place, BLAS calls only
+    W, b = copy(W), copy(b)
+    R, o = similar(Ys[1]), ones(size(Ys[1], 1))
+    for (X, Y) in zip(Xs, Ys)
+        copyto!(R, Y); mul!(R, X, W, 1.0, -1.0); mul!(R, o, b', 1.0, 1.0)
+        mul!(W, X', R, -step, 1.0); mul!(b, R', o, -step, 1.0)
+    end
+    W, b
+end
+''')
+code(r'''
 compare("ulm.lam" => () -> train(W0, b0, onesB, lr_step, nsteps),
-        "Julia, the formulas as written" => () -> train_julia(W0, b0, Xs, Ys, lr_step))
+        "Julia, the formulas as written" => () -> train_julia(W0, b0, Xs, Ys, lr_step),
+        "Julia, written by an expert" => () -> train_expert(W0, b0, Xs, Ys, lr_step))
 ''')
 code(r'''
 let (W, b) = train(W0, b0, onesB, lr_step, nsteps),
@@ -543,13 +557,20 @@ md(r'''
 ## Appendix: the timing helper
 ''')
 code(r'''
-"Time (best of several runs) and memory allocated per call, relative to the first case."
-function compare(cases...)
-    rows = map(cases) do (name, f)
-        f()
-        t = @belapsed $f() samples = 5 evals = 1 seconds = 20
-        (name, t, @allocated f())
+"""Time (best of several runs) and memory allocated per call, relative to
+the first case.  The cases run in alternating rounds, after a warm-up of
+all of them, so that none is measured in a quieter or busier moment."""
+function compare(cases...; seconds = 20)
+    fs = [f for (_, f) in cases]
+    foreach(f -> f(), fs)
+    t1 = maximum(f -> @elapsed(f()), fs)
+    rounds = clamp(ceil(Int, seconds / (length(fs) * t1)), 3, 30)
+    best = fill(Inf, length(fs))
+    for r in 1:rounds, k in (isodd(r) ? eachindex(fs) : reverse(eachindex(fs)))
+        GC.gc(false)
+        best[k] = min(best[k], @elapsed fs[k]())
     end
+    rows = [(name, best[k], @allocated(f())) for (k, (name, f)) in enumerate(cases)]
     t0 = rows[1][2]
     s = "| | time | relative | allocated |\n|:--|--:|--:|--:|\n"
     for (name, t, a) in rows
