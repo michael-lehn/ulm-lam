@@ -597,6 +597,19 @@ class Selector
 		    uses.push_back(&o);
 	});
 	for (OpOperand *o : uses) {
+	    // (a result declared with the same storage, the new value of an
+	    // inout parameter stored as one triangle: kept so)
+	    if (auto ret = dyn_cast<func::ReturnOp>(o->getOwner())) {
+		auto want = cast<RankedTensorType>(
+		    func.getFunctionType().getResult(o->getOperandNumber()));
+		Properties wp = propertiesOf(want);
+		int st = storageOf(o->get());
+		if ((st == 1 &&
+		     bitEnumContainsAll(wp, Properties::lower_stored)) ||
+		    (st == 2 &&
+		     bitEnumContainsAll(wp, Properties::upper_stored)))
+		    continue;
+	    }
 	    Value v = full(o->get());
 	    // a result has the type the function declares (completed, the
 	    // storage is no longer part of it)
@@ -1216,9 +1229,15 @@ class Selector
     Value
     scaleBy(Value alpha, Value x, Location loc)
     {
+	// (one stored triangle stays so: gescal scales both, the stored one
+	// correctly; also a value whose type says so, e.g. an inverse from
+	// potri passed on by replace)
+	int st = lowerOnly.contains(x) ? 1 : storageOf(x);
+	if (st == 2)
+	    x = full(x);
 	Value r = lk::GescalOp::create(b, loc, TypeRange{x.getType()}, alpha, x)
 	              ->getResult(0);
-	if (lowerOnly.contains(x))
+	if (st == 1)
 	    lowerOnly.insert(r);
 	return r;
     }
@@ -2427,6 +2446,12 @@ class Selector
 	    Value x = lk::PotriOp::create(b, loc, TypeRange{L[0].v.getType()},
 	                                  uplo, L[0].v)
 	                  ->getResult(0);
+	    // the lower triangle is passed on as such (completed where a use
+	    // needs the whole matrix, see replace)
+	    if (L[0].lower) {
+		lowerOnly.insert(x);
+		return x;
+	    }
 	    return lk::SycompleteOp::create(b, loc, TypeRange{x.getType()},
 	                                    uplo, x)
 	        ->getResult(0);
@@ -2490,6 +2515,38 @@ class Selector
 		return gemm(l, r, d, alpha * c.alpha, dest ? beta : 0.0, loc,
 		            av);
 	    }
+	    // likewise a Gram matrix: one syrk, s alpha Z^T Z added to a
+	    // symmetric accumulator (A <- rho A + c a^T a with c known at run
+	    // time: one triangle, completed where needed, see replace)
+	    if (plans.size() == 1 && plans[0][0][k - 1].kind == Choice::Gram &&
+	        !inBranch && (!dest || symmetricAcc(dest))) {
+		c.choice = plans[0];
+		int h = c.choice[0][k - 1].split;
+		Location loc = mul.getLoc();
+		if (!dest)
+		    b.setInsertionPoint(mul);
+		Leaf z = operand(c, h, k - 1, loc);
+		if (z.stored == Leaf::Full) {
+		    Type elt = elementType(z.v);
+		    Value sv = scalarOf(scales, loc);
+		    Value av = arith::MulFOp::create(
+		        b, loc, constant(elt, alpha * c.alpha, loc), sv);
+		    Value d = dest;
+		    if (!d) {
+			Leaf zt = z;
+			zt.trans = !z.trans;
+			d = empty(zt, z, elt, loc);
+		    }
+		    Value r =
+		        lk::SyrkOp::create(
+		            b, loc, TypeRange{d.getType()}, lk::Uplo::lower,
+		            z.trans ? lk::Trans::none : lk::Trans::trans, av,
+		            z.v, constant(elt, dest ? beta : 0.0, loc), d)
+		            ->getResult(0);
+		    lowerOnly.insert(r);
+		    return r;
+		}
+	    }
 	    // otherwise: the product without s, then scaled, then added
 	    // (the product is emitted at its own position; scale and sum at
 	    // the caller's, where the accumulator is defined)
@@ -2515,6 +2572,13 @@ class Selector
 	    Value x = scaleBy(scalarOf(scales, mul.getLoc()), *r, mul.getLoc());
 	    if (!dest)
 		return x;
+	    // (one triangle, e.g. of a syrk, added to a whole matrix: completed
+	    // first)
+	    if (lowerOnly.contains(x))
+		x = lk::SycompleteOp::create(b, mul.getLoc(),
+		                             TypeRange{x.getType()},
+		                             lk::Uplo::lower, x)
+		        ->getResult(0);
 	    return accumulate(x, dest, 1.0, beta, mul.getLoc());
 	}
 	if (dynScales.empty()) {
@@ -2523,10 +2587,20 @@ class Selector
 	    if (std::optional<Value> x = explicitInverse(c, mul.getLoc())) {
 		Value r = *x;
 		unusedIdentities.push_back(c.leaves.back().v);
+		double a = alpha * c.alpha;
+		// one triangle (potri): a value as it is (replace bridges the
+		// types), completed before it is added to a whole matrix
+		if (lowerOnly.contains(r) && !dest && a == 1)
+		    return r;
+		if (lowerOnly.contains(r))
+		    r = lk::SycompleteOp::create(b, mul.getLoc(),
+		                                 TypeRange{r.getType()},
+		                                 lk::Uplo::lower, r)
+		            ->getResult(0);
 		if (r.getType() != mul.getType())
 		    r = AssumeOp::create(b, mul.getLoc(), mul.getType(), r,
 		                         false);
-		return accumulate(r, dest, alpha * c.alpha, beta, mul.getLoc());
+		return accumulate(r, dest, a, beta, mul.getLoc());
 	    }
 	}
 	SmallVector<Plan> plans = plansOf(c, mul);
@@ -2874,6 +2948,22 @@ class Selector
 	    flip = tr > nt && !products.empty() && identities.empty() && !sym &&
 	           square && users && !add->getUsers().empty() && !inBranch;
 	}
+	// (a Gram product Z^T Z, also scaled: syrk updates the lower triangle)
+	auto gram = [](MulOp m) {
+	    auto fs = m.getFactors();
+	    if (fs.size() != 2)
+		return false;
+	    auto t0 = fs[0].getDefiningOp<TransposeOp>();
+	    auto t1 = fs[1].getDefiningOp<TransposeOp>();
+	    return (t0 && t0.getOperand() == fs[1]) ||
+	           (t1 && t1.getOperand() == fs[0]);
+	};
+	bool keepLower =
+	    !flip && plain.size() == 1 &&
+	    (lowerOnly.contains(plain[0].first) ||
+	     storageOf(plain[0].first) == 1) &&
+	    (!identities.empty() || !products.empty()) &&
+	    llvm::all_of(products, [&](Product &p) { return gram(p.mul); });
 	for (auto &[v, alpha] : plain) {
 	    if (flip) {
 		if (auto t = v.getDefiningOp<TransposeOp>()) {
@@ -2895,7 +2985,12 @@ class Selector
 		v = untransposed(l, add.getLoc()).v;
 		continue;
 	    }
-	    v = full(v); // geaxpy / gescal read the whole matrix
+	    // geaxpy / gescal read the whole matrix; a single matrix stored as
+	    // its lower triangle plus identities (A + gamma I) stays so:
+	    // adddiag changes only the diagonal
+	    if (keepLower)
+		continue;
+	    v = full(v);
 	}
 	Location loc = add.getLoc();
 	Value acc;
@@ -2952,7 +3047,7 @@ class Selector
 		a = a ? arith::MulFOp::create(b, loc, a, x).getResult() : x;
 	    if (!a)
 		a = constant(elt, 1.0, loc);
-	    bool lower = lowerOnly.contains(acc);
+	    bool lower = lowerOnly.contains(acc) || keepLower;
 	    acc =
 	        lk::AdddiagOp::create(b, loc, TypeRange{acc.getType()}, a, acc)
 	            ->getResult(0);

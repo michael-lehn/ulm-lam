@@ -749,7 +749,17 @@ class Function:
             outs = [_plain(_as_value(o)) for o in out]
             for o in outs:
                 o._matrix("a result")
-            ups = [(k, _plain(v)) for k, v in sorted(self._updates.items())]
+            def kept(k, v):
+                # (the new value of a parameter stored as one triangle keeps
+                # the storage, see _update; other properties are dropped)
+                st = v.type.props & {"lower_stored", "upper_stored"}
+                if not st or not (self.params[k][1].props & st):
+                    return _plain(v)
+                if v.type.props == st | {"symmetric"}:
+                    return v
+                return _cast(v, MatrixType(v.type.rows, v.type.cols,
+                                           frozenset(st | {"symmetric"})))
+            ups = [(k, kept(k, v)) for k, v in sorted(self._updates.items())]
             results = outs + [v for _, v in ups]
             pos = {x: k for k, x in enumerate(self.sizes)}
             for v in outs:
@@ -802,6 +812,15 @@ class Function:
                 v = _as_value(value)
                 if (v.type.rows, v.type.cols) != (t.rows, t.cols):
                     raise LamError(f"lam.update: {v.type} instead of {t}")
+                # a parameter stored as one triangle keeps its storage: the
+                # new value needs only that triangle (LAPACK's uplo), no
+                # completion of the other one
+                stored = t.props & {"lower_stored", "upper_stored"}
+                if stored and isinstance(v, Value):
+                    sym = t.props & {"symmetric", "spsd", "spd"}
+                    v = _cast(_plain(v), MatrixType(
+                        v.type.rows, v.type.cols,
+                        frozenset(v.type.props | sym | stored)))
                 self._updates[k] = v
                 return
         raise LamError("lam.update: the first argument must be a parameter "
