@@ -308,20 +308,30 @@ cd ulm-lam
 make plugin                # the MLIR dialects and passes, an mlir-opt plugin
 ```
 
-Julia (tested with 1.13):
+Julia (1.10 or newer; tested with 1.10 to 1.13 on macOS and Linux):
 
 ```sh
 julia --project=notebook -e 'using Pkg; Pkg.instantiate()'
 julia --project=notebook -e 'using Pluto; Pluto.run(notebook="notebook/ulm-lam.jl")'
 ```
 
-or `] dev julia/UlmLAM` in your own environment.  Python 3 (NumPy
-optional): `PYTHONPATH=python python3 python/examples/gp.py`.
+or `] dev julia/UlmLAM` in your own environment.  By default the generated
+code is Julia calling the BLAS (Basic Linear Algebra Subprograms) and
+LAPACK (Linear Algebra PACKage) Julia uses: no C++ compiler is needed.
+UlmLAM.jl is on its way to the General registry, together with the
+compiler as a binary package (ulm_lam_jll, built from
+[`CMakeLists.txt`](CMakeLists.txt) with
+[this recipe](packaging/yggdrasil/U/ulm_lam/build_tarballs.jl)); then
+`] add UlmLAM` is all it takes, without LLVM.  Python 3 (NumPy optional):
+`PYTHONPATH=python python3 python/examples/gp.py`.
 
-Environment: `LLVM_PREFIX` (default `brew --prefix llvm`), `ULM_LAM_BACKEND`
-(`julia`, `ulmblas` or `cblas`), `ULMBLAS_DIR` (the ulmBLAS sources, for
-`ulmblas`), `ULM_LAM_BLAS_LIBS` (link flags for `cblas`), `CXX`, `OPENMP=0`
-(without OpenMP, Open Multi-Processing).
+Environment: `LLVM_PREFIX` (default `brew --prefix llvm`), `ULM_LAM` (the
+compiler executable to use), `ULM_LAM_BACKEND` (Julia: `julia`, `lbt`
+(C++ on Julia's BLAS), `ulmblas` or `cblas`; Python: `ulmblas` or
+`cblas`), `ULM_LAM_CACHE` (where Julia keeps compiled programs),
+`ULMBLAS_DIR` (the ulmBLAS sources, for `ulmblas`), `ULM_LAM_BLAS_LIBS`
+(link flags for `cblas`), `CXX`, `OPENMP=0` (without OpenMP, Open
+Multi-Processing).
 
 ## Development
 
@@ -338,6 +348,7 @@ showcases torch` runs the Python showcases.
 | `include/ulm_lam/*.td` | ODS of the `ulm_lam` and `ulm_lamk` dialects, interfaces, passes, the kernel catalogue |
 | `lib/` | the mlir-opt plugin: both dialects, normalisation, property inference, kernel selection, workspace, info, lowering to EmitC |
 | `tools/ulm-lam-opt.cpp` | `ulm-lam-opt`: mlir-opt with the ulm.lam dialects and passes (`build/bin/`) |
+| `tools/ulm-lam.cpp` | `ulm-lam`: the whole pipeline in one executable, to C++ or Julia (`scripts/build-driver.sh`, or `CMakeLists.txt`) |
 | `test/` | lit/FileCheck tests of the passes: normalisation, property inference, kernel selection, lowering |
 | `scripts/ulm-lam-compile.sh` | the pipeline from `ulm_lam` to C++ (keeps every stage) |
 | `include/ulm_lam/cblas_backend.h` | the CBLAS/LAPACK backend of the generated code |
@@ -361,8 +372,9 @@ open":
   what follows); a search over whole programs, as Linnea does; e-graphs;
   kernels described as data.
 - **Evaluation.** The LAMP benchmark and Linnea's application problems.
-- **Usability and reach.** `Pkg.add` without a local LLVM/MLIR and C++
-  compiler; differentiation at the matrix level; a connection to
+- **Usability and reach.** Registering UlmLAM.jl and ulm_lam_jll (the
+  code is ready: no LLVM/MLIR and no C++ compiler needed by users);
+  differentiation at the matrix level; a connection to
   Reactant.jl/Enzyme-JAX; a `torch.compile` backend; a GPU backend.
 
 ## Background
