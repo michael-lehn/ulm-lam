@@ -30,6 +30,19 @@ An early research prototype: dense real matrices, in double or single
 precision (from Julia a function called with `Float32` arrays is compiled
 for `Float32`; from Python `lam.compile(f, dtype="float32")`).
 
+## Contents
+
+- [Julia](#julia)
+- [Python](#python)
+- [What you can write](#what-you-can-write)
+- [Measurements](#measurements)
+- [How it works](#how-it-works)
+- [Installation](#installation)
+- [Development](#development)
+- [What is open](#what-is-open)
+- [Background](#background)
+- [Open questions](#open-questions)
+
 ## Julia
 
 ```julia
@@ -295,3 +308,63 @@ Much of ulm.lam's view of the problem comes from
 [Linnea](https://github.com/HPAC/linnea) (Henrik Barthels, Christos
 Psarras, Paolo Bientinesi), which solves the Linear Algebra Mapping
 Problem by a graph search.
+
+## Open questions
+
+Questions that are less about implementation than about what the right
+thing to do is (also discussed on the
+[LLVM Discourse](https://discourse.llvm.org/t/mapping-numerical-linear-algebra-code-onto-blas-lapack/92808)).
+
+**When are parentheses sacred?**  A compiler is greedy: `X = A * B * C`
+gets parenthesised so that the flops are minimal, and ulm.lam does exactly
+that (it flattens `A*(B*C)` into one chain and reorders it).  But sometimes
+the parentheses were set for numerical reasons.  For `X = A*(B - C)`
+versus `X = A*B - A*C` it is easy to say which needs fewer flops, but not
+which is numerically stable: when `B` and `C` are close, the difference
+`B - C` is computed exactly or nearly so, while `A*B - A*C` subtracts two
+large, rounded products.  ulm.lam does not apply distributivity, so both
+stay as written; in the [e-graph experiment](experiments/egraph) such a
+rewrite would be a single rule, and then the question becomes urgent.  One
+way out: "volatile" blocks, or attributes, that suppress certain rewrites
+where the author fixed the order on purpose.
+
+**What is the objective function?**  Flops are not the whole story.
+Reimplementing LAPACK (FLENS-LAPACK, compared bit for bit against LAPACK)
+showed how much more complex LAPACK's implementations of well-known
+algorithms are than the textbook versions.  For eigenvalues, for example,
+LAPACK has several variants, one slower but very robust, others fast but
+less robust; after an iteration it computes a non-trivial error estimate
+and chooses the variant for the next one.  A tiny difference in a result
+can change the path the algorithm takes, even whether it converges.  A
+factorisation can also succeed (`info = 0`) and still be useless for the
+next step, e.g. the QR factorisation of a numerically rank-deficient
+matrix.  What a compiler should optimise for, and what it must keep, is
+open.
+
+**Workspace: LAPACK style or MATLAB style?**  LAPACK's way is a workspace
+given by the caller, with a query for its size (`lwork = -1`); ulm.lam
+does the same, and the query accumulates over calls: if `foo` calls `bar`,
+`foo`'s workspace contains `bar`'s part, and nothing is allocated inside
+nested calls.  How much workspace there is depends on how the functions
+are written.  The guideline: write the functions that do the work LAPACK
+style, with `inout` parameters where a matrix may be overwritten and
+results written into parameters (`update!` in Julia, `lam.update` in
+Python), so that the workspace is minimal, often none at all; and put a
+user-friendly MATLAB-style wrapper with read-only parameters on top.  The
+copies, and the workspace for them, are then in the wrapper only:
+
+```julia
+@lam bar!(M::InOut(Mat(:n, :n, :spd)), y::InOut(Vec(:n))) = update!(y, M \ y)
+@lam foo!(M::InOut(Mat(:n, :n, :spd)), N::InOut(Mat(:n, :n, :spd)), y::InOut(Vec(:n))) =
+    update!(y, bar!(M, bar!(N, y)))
+@lam foo(M::Mat(:n, :n, :spd), N::Mat(:n, :n, :spd), y::Vec(:n)) = foo!(M, N, y)
+```
+
+`bar!` and `foo!` need no workspace; `foo` copies `y` directly into its
+result and `M`, `N` into its workspace, and calls `foo!`, which is the
+wrapper one would write by hand.  Written MATLAB style throughout, every
+level pays for its own copies ([examples/calls](examples/calls), section
+"Functions calling functions" of the design document).  Open is whether
+the compiler should do more here: derive the LAPACK-style variant from a
+MATLAB-style function itself, or warn where a copy could be avoided by an
+`inout` parameter.

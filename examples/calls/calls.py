@@ -77,3 +77,44 @@ print("workspace of bar2:", lib2.bar2.workspace_size(M, y), "bytes, of foo2:",
 print(lib2.foo2.code)
 print(lib2.foo3.code)
 print(lib2.bar2.code)
+
+# LAPACK style: bar_ and foo_ overwrite y with the solution (and M, N with
+# their Cholesky factors), so neither needs a workspace; foo_matlab is the
+# user-friendly wrapper that leaves its arguments alone: the copies, and so
+# the workspace, are in it only.
+
+
+@lam.function
+def bar_(M: InOut(Matrix("n", "n", "spd")), y: InOut(Vector("n"))):
+    lam.update(y, M.inv @ y)
+
+
+@lam.function
+def foo_(M: InOut(Matrix("n", "n", "spd")), N: InOut(Matrix("n", "n", "spd")),
+         y: InOut(Vector("n"))):
+    lam.update(y, bar_(M, bar_(N, y)))
+
+
+@lam.function
+def foo_matlab(M: Matrix("n", "n", "spd"), N: Matrix("n", "n", "spd"),
+               y: Vector("n")):
+    return foo_(M, N, y)
+
+
+lib3 = lam.compile([foo_matlab], name="calls_lapack_py")   # and foo_, bar_
+M4, N4, y4 = M.copy(), N.copy(), y.copy()
+lib3.foo_(M4, N4, y4)                 # y4 is the solution now
+x5 = lib3.foo_matlab(M, N, y)
+print("errors:", np.linalg.norm(y4 - ref) / np.linalg.norm(ref), ",",
+      np.linalg.norm(x5.ravel() - ref) / np.linalg.norm(ref),
+      "; after foo_: lower triangle of M ≈ cholesky(M):",
+      bool(np.allclose(np.tril(M4), np.linalg.cholesky(M))))
+print("workspace (LAPACK style) of bar:", lib3.bar_.workspace_size(M, y),
+      "bytes, of foo:", lib3.foo_.workspace_size(M, N, y),
+      "bytes; of foo_matlab:", lib3.foo_matlab.workspace_size(M, N, y),
+      "bytes")
+(here / "calls_lapack_py.mlir").write_text(lam.module([foo_matlab]))
+(here / "calls_lapack_py.cpp").write_text(lib3.source)
+print(lib3.foo_.code)
+print(lib3.bar_.code)
+print(lib3.foo_matlab.code)

@@ -250,7 +250,7 @@ end
 Compile ulm.lam functions into a shared library.  backend=:cblas runs the
 same kernel calls on CBLAS/LAPACK (OpenBLAS by default).
 """
-function compile(functions::Vector{LamFunction}; name::AbstractString=string(functions[1].name),
+function compile(functions::Vector{LamFunction}; name::AbstractString=cname(functions[1]),
                  backend::Symbol=Symbol(get(ENV, "ULM_LAM_BACKEND", "julia")),
                  eltype::Type=Float64)
     backend in (:julia, :ulmblas, :cblas) ||
@@ -303,14 +303,24 @@ function compile(functions::Vector{LamFunction}; name::AbstractString=string(fun
                 Dict{Symbol,Any}(), Workspace(), Any[], eltype)
     codes = info_codes(src)
     # (the functions they call too: callable from Julia as well)
-    byname = Dict(string(f.name) => f for f in allfunctions)
+    byname = Dict{String,LamFunction}()
+    for f in allfunctions
+        g = get(byname, cname(f), f)
+        g === f || throw(LamError("$(f.name) and $(g.name) are both $(cname(f)) in C"))
+        byname[cname(f)] = f
+    end
+    # (the messages name the functions as Julia does: foo!, not foo_)
+    jn = [("call of $c " => "call of $(g.name) ") for (c, g) in byname if c != string(g.name)]
+    isempty(jn) || for (fn_, cs) in codes, k in keys(cs)
+        cs[k] = replace(cs[k], jn...)
+    end
     for (fname, rows) in ifaces
         haskey(byname, fname) || continue
         fptr = Libdl.dlsym(handle, fname)
         types = [ctype(t) for (t, _) in rows]
         argnames = [Symbol("a$k") for k in 1:length(types)]
         caller = eval(:(($(argnames...),) -> ccall($fptr, Int64, ($(types...),), $(argnames...))))
-        L.functions[Symbol(fname)] = CompiledFunction(L, fname, rows, byname[fname], caller,
+        L.functions[byname[fname].name] = CompiledFunction(L, fname, rows, byname[fname], caller,
                                                        get(codes, fname, Dict{Int,String}()),
                                                        !isempty(rows) && rows[end][2] == "info",
                                                        Dict{Vector{Int},Int}(), eltype)
@@ -545,7 +555,7 @@ ULM_LAM_BACKEND, default :julia) and kept.
 function library(f::LamFunction, T::Type=Float64)::Library
     libs = get!(() -> Dict{DataType,Library}(), JIT, f)
     get!(libs, T) do
-        lib = compile(f; name=T == Float64 ? string(f.name) : "$(f.name)_f32", eltype=T)
+        lib = compile(f; name=T == Float64 ? cname(f) : "$(cname(f))_f32", eltype=T)
         b = get(BINDINGS, f, nothing)
         b === nothing || bind!(lib; b...)
         lib
