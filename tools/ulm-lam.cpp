@@ -17,17 +17,39 @@
 
 #include "UlmLamDialect.h"
 
+#include "mlir/Conversion/Passes.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Arith/Transforms/BufferDeallocationOpInterfaceImpl.h"
+#include "mlir/Dialect/Arith/Transforms/BufferViewFlowOpInterfaceImpl.h"
+#include "mlir/Dialect/Arith/Transforms/BufferizableOpInterfaceImpl.h"
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
+#include "mlir/Dialect/Bufferization/Transforms/FuncBufferizableOpInterfaceImpl.h"
+#include "mlir/Dialect/Bufferization/Transforms/Passes.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
+#include "mlir/Dialect/ControlFlow/Transforms/BufferDeallocationOpInterfaceImpl.h"
+#include "mlir/Dialect/ControlFlow/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/EmitC/IR/EmitC.h"
+#include "mlir/Dialect/EmitC/Transforms/Passes.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/MemRef/Transforms/AllocationOpInterfaceImpl.h"
+#include "mlir/Dialect/MemRef/Transforms/BufferViewFlowOpInterfaceImpl.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/SCF/Transforms/BufferDeallocationOpInterfaceImpl.h"
+#include "mlir/Dialect/SCF/Transforms/BufferizableOpInterfaceImpl.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Tensor/Transforms/BufferizableOpInterfaceImpl.h"
+#include "mlir/Dialect/Tensor/Transforms/SubsetInsertionOpInterfaceImpl.h"
+#include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/MLIRContext.h"
-#include "mlir/InitAllDialects.h"
-#include "mlir/InitAllExtensions.h"
-#include "mlir/InitAllPasses.h"
 #include "mlir/Parser/Parser.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Support/FileUtilities.h"
 #include "mlir/Target/Cpp/CppEmitter.h"
+#include "mlir/Transforms/Passes.h"
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/Support/CommandLine.h"
@@ -596,7 +618,13 @@ int
 main(int argc, char **argv)
 {
     llvm::InitLLVM init(argc, argv);
-    registerAllPasses();
+    // only what the three pipelines use (not registerAll*: that would link
+    // every dialect and every LLVM target into the executable)
+    registerTransformsPasses();
+    bufferization::registerBufferizationPasses();
+    bufferization::registerBufferizationPipelines();
+    registerReconcileUnrealizedCastsPass();
+    emitc::registerEmitCPasses();
     ::ulm_lam::registerResultsToOutParamsPass();
     ::ulm_lam::registerConvertUlmLamkToUlmBLASPass();
     ::ulm_lam::registerUlmLamPasses();
@@ -615,8 +643,23 @@ main(int argc, char **argv)
     }
 
     DialectRegistry registry;
-    registerAllDialects(registry);
-    registerAllExtensions(registry);
+    registry.insert<arith::ArithDialect, bufferization::BufferizationDialect,
+                    cf::ControlFlowDialect, emitc::EmitCDialect,
+                    func::FuncDialect, memref::MemRefDialect, scf::SCFDialect,
+                    tensor::TensorDialect, ub::UBDialect>();
+    arith::registerBufferizableOpInterfaceExternalModels(registry);
+    arith::registerBufferDeallocationOpInterfaceExternalModels(registry);
+    arith::registerBufferViewFlowOpInterfaceExternalModels(registry);
+    bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(
+        registry);
+    cf::registerBufferizableOpInterfaceExternalModels(registry);
+    cf::registerBufferDeallocationOpInterfaceExternalModels(registry);
+    memref::registerAllocationOpInterfaceExternalModels(registry);
+    memref::registerBufferViewFlowOpInterfaceExternalModels(registry);
+    scf::registerBufferizableOpInterfaceExternalModels(registry);
+    scf::registerBufferDeallocationOpInterfaceExternalModels(registry);
+    tensor::registerBufferizableOpInterfaceExternalModels(registry);
+    tensor::registerSubsetOpInterfaceExternalModels(registry);
     registry
         .insert<mlir::ulm_lam::UlmLamDialect, mlir::ulm_lamk::UlmLamkDialect>();
     mlir::ulm_lam::registerBufferizationModels(registry);

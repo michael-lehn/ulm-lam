@@ -12,11 +12,15 @@ if [ -n "${STATIC:-}" ]; then
 	OUT="$ROOT/build/bin-static/ulm-lam"
 	mkdir -p "$(dirname "$OUT")"
 	libs=$("$LLVM/bin/llvm-config" --link-static --libs --system-libs 2>/dev/null)
+	# zstd is not in LLVM's prefix: its static library, if Homebrew has it
+	zstd="$(brew --prefix zstd 2>/dev/null)/lib/libzstd.a"
+	[ -f "$zstd" ] && libs="${libs//-lzstd/$zstd}"
 	mlir=$(cd "$LLVM/lib" && ls libMLIR*.a | sed 's/^lib\(.*\)\.a$/-l\1/' | tr '\n' ' ')
 	"$LLVM/bin/clang++" -std=c++17 -O2 -fno-rtti \
 		-I "$LLVM/include" -I "$ROOT/lib" -I "$GEN" \
 		"$ROOT/tools/ulm-lam.cpp" $(ls "$ROOT"/lib/*.cpp | grep -v Plugin.cpp) \
-		-L "$LLVM/lib" -Wl,-search_paths_first $mlir $libs -o "$OUT"
+		-L "$LLVM/lib" -Wl,-search_paths_first -Wl,-dead_strip -Wl,-dead_strip_dylibs $mlir $libs -o "$OUT"
+	strip "$OUT"
 	echo "$OUT"
 	exit 0
 fi
