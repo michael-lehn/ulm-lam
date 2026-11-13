@@ -158,6 +158,10 @@ rules = ruleset(
     # inverses become solves: Cholesky for spd matrices, LU otherwise
     rewrite(Inv(s) * b).to(TrsmLt(Chol(s), TrsmL(Chol(s), b)), spd(s)),
     rewrite(Inv(a) * b).to(LuSolve(Lu(a), b)),
+    # a lower triangular matrix is its own factor: L^-1 B, L^-T B
+    rewrite(Inv(l) * b).to(TrsmL(l, b), lower(l)),
+    rewrite(Inv(T(l)) * b).to(TrsmLt(l, b), lower(l)),
+    rewrite(T(Inv(l)) * b).to(TrsmLt(l, b), lower(l)),
     # a solve from the right: B A^-1 = (A^-T B^T)^T
     rewrite(b * Inv(a)).to(T(Inv(T(a)) * T(b))),
     # X^T L^-T = (L^-1 X)^T: a solve moves to the other factor

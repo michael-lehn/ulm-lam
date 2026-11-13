@@ -66,5 +66,9 @@ end
     end
     @test norm(x - xr) / norm(xr) < 1e-12 && norm(P - Pr) / norm(Pr) < 1e-12
     @test P == P'                     # syrk: symmetric by construction
-    @test occursin(r"syrk +T\d+ ← T\d+ − T\d+ T\d+ᵀ", string(@code_lam ef_kalman()))
+    t = string(@code_lam ef_kalman())
+    @test occursin(r"syrk +T\d+ ← T\d+ − (T\d+ T\d+ᵀ|T\d+ᵀ T\d+)", t)
+    # K is never formed: one trsm (W = L⁻¹ H P), K r as Wᵀ (L⁻¹ r)
+    @test count("trsm", t) == 1 && occursin("trsv", t)
+    @test !occursin("if cheaper", t)
 end
