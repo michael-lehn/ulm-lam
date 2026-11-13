@@ -185,8 +185,33 @@ After these, 16 and 20 findings remain in two runs of 200 problems
   error), and `(A⁻¹)ᵀ` of an LU factorisation is still a solve with the
   identity.
 
+## The Woodbury identity
+
+A rule beyond the selection's: `(I + ZᵀZ)⁻¹ C = C − Zᵀ (I + ZZᵀ)⁻¹ Z C`
+(scales are not modelled), an N × N instead of a p × p factorisation for Z
+of size N × p.  It applies to its own result again, so it is a ruleset of
+its own, run once between the rounds of the other rules; otherwise the
+e-graph grows to millions of e-classes, the ILP's acyclicity constraints
+need a big-M of that size, and HiGHS's integrality tolerance then admits
+cycles (the extraction now rejects a non-optimal or cyclic solution).
+
+The selection got the same rewrite (`woodbury`): `inv(αI + β ZᵀZ)` used
+only in products is generated both ways, in an `scf.if` on N < p, and the
+Woodbury form is distributed over the products, so that no p × p matrix is
+formed (`test/select/woodbury.mlir`, `python/examples/laplace.py`: the
+last-layer Laplace approximation).  The e-graph agrees with the choice in
+both regimes:
+
+| problem | ulm.lam | e-graph (ILP) |
+|:--|--:|--:|
+| laplace_wide, N = 500, p = 4000 | 2.09e+09 | 2.07e+09 |
+| laplace_tall, N = 4000, p = 500 | 1.12e+09 | 1.12e+09 |
+
+The 1 % in the wide case: the e-graph computes the mean from products it
+forms for the covariance and the factorisation anyway (`Φ* Φᵀ`, `Φ Φᵀ`),
+the selection with matrix-vector products of its own.
+
 Next: plans lowered back to `ulm_lamk` (`strategy=egraph`), which needs
-symbolic costs when sizes are known only at run time; rules beyond the
-selection's (the Woodbury identity, whose benefit depends on the sizes);
-MLIR's (Multi-Level Intermediate Representation) own equality saturation work (eqsat, DialEgg) as an alternative to
-egglog.
+symbolic costs when sizes are known only at run time; MLIR's
+(Multi-Level Intermediate Representation) own equality saturation work
+(eqsat, DialEgg) as an alternative to egglog.

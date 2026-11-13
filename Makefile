@@ -59,8 +59,9 @@ dynamic:        ## GLS with sizes as run-time parameters: one library, several s
 gp:             ## Gaussian process regression on public data (downloaded once)
 	python3 python/examples/gp.py
 
-showcases:      ## ridge, linear attention, Kalman filter, Bayesian regression (Python vs NumPy)
+showcases:      ## ridge, linear attention, Kalman filter, Bayesian regression, last-layer Laplace (Python vs NumPy)
 	python3 python/examples/ridge.py
+	python3 python/examples/laplace.py
 	python3 python/examples/attention.py
 	python3 python/examples/kalman_filter.py
 	python3 python/examples/bayes.py

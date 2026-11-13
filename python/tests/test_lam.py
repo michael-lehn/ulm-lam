@@ -772,9 +772,16 @@ class Selection(unittest.TestCase):
         def plus_gram(A: Matrix("n", "n"), a: Matrix("B", "n"), c: Float):
             return A + c * (a.T @ a)
 
+        @lam.function
+        def last_layer(Phi: Matrix("N", "p"), y: Vector("N"),
+                       Phis: Matrix("M", "p"), alpha: Float, beta: Float):
+            A = lam.assume(alpha * lam.eye("p") + beta * (Phi.T @ Phi),
+                           "spd")
+            return beta * Phis @ A.inv @ Phi.T @ y, Phis @ A.inv @ Phis.T
+
         cls.lib = lam.compile([lora, solve_in_sum, gram_left, inverses,
-                               information, running_average, plus_gram],
-                              name="selection")
+                               information, running_average, plus_gram,
+                               last_layer], name="selection")
         cls.r = np.random.default_rng(3)
 
     def spd(self, n):
@@ -834,6 +841,20 @@ class Selection(unittest.TestCase):
         ref = M + 0.1 * a.T @ a
         got = self.lib.plus_gram(M, a, 0.1)
         self.assertLess(np.abs(got - ref).max() / np.abs(ref).max(), 1e-14)
+
+    def test_woodbury_chosen_at_run_time(self):
+        """(alpha I + beta Phi^T Phi)^-1 in products: the Woodbury identity
+        for N < p (an N x N factorisation), as written otherwise."""
+        for N, p in ((40, 6), (6, 40), (20, 20)):
+            Phi = self.r.standard_normal((N, p))
+            y, Phis = self.r.standard_normal(N), self.r.standard_normal((5, p))
+            A = 2.0 * np.eye(p) + 25.0 * Phi.T @ Phi
+            mean, cov = self.lib.last_layer(Phi, y, Phis, 2.0, 25.0)
+            rm = 25.0 * Phis @ np.linalg.solve(A, Phi.T @ y)
+            rc = Phis @ np.linalg.solve(A, Phis.T)
+            self.assertLess(np.abs(mean.ravel() - rm).max()
+                            / np.abs(rm).max(), 1e-10)
+            self.assertLess(np.abs(cov - rc).max() / np.abs(rc).max(), 1e-10)
 
     def test_information_form(self):
         P, H, R = self.spd(N), self.r.standard_normal((K, N)), self.spd(K)

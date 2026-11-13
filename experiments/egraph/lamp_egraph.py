@@ -190,6 +190,8 @@ rules = ruleset(
     rewrite(a + Mat("I", r, r)).to(AddDiag(a)),
     rewrite(Mat("I", r, r) + a).to(AddDiag(a)),
     # properties
+    rule(eq(e).to(Syrk(z))).then(spsd(e), sym(e)),
+    rule(eq(e).to(AddDiag(a)), spsd(a)).then(spd(e)),
     rule(spd(s)).then(lower(Chol(s)), sym(s), spsd(s)),
     rule(eq(e).to((a * s) * T(a)), spd(s)).then(spsd(e), sym(e)),
     rule(eq(e).to(a * (s * T(a))), spd(s)).then(spsd(e), sym(e)),
@@ -197,6 +199,15 @@ rules = ruleset(
     rule(fullrank(x), Chol(s)).then(fullrank(TrsmL(Chol(s), x))),
     rule(fullrank(z), Syrk(z)).then(spd(Syrk(z))),
     rule(fullrank(z), T(z) * z).then(spd(T(z) * z)),
+)
+
+# the Woodbury identity, (I + Z^T Z)^-1 C = C - Z^T (I + Z Z^T)^-1 Z C
+# (scales are not modelled): an N x N instead of a p x p factorisation.  A
+# ruleset of its own, run once between the rounds of the other rules: it
+# applies to its own result again, and the e-graph would grow without end.
+woodbury = ruleset(
+    rewrite(Inv(AddDiag(Syrk(z))) * c).to(
+        c - T(z) * (Inv(AddDiag(Syrk(T(z)))) * (z * c))),
 )
 
 INF = 1e30
