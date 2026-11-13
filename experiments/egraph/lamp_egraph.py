@@ -94,6 +94,11 @@ def Gemmtr(a: Mat, b: Mat) -> Mat:
 
 
 @function
+def AddDiag(a: Mat) -> Mat:
+    """A + alpha I: adds to the diagonal (n flops, not n^2)."""
+
+
+@function
 def Pair(a: Mat, b: Mat) -> Mat:
     """Two results of one program (costs nothing)."""
 
@@ -142,6 +147,7 @@ sizes = ruleset(
     _size(LuSolve(l, b), R(b), C(b)),
     _size(Syrk(z), C(z), C(z)),
     _size(Trmm(a, l), R(a), C(l)),
+    _size(AddDiag(a), R(a), C(a)),
     _size(Pair(a, b), R(a), C(a)),
 )
 
@@ -149,12 +155,18 @@ rules = ruleset(
     # associativity
     rewrite((a * b) * c).to(a * (b * c)),
     rewrite(a * (b * c)).to((a * b) * c),
+    # distributivity: (A + B) C = A C + B C (a vector applied to each term)
+    rewrite((a + b) * c).to(a * c + b * c),
+    rewrite((a - b) * c).to(a * c - b * c),
+    rewrite(c * (a + b)).to(c * a + c * b),
+    rewrite(c * (a - b)).to(c * a - c * b),
     # transposes
     rewrite(T(T(a))).to(a),
     rewrite(T(a * b)).to(T(b) * T(a)),
     rewrite(T(b) * T(a)).to(T(a * b)),
     rewrite(T(s)).to(s, spd(s)),
     rewrite(Inv(T(a))).to(T(Inv(a))),
+    rewrite(T(Inv(a))).to(Inv(T(a))),
     # inverses become solves: Cholesky for spd matrices, LU otherwise
     rewrite(Inv(s) * b).to(TrsmLt(Chol(s), TrsmL(Chol(s), b)), spd(s)),
     rewrite(Inv(a) * b).to(LuSolve(Lu(a), b)),
@@ -174,8 +186,11 @@ rules = ruleset(
     # S = L L^T for spd S, and A L with L triangular
     rewrite(s).to(Chol(s) * T(Chol(s)), spd(s)),
     rewrite(a * l).to(Trmm(a, l), lower(l)),
+    # a (scaled) identity is added to the diagonal
+    rewrite(a + Mat("I", r, r)).to(AddDiag(a)),
+    rewrite(Mat("I", r, r) + a).to(AddDiag(a)),
     # properties
-    rule(spd(s)).then(lower(Chol(s)), sym(s)),
+    rule(spd(s)).then(lower(Chol(s)), sym(s), spsd(s)),
     rule(eq(e).to((a * s) * T(a)), spd(s)).then(spsd(e), sym(e)),
     rule(eq(e).to(a * (s * T(a))), spd(s)).then(spsd(e), sym(e)),
     rule(eq(e).to(b + c), spsd(b), spd(c)).then(spd(e)),
@@ -209,6 +224,8 @@ def flops(egraph, e) -> float:
     if f in ("· + ·", "· - ·"):
         m, n = rc(egraph, args[0])
         return 1.0 * m * n
+    if f == "AddDiag":
+        return float(rc(egraph, args[0])[0])
     if f == "Gemmtr":
         (m, k), _ = rc(egraph, args[0]), None
         return 1.0 * m * m * k

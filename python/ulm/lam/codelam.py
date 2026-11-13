@@ -427,6 +427,15 @@ def render(fn: fe.Function, selected: str, infos: dict) -> str:
             y = r.result(res, out)
             r.emit(d, "axpy", f"{y} ← " + _accumulate(
                 "1", old, alpha, r.name(ins[0])))
+        elif op in ("potri", "getri"):
+            f = r.name(out)
+            x = r.result(res, out, "X")
+            if op == "potri":
+                r.emit(d, op, f"{x} ← ({f} {f}ᵀ)⁻¹",
+                       "explicit inverse, one triangle")
+            else:
+                r.emit(d, op, f"{x} ← inv({f})",
+                       "explicit inverse from the LU factors")
         elif op == "sycomplete":
             old = r.name(out)
             a = r.result(res, out)

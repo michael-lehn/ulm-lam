@@ -332,6 +332,36 @@ def UlmLamk_GelsOp : Op<UlmLamk_Dialect, "gels", [
   }];
 }
 
+def UlmLamk_PotriOp : UlmLamk_Op<"potri", "A"> {
+  let summary = "A^-1 from the Cholesky factor of potrf (in place)";
+  let description = [{
+    A holds the factor of potrf in its `uplo` triangle; afterwards that
+    triangle holds A^-1 (symmetric; the other triangle is untouched).  An
+    explicit inverse where solves are not enough (an inverse used as a
+    value): n^3 / 3 flops besides potrf's n^3 / 3, a third of solving with
+    the identity.
+  }];
+  let arguments = (ins UlmLamk_UploAttr:$uplo, UlmLamk_Shaped:$A);
+  let assemblyFormat = [{
+    `uplo` `(` $uplo `)` `outs` `(` $A `:` type($A) `)`
+    attr-dict (`->` type($result)^)?
+  }];
+}
+
+def UlmLamk_GetriOp : UlmLamk_Op<"getri", "A"> {
+  let summary = "A^-1 from the LU factors of getrf (in place)";
+  let description = [{
+    A holds the factors of getrf, ipiv its pivots; afterwards A holds A^-1.
+    4 n^3 / 3 flops besides getrf's 2 n^3 / 3 (solving with the identity:
+    2 n^3).
+  }];
+  let arguments = (ins UlmLamk_Pivots:$ipiv, UlmLamk_Shaped:$A);
+  let assemblyFormat = [{
+    `ins` `(` $ipiv `:` type($ipiv) `)`
+    `outs` `(` $A `:` type($A) `)` attr-dict (`->` type($result)^)?
+  }];
+}
+
 def UlmLamk_GetrsOp : UlmLamk_Op<"getrs", "B"> {
   let summary = "B := op(A)^-1 B (left) or B op(A)^-1 (right), LU factors";
   let description = [{

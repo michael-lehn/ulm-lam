@@ -326,11 +326,14 @@ the parentheses were set for numerical reasons.  For `X = A*(B - C)`
 versus `X = A*B - A*C` it is easy to say which needs fewer flops, but not
 which is numerically stable: when `B` and `C` are close, the difference
 `B - C` is computed exactly or nearly so, while `A*B - A*C` subtracts two
-large, rounded products.  ulm.lam does not apply distributivity, so both
-stay as written; in the [e-graph experiment](experiments/egraph) such a
-rewrite would be a single rule, and then the question becomes urgent.  One
-way out: "volatile" blocks, or attributes, that suppress certain rewrites
-where the author fixed the order on purpose.
+large, rounded products.  ulm.lam keeps both as written.  It does apply
+distributivity, but only where a term of the sum is itself computed, as in
+LoRA's (low-rank adaptation) `(W + B A) x = W x + B (A x)`, and only where
+that is cheaper; a sum of given matrices such as `B - C` is always formed.
+The [e-graph experiment](experiments/egraph), which found the missing
+distributivity, makes the question urgent: there it is a single rule, applied
+wherever it saves flops.  One way out: "volatile" blocks, or attributes,
+that suppress certain rewrites where the author fixed the order on purpose.
 
 **What is the objective function?**  Flops are not the whole story.
 Reimplementing LAPACK (FLENS-LAPACK, compared bit for bit against LAPACK)

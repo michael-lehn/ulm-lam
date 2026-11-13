@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from egglog import EGraph  # noqa: E402
 
+import ilp_extract  # noqa: E402
 import lamp_egraph as G  # noqa: E402
 from ulm import lam  # noqa: E402
 from ulm.lam import Matrix, Vector  # noqa: E402
@@ -187,6 +188,10 @@ def kernel_flops(line: str) -> tuple[str, float]:
     if op == "potrf" or op == "sytrf":
         n = ot[0][0]
         return op, n ** 3 / 3.0
+    if op == "potri":
+        return op, ot[0][0] ** 3 / 3.0
+    if op == "getri":
+        return op, 4.0 * ot[0][0] ** 3 / 3.0
     if op == "getrf":
         n = ot[0][0]
         return op, 2.0 * n ** 3 / 3.0
@@ -237,9 +242,14 @@ def egraph_plan(term, facts, iters=12):
     t0 = time.perf_counter()
     eg.run((G.sizes.saturate() + G.rules) * iters + G.sizes.saturate())
     t = time.perf_counter() - t0
-    dag, cost = eg.extract(root, include_cost=True, cost_model=G.dag_cost,
-                           extractor="greedy-dag")
-    return dag, cost, t
+    try:
+        _, greedy = eg.extract(root, include_cost=True,
+                               cost_model=G.dag_cost, extractor="greedy-dag")
+    except Exception:  # (needs an explicit inverse, which it never forms)
+        greedy = float("nan")
+    t0 = time.perf_counter()
+    cost, result, lines = ilp_extract.extract(eg)
+    return greedy, cost, result, lines, t, time.perf_counter() - t0
 
 
 # -- the problems -------------------------------------------------------------
@@ -359,6 +369,8 @@ def kalman_gain_cov(P: Matrix(1500, 1500, "spd"), H: Matrix(300, 1500),
 
 
 def main(names):
+    verbose = "-v" in names
+    names = [x for x in names if x != "-v"]
     rows = []
     for name, fn in PROBLEMS.items():
         if names and name not in names:
@@ -376,18 +388,22 @@ def main(names):
             ulm, " ".join(k for k, _ in kernels)))
         try:
             term, facts = ir_to_term(text, name)
-            dag, cost, t = egraph_plan(term, facts)
+            greedy, cost, result, lines, t, t_ilp = egraph_plan(term, facts)
         except Exception as ex:
             print("   e-graph:", type(ex).__name__, str(ex)[:200])
             continue
-        print("   e-graph:  %.3g flops  (saturation %.2f s)" % (cost, t))
-        if cost < 0.999 * ulm:
-            print("   plan:    ", str(dag).replace("\n", " ")[:600])
-        rows.append((name, ulm, cost))
-    print("\n| problem | ulm.lam | e-graph (DAG) | e-graph / ulm.lam |")
-    print("|:--|--:|--:|--:|")
-    for name, ulm, eg in rows:
-        print(f"| {name} | {ulm:.3g} | {eg:.3g} | {eg / ulm:.2f} |")
+        print("   e-graph:  %.3g flops, greedy %.3g  (saturation %.2f s, "
+              "ILP %.2f s)" % (cost, greedy, t, t_ilp))
+        if cost < 0.999 * ulm or verbose:
+            for _, text_, f in lines:
+                print(f"      {text_:60s} {f:.3g}")
+            print(f"      result {result}")
+        rows.append((name, ulm, greedy, cost))
+    print("\n| problem | ulm.lam | e-graph, greedy DAG | e-graph, optimal DAG "
+          "(ILP) | ILP / ulm.lam |")
+    print("|:--|--:|--:|--:|--:|")
+    for name, ulm, gr, eg in rows:
+        print(f"| {name} | {ulm:.3g} | {gr:.3g} | {eg:.3g} | {eg / ulm:.2f} |")
     return 0
 
 
