@@ -178,13 +178,17 @@ time and memory allocated per call:
 
 | | ulm.lam | Julia, the formula as written | Julia, written by an expert |
 |:--|--:|--:|--:|
-| GLS (generalised least squares), n = 2000, m = 50 | 26 ms, 4.7 KiB | 221 ms (8.4×), 64 MiB | 25 ms, 31 MiB |
-| GP regression, 4000 training and 1000 test points | 279 ms, 336 MiB | | AbstractGPs.jl: 287 ms, 618 MiB |
-| Kalman filter, n = 1000, m = 100, 20 steps | 389 ms, 15 MiB | 447 ms, 832 MiB | |
-| linear attention, N = 4096, d = 64 | 0.47 ms | `(Q * K') * V`: 20 ms (43×) | `Q * (K' * V)`: 0.48 ms |
+| GLS (generalised least squares), n = 2000, m = 50 | 28 ms, 3.4 KiB | 228 ms (8.1×), 64 MiB | 26 ms, 34 MiB |
+| GP regression, 4000 training and 1000 test points | 289 ms, 328 MiB | 1965 ms (6.8×), 737 MiB | AbstractGPs.jl: 331 ms, 618 MiB |
+| Kalman filter, n = 1000, m = 100, 20 steps | 334 ms, 7.7 MiB | 482 ms (1.4×), 839 MiB | 390 ms, 17 MiB |
+| linear attention, N = 4096, d = 64 | 0.54 ms | `(Q * K') * V`: 22 ms (41×) | `Q * (K' * V)`: 0.51 ms |
 
 The GP memory includes the kernel matrices (KernelFunctions.jl); the
-Kalman memory is mostly the n × n result.  From Python: GP regression with
+Kalman memory is mostly the n × n result.  The expert Kalman filter
+preallocates its buffers, works in place with `mul!` and solves with the
+Cholesky factor of S (in the notebook); ulm.lam is faster because it also
+exploits the symmetry of P: one triangle of F P Fᵀ + Q (`gemmtr`), and
+P − K H P as a `syrk` downdate with W = (H P)ᵀ L⁻ᵀ.  From Python: GP regression with
 n = 8000 is 1.4× faster than SciPy written by hand and 8× faster than NumPy
 with `inv`; ridge regression 3–4× faster than with `inv`; a linear layer
 trained by gradient descent, written as formulas, is as fast as PyTorch on

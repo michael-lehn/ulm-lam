@@ -257,14 +257,14 @@ function render_once(f::LamFunction, body, choice, flags, infos, selected="",
         startswith(line, "scf.yield") && continue
         if (m = match(r"^(?:(%[\w#]+)(?::\d+)? = )?(?:func\.)?call @(\w+)\(([^)]*)\)", line)) !== nothing
             # a ulm.lam function (defined in the module) or a callback
-            defined = occursin("func.func @$(m.captures[2])(", r.selected)
-            note = defined ? "a ulm.lam function" : "your Julia function"
+            isdef = occursin("func.func @$(m.captures[2])(", r.selected)
+            note = isdef ? "a ulm.lam function" : "your Julia function"
             # an inout parameter of the callee gets a copy of a value the
             # caller must not overwrite (a parameter of its own, or a value
             # it still uses): bufferization inserts that copy
             ops_ = [strip(x) for x in split(m.captures[3], ",") if !isempty(strip(x))]
             cups, nres = Tuple{Int,Int}[], 0
-            if defined
+            if isdef
                 sig = r.selected[first(findfirst("func.func @$(m.captures[2])(", r.selected)):end]
                 sig = sig[1:first(findfirst("{\n", sig))]
                 cups, nres = updates_of(sig)

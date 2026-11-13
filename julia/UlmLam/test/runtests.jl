@@ -196,6 +196,10 @@ end
     @test occursin("syrk", t) && occursin("trsv", t)
     @test !occursin("%", t)
     @test occursin("Cholesky factorisation of M", t)
+    # a decision at run time (scf.if): the order of a chain
+    @lam cl_chain(A::Mat(:n, :k), B::Mat(:k, :m), C::Mat(:m, :p)) = A * B * C
+    t = string(code_lam(cl_chain))
+    @test occursin("if cheaper", t) && occursin("else", t)
 end
 
 include("vectorspace.jl")

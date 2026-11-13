@@ -133,15 +133,43 @@ function kalman_literal(F, Q, H, R, x, P, zs)
     x, P
 end
 ''')
+md(r'''
+And as an expert would write it in Julia: preallocated buffers, `mul!` in
+place, the Cholesky factorisation of ``S`` instead of its inverse,
+``H P`` once, ``K H P`` as ``K (H P)``:
+''')
+code(r'''
+function kalman_expert(F, Q, H, R, x, P, zs)
+    x, P = copy(x), copy(P)
+    xp, FP, HP, S, Kt, r = similar(x), similar(P), similar(H), similar(R),
+                           similar(H), similar(zs[1])
+    for z in zs
+        mul!(xp, F, x)                              # predict
+        mul!(FP, F, P); mul!(P, FP, F'); P .+= Q
+        mul!(HP, H, P)                              # update: S = H P H' + R
+        mul!(S, HP, H'); S .+= R
+        C = cholesky!(Symmetric(S))
+        copyto!(Kt, HP); ldiv!(C, Kt)               # K' = S⁻¹ H P
+        mul!(r, H, xp); r .= z .- r                 # x = x + K (z - H x)
+        mul!(x, Kt', r); x .+= xp
+        mul!(P, Kt', HP, -1.0, 1.0)                 # P = P - K (H P)
+    end
+    x, P
+end
+''')
 code(r'''
 compare("ulm.lam" => () -> kalman(F, Q, H, R, x0, P0, steps),
         "Julia, the formula as written" =>
-            () -> kalman_literal(F, Q, H, R, x0, P0, zs))
+            () -> kalman_literal(F, Q, H, R, x0, P0, zs),
+        "Julia, written by an expert" =>
+            () -> kalman_expert(F, Q, H, R, x0, P0, zs))
 ''')
 code(r'''
 let (x, P) = kalman(F, Q, H, R, x0, P0, steps),
-    (x2, P2) = kalman_literal(F, Q, H, R, x0, P0, zs)
-    (norm(x - x2) / norm(x2), norm(P - P2) / norm(P2))
+    (x2, P2) = kalman_literal(F, Q, H, R, x0, P0, zs),
+    (x3, P3) = kalman_expert(F, Q, H, R, x0, P0, zs)
+    (norm(x - x2) / norm(x2), norm(P - P2) / norm(P2),
+     norm(x - x3) / norm(x3), norm(P - P3) / norm(P3))
 end
 ''')
 md(r'''
@@ -337,11 +365,18 @@ begin
         gp(kernelmatrix(kernel, x), s2, kernelmatrix(kernel, x, xs),
            kernelmatrix(kernel, xs), y)
     gp_abstractgps(x, xs, y) = mean_and_cov(posterior(GP(kernel)(x, s2), y)(xs))
+    function gp_literal(x, xs, y)               # the formula as written
+        K, Ks, Kss = kernelmatrix(kernel, x), kernelmatrix(kernel, x, xs),
+                     kernelmatrix(kernel, xs)
+        Kn = K + s2 * I
+        (Ks' * inv(Kn) * y, Kss - Ks' * inv(Kn) * Ks)
+    end
 end;
 ''')
 code(r'''
 compare("ulm.lam (kernel matrices from KernelFunctions.jl)" =>
             () -> gp_ulmlam(xtrain, xtest, ytrain),
+        "Julia, the formula as written" => () -> gp_literal(xtrain, xtest, ytrain),
         "AbstractGPs.jl" => () -> gp_abstractgps(xtrain, xtest, ytrain))
 ''')
 code(r'''
@@ -386,6 +421,64 @@ md(r'''
 does it for any chain inside a larger expression, and together with the
 rest: transposes, symmetry, solves, scalars.)
 
+## LAPACK style, and a MATLAB-style wrapper
+
+Functions that call functions are best written as LAPACK writes them: a
+matrix that may be overwritten is `InOut`, a result goes into a parameter
+(`update!`), and then no workspace is needed.  Here `bar!` overwrites ``y``
+with ``M^{-1} y`` and ``M`` with its Cholesky factor (as `potrf` and `potrs`
+do), and `foo!` calls it twice: ``y \leftarrow M^{-1} (N^{-1} y)``.  Who
+wants it convenient writes a wrapper with read-only parameters, MATLAB
+style; the copies, and the workspace for them, are then in the wrapper only.
+''')
+code(r'''
+begin
+    @lam bar!(M::InOut(Mat(:n, :n, :spd)), y::InOut(Vec(:n))) = update!(y, M \ y)
+    @lam foo!(M::InOut(Mat(:n, :n, :spd)), N::InOut(Mat(:n, :n, :spd)), y::InOut(Vec(:n))) =
+        update!(y, bar!(M, bar!(N, y)))
+    @lam foo_matlab(M::Mat(:n, :n, :spd), N::Mat(:n, :n, :spd), y::Vec(:n)) = foo!(M, N, y)
+end
+''')
+code(r'''
+begin
+    nl = 1000
+    Mspd = (A_ = randn(nl, nl); A_ * A_' + nl * I)
+    Nspd = (B_ = randn(nl, nl); B_ * B_' + nl * I)
+    yv = randn(nl)
+end;
+''')
+code(r'''
+@code_lam foo!(Mspd, Nspd, yv)
+''')
+code(r'''
+@code_lam bar!(Mspd, yv)
+''')
+code(r'''
+@code_lam foo_matlab(Mspd, Nspd, yv)
+''')
+code(r'''
+let lib = UlmLam.library(foo_matlab)                 # with foo! and bar!
+    (bar! = workspace_size(lib.bar!, Mspd, yv),
+     foo! = workspace_size(lib.foo!, Mspd, Nspd, yv),
+     foo_matlab = workspace_size(lib.foo_matlab, Mspd, Nspd, yv))
+end
+''')
+md(r'''
+Workspace in bytes: none for `bar!` and `foo!`; the wrapper needs the copies
+of ``M`` and ``N`` and nothing else.  It copies ``y`` directly into its
+result, in which `foo!` then computes: `x = copy(y); foo!(copy(M), copy(N), x)`,
+the wrapper one would write by hand.
+''')
+code(r'''
+let M1 = copy(Mspd), N1 = copy(Nspd), y1 = copy(yv)
+    foo!(M1, N1, y1)                                 # y1 is the solution now
+    x = foo_matlab(Mspd, Nspd, yv)                    # arguments unchanged
+    (error = norm(y1 - Mspd \ (Nspd \ yv)) / norm(y1),
+     same_as_wrapper = y1 == x,
+     M1_holds_cholesky_factor = triu(M1) ≈ cholesky(Symmetric(Mspd)).U)
+end
+''')
+md(r'''
 ## Any BLAS
 
 ulm.lam calls the BLAS and LAPACK Julia uses, through libblastrampoline:
@@ -437,7 +530,7 @@ MLIR passes then
 | facts | `assume(A, props...)` for what the compiler cannot derive |
 | control | `loop(n, carry...) do i, x... end`, several results as a tuple |
 | Julia code | `extern(name, argtypes, result)` and `bind!(f; name = g)` |
-| in place | `InOut(Mat(...))`: a parameter the function may overwrite |
+| in place | `InOut(Mat(...))`: a parameter the function may overwrite; `update!(p, value)`: it holds `value` on exit |
 | inspect | `@code_lam f(args...)` |
 
 In Python the same with `@lam.function`, `Matrix("n", "m", "spd")`, `@`,
