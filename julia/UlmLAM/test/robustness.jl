@@ -1,7 +1,7 @@
 # What a user tries first: wrappers and views as arguments, other element
 # types, empty matrices, calls from several threads, powers, I, and clear
 # errors for what is not supported.
-using UlmLam, LinearAlgebra, Random, Test
+using UlmLAM, LinearAlgebra, Random, Test
 
 @testset "robustness" begin
     Random.seed!(11)

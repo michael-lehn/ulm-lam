@@ -17,7 +17,7 @@ separately and point the script at it (from the root of the repository):
 \begin{lstlisting}[style=sh]
 git worktree add ../ulm-lam-4185542 4185542
 make -C ../ulm-lam-4185542 plugin tool check   # dialects, passes, ulm-lam-opt; lit tests
-julia --project=../ulm-lam-4185542/julia/UlmLam -e 'using Pkg; Pkg.instantiate()'
+julia --project=../ulm-lam-4185542/julia/UlmLAM -e 'using Pkg; Pkg.instantiate()'
 ULM_LAM_ROOT=$PWD/../ulm-lam-4185542 doc/field-guide-companion/examples/run.sh
 cd doc/field-guide-companion && latexmk        # this document (LuaLaTeX)
 \end{lstlisting}

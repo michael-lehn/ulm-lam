@@ -91,7 +91,7 @@ needed. Loops are the exception, discussed next.
 \paragraph{Loops: facts are re-declared, not inferred} A loop-carried
 matrix enters the loop body as a block argument. The Julia frontend gives
 every loop-carried value a type without properties (\code{plainvalue} in
-\code{loop}, \srcref{julia/UlmLam/src/frontend.jl}{408}{434}), and
+\code{loop}, \srcref{julia/UlmLAM/src/frontend.jl}{408}{434}), and
 \code{ulm-lam-infer-properties} refines op results only, not block
 arguments. A fact that holds in every iteration therefore has to be
 re-declared, as the Kalman filter in the README does:
@@ -124,7 +124,7 @@ The ODS description (\srcref{include/ulm_lam/UlmLamOps.td}{135}{154}) says:
 This is the only op that may add facts that inference cannot derive.'' At
 this commit the \code{checked} variant is not implemented
 (\cref{sec:infra-analogy}); the Julia docstring of \code{assume}
-(\srcref{julia/UlmLam/src/frontend.jl}{351}{357}) states the actual
+(\srcref{julia/UlmLAM/src/frontend.jl}{351}{357}) states the actual
 behavior: ``Trusted; a factorisation that finds it wrong returns
 info \(>0\) (\code{InfoError}).''
 
@@ -299,7 +299,7 @@ inputs, and independent of the matrix entries.
 
 \begin{itemize}
 \item \textbf{Array sizes}, in the Julia runtime before the C call
-  (\code{bind_sizes!}, \srcref{julia/UlmLam/src/runtime.jl}{326}{339}):
+  (\code{bind_sizes!}, \srcref{julia/UlmLAM/src/runtime.jl}{326}{339}):
   every run-time size symbol must have one value across all arguments, and
   every fixed size must match. The generated C function takes the sizes as
   arguments and does not check them.

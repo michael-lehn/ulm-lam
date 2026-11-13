@@ -240,7 +240,7 @@ NumPy code in which the operator was formed by hand before the loop, and
 The Julia package (\cref{sec:julia}) uses Julia's notation; Julia's
 column-major arrays are passed without copies:
 \begin{lstlisting}[style=py]
-using UlmLam, LinearAlgebra
+using UlmLAM, LinearAlgebra
 
 @lam function gp(K::Mat(:n, :n, :symmetric), s2::Float, Ks::Mat(:n, :m),
                  Kss::Mat(:m, :m, :symmetric), y::Vec(:n))
@@ -248,7 +248,7 @@ using UlmLam, LinearAlgebra
     (Ks' * inv(Kn) * y, Kss - Ks' * inv(Kn) * Ks)
 end
 
-lib = UlmLam.compile(gp)
+lib = UlmLAM.compile(gp)
 mean, cov = lib.gp(K, 0.01, Ks, Kss, y)
 \end{lstlisting}
 Compared with what a Julia programmer writes by hand
@@ -2362,12 +2362,12 @@ overwritten.
 % =====================================================================
 \section{Julia frontend}\label{sec:julia}
 % =====================================================================
-\file{julia/UlmLam} is a Julia package with the same frontend as the
+\file{julia/UlmLAM} is a Julia package with the same frontend as the
 Python one: functions are traced to \code{ulm_lam} IR, compiled by the
 same pipeline, and called with \code{ccall}; no Python is involved.
 The notation is Julia's:
 \begin{lstlisting}[style=py]
-using UlmLam, LinearAlgebra
+using UlmLAM, LinearAlgebra
 
 @lam function gls(X::Mat(:n, :m, :full_rank), M::Mat(:n, :n, :spd), y::Vec(:n))
     inv(X' * inv(M) * X) * X' * inv(M) * y
@@ -2419,7 +2419,7 @@ as lazy transposes of the row-major buffers, without copies.
 \paragraph{Calling, inspecting, Julia's BLAS.}
 A \code{@lam} function called with Julia arrays is compiled at its first
 call (about half a second: the pipeline takes 0.3\,s, the C++ compiler
-the rest) and the library is kept; \code{UlmLam.compile} builds one
+the rest) and the library is kept; \code{UlmLAM.compile} builds one
 library for several functions, \code{bind!(f; \ldots)} implements the
 external functions of \code{f}.
 \code{@code_lam f(args)} shows the derivation: the kernels after selection
@@ -2458,11 +2458,11 @@ From Python, \code{lam.compile(f, dtype="float32")}.
 The training loop of \cref{sec:torch} runs $1.9\times$ faster in
 \code{Float32} than in \code{Float64} ($B = 256$, $p = 1024$,
 $k = 256$), with half the memory.
-\file{julia/UlmLam/test/float32.jl} checks it on all three backends,
+\file{julia/UlmLAM/test/float32.jl} checks it on all three backends,
 \file{python/tests/test\_float32.py} from Python.
 
 \paragraph{Vector spaces.}
-\file{julia/UlmLam/test/vectorspace.jl} checks 137 expressions on
+\file{julia/UlmLAM/test/vectorspace.jl} checks 137 expressions on
 $\mathbb{R}^n$ and $\mathbb{R}^{m\times n}$ against Julia: sums,
 differences, negation, constant and run-time scalars on either side,
 division by scalars and linear combinations, combined with products,
@@ -2479,7 +2479,7 @@ sets the matrix to zero, as BLAS's \code{scal} does (also NaN).
 The frontend divides by run-time scalars ($x / a$, $a \backslash x$).
 
 \paragraph{Results.}
-\file{julia/UlmLam/test/runtests.jl} (75 tests, and the 137 above) runs GLS with fixed and
+\file{julia/UlmLAM/test/runtests.jl} (75 tests, and the 137 above) runs GLS with fixed and
 run-time sizes, solves from the left and from the right (Cholesky and
 LU), a chain chosen at run time, two results, a loop with callbacks, a
 loop-carried matrix, GP with \code{s2 * I} and a wrong assumption
@@ -2553,7 +2553,7 @@ In Julia:
     update!(y, bar!(M, bar!(N, y)))
 @lam foo_matlab(M::Mat(:n, :n, :spd), N::Mat(:n, :n, :spd), y::Vec(:n)) = foo!(M, N, y)
 
-lib = UlmLam.compile([foo_matlab]; name="calls_lapack_jl")   # and foo!, bar!
+lib = UlmLAM.compile([foo_matlab]; name="calls_lapack_jl")   # and foo!, bar!
 M1, N1, y1 = copy(M), copy(N), copy(y)
 lib.foo!(M1, N1, y1)                # y1 is the solution now
 x = lib.foo_matlab(M, N, y)
@@ -3809,7 +3809,7 @@ halve the second product.
   \item the Python frontend and runtime (\code{from ulm import lam}):
         tracing, loops, external functions as Python callbacks,
         workspaces, NumPy or plain buffers;
-  \item the Julia frontend and runtime (\file{julia/UlmLam},
+  \item the Julia frontend and runtime (\file{julia/UlmLAM},
         \cref{sec:julia}): \code{@lam} functions called with Julia arrays,
         \code{@code_lam}, Julia's own BLAS through libblastrampoline,
         callbacks, one workspace per task (calls from several threads);

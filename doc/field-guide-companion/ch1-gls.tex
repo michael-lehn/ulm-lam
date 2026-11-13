@@ -97,7 +97,7 @@ derives, and the rest of the chapter shows how.
 The program, as in the README and in \code{examples/gls.jl}:
 
 \begin{lstlisting}[style=jl]
-using UlmLam, LinearAlgebra
+using UlmLAM, LinearAlgebra
 
 @lam function gls(X::Mat(:n, :m, :full_rank), M::Mat(:n, :n, :spd), y::Vec(:n))
     inv(X' * inv(M) * X) * X' * inv(M) * y
@@ -108,7 +108,7 @@ beta = gls(X, M, y)    # Julia arrays; the first call compiles
 
 The body is the formula. The parameter types are not Julia types but
 ulm.lam types, values of the Julia structs \code{MatType}
-(\srcref{julia/UlmLam/src/frontend.jl}{39}{45}):
+(\srcref{julia/UlmLAM/src/frontend.jl}{39}{45}):
 
 \begin{itemize}
 \item \code{Mat(:n, :m, :full_rank)} is a matrix with \(n\) rows and \(m\)
@@ -136,7 +136,7 @@ program into a shared library (about half a second), and calls it.
 \item[Theory] a tracing front end of an embedded DSL (domain-specific language), \FG{3.7}{Embedded DSLs and tracing/AST-capturing front ends} (AST: abstract syntax tree).
 \end{steps}
 
-The overloaded product (\srcref{julia/UlmLam/src/frontend.jl}{222}{231})
+The overloaded product (\srcref{julia/UlmLAM/src/frontend.jl}{222}{231})
 already checks the inner sizes, by comparing sizes that may be symbols:
 
 \begin{lstlisting}[style=jl]
@@ -177,7 +177,7 @@ Read it from left to right:
   ulm.lam ABI (application binary interface) is row-major, and the memory of
   the Julia matrix \(X\) \emph{is} the row-major matrix \(X\T\). The frontend
   types the parameter as \(X\T\) (\code{abitype},
-  \srcref{julia/UlmLam/src/frontend.jl}{100}{106}) and hands the traced
+  \srcref{julia/UlmLAM/src/frontend.jl}{100}{106}) and hands the traced
   function \code{transpose(\%p.X)}, which is \(X\). No data is copied for this.
 \item \code{ulm_lam.in} marks a read-only argument, \code{ulm_lam.out} the
   result, which the caller allocates.

@@ -8,9 +8,9 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 cp "$ROOT/notebook/ulm-lam.jl" "$TMP/"
 # the notebook activates its own directory: give it the environment, with
-# the path of UlmLam made absolute
-sed "s|\"../julia/UlmLam\"|\"$ROOT/julia/UlmLam\"|" "$ROOT/notebook/Project.toml" >"$TMP/Project.toml"
-sed "s|\"../julia/UlmLam\"|\"$ROOT/julia/UlmLam\"|" "$ROOT/notebook/Manifest.toml" >"$TMP/Manifest.toml"
+# the path of UlmLAM made absolute
+sed "s|\"../julia/UlmLAM\"|\"$ROOT/julia/UlmLAM\"|" "$ROOT/notebook/Project.toml" >"$TMP/Project.toml"
+sed "s|\"../julia/UlmLAM\"|\"$ROOT/julia/UlmLAM\"|" "$ROOT/notebook/Manifest.toml" >"$TMP/Manifest.toml"
 (cd "$TMP" && julia --project="$ROOT/notebook" -e 'using PlutoSliderServer
     PlutoSliderServer.export_directory("."; Export_baked_state=true,
         Export_offer_binder=false, Export_create_index=false)')

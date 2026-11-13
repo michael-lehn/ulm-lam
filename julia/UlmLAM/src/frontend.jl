@@ -728,7 +728,7 @@ end
 """
     @lam function name(x::Mat(...), ...) ... end
 
-A ulm.lam function: traced to ulm_lam IR, compiled with `UlmLam.compile`.
+A ulm.lam function: traced to ulm_lam IR, compiled with `UlmLAM.compile`.
 """
 macro lam(fdef)
     (fdef isa Expr && fdef.head in (:function, :(=))) ||

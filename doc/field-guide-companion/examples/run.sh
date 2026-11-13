@@ -14,10 +14,12 @@ mkdir -p "$OUT/gls"
 make -C "$ROOT" tool >/dev/null
 OPT="$ROOT/build/bin/ulm-lam-opt"
 cd "$ROOT"
+# the C++ on Julia's BLAS and the cache in build/julia, as at that commit
+export ULM_LAM_BACKEND=lbt ULM_LAM_CACHE="$ROOT/build/julia"
 
 # 1. GLS (generalized least squares) in Julia: traced IR (intermediate
 #    representation), numbers, @code_lam, failures
-julia --project=julia/UlmLam "$HERE/gls.jl" >"$OUT/gls.out" 2>&1
+julia --project=julia/UlmLAM "$HERE/gls.jl" >"$OUT/gls.out" 2>&1
 # the stages the Julia call left in build/julia/gls, plus the two
 # intermediate stages that ulm-lam-compile.sh does not keep
 G=build/julia/gls
@@ -35,7 +37,7 @@ cp "$G/gls.bufferized.mlir" "$OUT/gls/6-bufferized.mlir"
 cp "$G/gls.cpp" "$OUT/gls/7-gls.cpp"
 
 # 2. variants: dropped properties, assume, a loop, a shared product
-julia --project=julia/UlmLam "$HERE/variants.jl" >"$OUT/variants.out" 2>&1
+julia --project=julia/UlmLAM "$HERE/variants.jl" >"$OUT/variants.out" 2>&1
 cp build/julia/iterate/iterate.mlir "$OUT/iterate-traced.mlir"
 "$OPT" build/julia/iterate/iterate.mlir \
 	--pass-pipeline='builtin.module(func.func(ulm-lam-normalize, ulm-lam-infer-properties, loop-invariant-code-motion))' \
@@ -43,10 +45,10 @@ cp build/julia/iterate/iterate.mlir "$OUT/iterate-traced.mlir"
 cp build/julia/iterate/iterate.selected.mlir "$OUT/iterate-selected.mlir"
 
 # 3. a factorisation hoisted out of a loop that runs zero times
-julia --project=julia/UlmLam "$HERE/speculate.jl" >"$OUT/speculate.out" 2>&1
+julia --project=julia/UlmLAM "$HERE/speculate.jl" >"$OUT/speculate.out" 2>&1
 
 # 4. conditioning: the same formula, X almost rank deficient
-julia --project=julia/UlmLam "$HERE/conditioning.jl" >"$OUT/conditioning.out" 2>&1
+julia --project=julia/UlmLAM "$HERE/conditioning.jl" >"$OUT/conditioning.out" 2>&1
 
 # 5. verifiers: accepted and rejected IR
 (cd "$HERE/verify" && for f in v[0-9]-*.mlir v10-*.mlir; do
@@ -73,7 +75,7 @@ done) >"$OUT/verify.out"
 	echo "ulm-lam commit: $(git -C "$ROOT" rev-parse HEAD)"
 	"$(brew --prefix llvm)/bin/mlir-opt" --version | head -2
 	julia --version
-	julia --project=julia/UlmLam -e 'using LinearAlgebra; println("BLAS: ", BLAS.get_config())'
+	julia --project=julia/UlmLAM -e 'using LinearAlgebra; println("BLAS: ", BLAS.get_config())'
 	"$(brew --prefix llvm)/bin/clang++" --version | head -1
 	python3 --version
 	sw_vers | head -2 | tr '\n' ' '; echo; uname -m

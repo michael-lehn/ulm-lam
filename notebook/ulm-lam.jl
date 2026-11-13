@@ -51,7 +51,7 @@ begin
     import Pkg
     # the notebook's environment (see the README; on Binder set by the image)
     Pkg.activate(get(ENV, "ULM_LAM_NOTEBOOK_ENV", @__DIR__))
-    using UlmLam, LinearAlgebra, BenchmarkTools, Random, Printf, Markdown
+    using UlmLAM, LinearAlgebra, BenchmarkTools, Random, Printf, Markdown
     using AbstractGPs, KernelFunctions, PlutoUI
 end
 
@@ -514,7 +514,7 @@ end;
 @code_lam foo_matlab(Mspd, Nspd, yv)
 
 # ╔═╡ 05a849c9-c80d-498f-8da7-f0d3b4256566
-let lib = UlmLam.library(foo_matlab)                 # with foo! and bar!
+let lib = UlmLAM.library(foo_matlab)                 # with foo! and bar!
     (bar! = workspace_size(lib.bar!, Mspd, yv),
      foo! = workspace_size(lib.foo!, Mspd, Nspd, yv),
      foo_matlab = workspace_size(lib.foo_matlab, Mspd, Nspd, yv))
@@ -552,7 +552,7 @@ md"""
 With [UlmBLAS.jl](https://github.com/michael-lehn/UlmBLAS.jl) (`Pkg.add("UlmBLAS")`),
 `using UlmBLAS; UlmBLAS.forward()` makes ulmBLAS the BLAS of Julia, and with
 it of every ulm.lam function.  The generated code can also call the
-header-only C++ library ulmBLAS directly (`UlmLam.compile(f; backend=:ulmblas)`)
+header-only C++ library ulmBLAS directly (`UlmLAM.compile(f; backend=:ulmblas)`)
 or any CBLAS (C interface to the BLAS) and LAPACK, e.g. MKL (Intel Math
 Kernel Library) on a cluster.  The same functions are available from Python
 with NumPy arrays.
@@ -564,7 +564,7 @@ of linear algebra on matrices whose types carry the properties.
 """
 
 # ╔═╡ 46c2c1f8-7f52-4edf-9bb3-057b29c90c52
-Text(first(UlmLam.lam_module([gls])))
+Text(first(UlmLAM.lam_module([gls])))
 
 # ╔═╡ 84a29c56-a00e-4a64-8b6d-f7cb9022aab1
 md"""

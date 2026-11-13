@@ -1,4 +1,4 @@
-using UlmLam, LinearAlgebra
+using UlmLAM, LinearAlgebra
 
 @lam function gls_nofr(X::Mat(:n, :m), M::Mat(:n, :n, :spd), y::Vec(:n))
     inv(X' * inv(M) * X) * X' * inv(M) * y
@@ -27,15 +27,15 @@ M = [4.0 2.0 0.0 0.0; 2.0 5.0 2.0 0.0; 0.0 2.0 5.0 2.0; 0.0 0.0 2.0 5.0]
 y = [1.0, 2.0, 4.0, 4.0]
 for f in (gls_nofr, gls_nospd, gls_sym, gls_assume)
     println("==== ", f.name)
-    display(UlmLam.code_lam(f)); println()
+    display(UlmLAM.code_lam(f)); println()
     println("result: ", f(X, M, y))
 end
 println("==== iterate")
-display(UlmLam.code_lam(iterate)); println()
+display(UlmLAM.code_lam(iterate)); println()
 println("result: ", iterate(M, y, 3), "  reference: ", M \ (M \ (M \ y)))
 println("==== shared")
 A = [1.0 2.0; 3.0 4.0; 5.0 6.0; 7.0 8.0]; B = [1.0 0.0 1.0 0.0; 0.0 1.0 0.0 1.0]; C = Matrix(1.0I, 4, 4) .+ 1
-display(UlmLam.code_lam(shared)); println()
+display(UlmLAM.code_lam(shared)); println()
 r1, r2 = shared(A, B, C)
 println("ok: ", r1 ≈ A*B*C, " ", r2 ≈ A*B + C)
 println("==== Mns2 (lower triangle in Julia changed, M declared spd)")

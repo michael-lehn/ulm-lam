@@ -46,7 +46,7 @@ for `Float32`; from Python `lam.compile(f, dtype="float32")`).
 ## Julia
 
 ```julia
-using UlmLam, LinearAlgebra
+using UlmLAM, LinearAlgebra
 
 @lam function gls(X::Mat(:n, :m, :full_rank), M::Mat(:n, :n, :spd), y::Vec(:n))
     inv(X' * inv(M) * X) * X' * inv(M) * y
@@ -158,7 +158,7 @@ print(lib.gls.cpp)         # the generated C++
 All vector-space operations on $\mathbb{R}^n$ and $\mathbb{R}^{m \times n}$
 work, also combined with products, transposes and solves: sums,
 differences, negation, constant and run-time scalars on either side,
-division by scalars, linear combinations; `julia/UlmLam/test/vectorspace.jl`
+division by scalars, linear combinations; `julia/UlmLAM/test/vectorspace.jl`
 checks 137 such expressions against Julia.  An inverse used as a value
 (`inv(A)` as a result, `inv(S) - I`) is formed from its factorisation
 (`potri`, `getri`); inside products it is never formed, and a sum with an
@@ -315,7 +315,7 @@ julia --project=notebook -e 'using Pkg; Pkg.instantiate()'
 julia --project=notebook -e 'using Pluto; Pluto.run(notebook="notebook/ulm-lam.jl")'
 ```
 
-or `] dev julia/UlmLam` in your own environment.  Python 3 (NumPy
+or `] dev julia/UlmLAM` in your own environment.  Python 3 (NumPy
 optional): `PYTHONPATH=python python3 python/examples/gp.py`.
 
 Environment: `LLVM_PREFIX` (default `brew --prefix llvm`), `ULM_LAM_BACKEND`
@@ -341,7 +341,7 @@ showcases torch` runs the Python showcases.
 | `test/` | lit/FileCheck tests of the passes: normalisation, property inference, kernel selection, lowering |
 | `scripts/ulm-lam-compile.sh` | the pipeline from `ulm_lam` to C++ (keeps every stage) |
 | `include/ulm_lam/cblas_backend.h` | the CBLAS/LAPACK backend of the generated code |
-| `julia/UlmLam/` | the Julia frontend (`@lam`, `@code_lam`) and runtime |
+| `julia/UlmLAM/` | the Julia frontend (`@lam`, `@code_lam`) and runtime |
 | `python/ulm/lam/` | the Python frontend and runtime |
 | `notebook/` | the Pluto notebook and its environment |
 | `examples/` | design stages, loops, workspaces, run-time sizes, inverses, Linnea's versions of the problems, the cluster runs |

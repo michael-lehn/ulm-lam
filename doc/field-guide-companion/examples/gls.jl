@@ -1,11 +1,11 @@
-using UlmLam, LinearAlgebra
+using UlmLAM, LinearAlgebra
 
 @lam function gls(X::Mat(:n, :m, :full_rank), M::Mat(:n, :n, :spd), y::Vec(:n))
     inv(X' * inv(M) * X) * X' * inv(M) * y
 end
 
 println("==== traced ulm_lam IR (frontend output)")
-text, _ = UlmLam.lam_module([gls])
+text, _ = UlmLAM.lam_module([gls])
 print(text)
 
 X = [1.0 0.0; 1.0 1.0; 1.0 2.0; 1.0 3.0]
@@ -61,7 +61,7 @@ end
 println("==== trace-time error: symbolic sizes")
 @lam bad(A::Mat(:n, :m), B::Mat(:n, :m)) = A * B
 try
-    UlmLam.lam_module([bad])
+    UlmLAM.lam_module([bad])
 catch e
     showerror(stdout, e); println()
 end

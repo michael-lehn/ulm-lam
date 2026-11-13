@@ -1,4 +1,4 @@
-using UlmLam, LinearAlgebra
+using UlmLAM, LinearAlgebra
 @lam function gls(X::Mat(:n, :m, :full_rank), M::Mat(:n, :n, :spd), y::Vec(:n))
     inv(X' * inv(M) * X) * X' * inv(M) * y
 end

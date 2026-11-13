@@ -141,7 +141,7 @@ memory-bound kernels. The Kalman-filter examples
 One compiled library serves all sizes. What the Julia frontend does
 specialize is the element type: a call with \code{Float32} arrays compiles
 a second library from the same traced text with \code{f64} replaced by
-\code{f32} (\srcref{julia/UlmLam/src/runtime.jl}{262}{264}). Libraries are
+\code{f32} (\srcref{julia/UlmLAM/src/runtime.jl}{262}{264}). Libraries are
 cached under a hash of the program text, the compiler's modification time,
 the backend and the flags.
 

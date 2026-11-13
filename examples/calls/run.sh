@@ -4,7 +4,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
-julia --project=julia/UlmLam examples/calls/calls.jl | tee build/calls_jl.out
+julia --project=julia/UlmLAM examples/calls/calls.jl | tee build/calls_jl.out
 python3 examples/calls/calls.py | tee build/calls_py.out
 "$ROOT/scripts/build-tool.sh" >/dev/null
 for m in calls calls_inout calls_lapack; do

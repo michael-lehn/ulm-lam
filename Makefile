@@ -83,14 +83,14 @@ python:         ## the Python frontend: unit tests and the Kalman examples
 	python3 python/examples/kalman.py
 	python3 python/examples/adaptive_kalman.py
 
-julia:          ## the Julia frontend (julia/UlmLam): tests and the showcases in Julia
-	julia --project=julia/UlmLam julia/UlmLam/test/runtests.jl
-	julia --project=julia/UlmLam julia/examples/kalman.jl
-	julia --project=julia/UlmLam julia/examples/gp.jl
-	julia --project=julia/UlmLam julia/examples/ridge.jl
-	julia --project=julia/UlmLam julia/examples/attention.jl
-	julia --project=julia/UlmLam julia/examples/kalman_filter.jl
-	julia --project=julia/UlmLam julia/examples/bayes.jl
+julia:          ## the Julia frontend (julia/UlmLAM): tests and the showcases in Julia
+	julia --project=julia/UlmLAM julia/UlmLAM/test/runtests.jl
+	julia --project=julia/UlmLAM julia/examples/kalman.jl
+	julia --project=julia/UlmLAM julia/examples/gp.jl
+	julia --project=julia/UlmLAM julia/examples/ridge.jl
+	julia --project=julia/UlmLAM julia/examples/attention.jl
+	julia --project=julia/UlmLAM julia/examples/kalman_filter.jl
+	julia --project=julia/UlmLAM julia/examples/bayes.jl
 
 doc:            ## build doc/ulm-lam.pdf and the Field Guide companion with LuaLaTeX
 	cd doc && latexmk

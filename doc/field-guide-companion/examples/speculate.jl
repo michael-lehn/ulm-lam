@@ -1,4 +1,4 @@
-using UlmLam, LinearAlgebra
+using UlmLAM, LinearAlgebra
 @lam function iterate(M::Mat(:n, :n, :spd), x0::Vec(:n), steps::Index)
     loop(steps, x0) do i, x
         (inv(M) * x,)

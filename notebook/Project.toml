@@ -6,7 +6,7 @@ Pluto = "c3e4b0f8-55cb-11ea-2926-15256bba5781"
 PlutoSliderServer = "2fc8631c-6f24-4c5b-bca7-cbb509c42db4"
 PlutoUI = "7f904dfe-b85e-4ff6-b463-dae2292396a8"
 UlmBLAS = "cd55841f-6472-4438-97d9-4c2d8eed3a6b"
-UlmLam = "5b8c7f0e-3c1a-4d2e-9f6a-0a1b2c3d4e5f"
+UlmLAM = "3c1bf457-13c1-4a7a-9784-8512572eb40c"
 
 [sources]
-UlmLam = {path = "../julia/UlmLam"}
+UlmLAM = {path = "../julia/UlmLAM"}

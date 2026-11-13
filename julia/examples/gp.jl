@@ -7,9 +7,9 @@
 # (inv).  Kernel matrices of random points (RBF kernel), m = 1000 test
 # points; the times are without computing the kernel matrices.
 #
-#     julia --project=julia/UlmLam julia/examples/gp.jl
+#     julia --project=julia/UlmLAM julia/examples/gp.jl
 
-using UlmLam, LinearAlgebra, Random
+using UlmLAM, LinearAlgebra, Random
 # the OpenBLAS of backend=:cblas with as many threads as Julia's BLAS
 ENV["OPENBLAS_NUM_THREADS"] = string(BLAS.get_num_threads())
 
@@ -35,8 +35,8 @@ function rbf(A, B, ell)
 end
 
 function main(sizes=(2000, 4000, 8000), m=1000)
-    lib = UlmLam.compile(gp; name="gp_jl", backend=:ulmblas)
-    lib_ob = UlmLam.compile(gp; name="gp_jl_cblas", backend=:cblas)
+    lib = UlmLAM.compile(gp; name="gp_jl", backend=:ulmblas)
+    lib_ob = UlmLAM.compile(gp; name="gp_jl_cblas", backend=:cblas)
     Random.seed!(1)
     s2 = 0.01
     println("m = $m test points, Julia $(VERSION) ($(basename(BLAS.get_config().loaded_libs[1].libname)), " *

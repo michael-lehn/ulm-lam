@@ -2,7 +2,7 @@
 differences, negation, constant and run-time scalars on either side,
 division by scalars, linear combinations, with transposes, products,
 solves and explicit inverses; every expression against NumPy, all in one
-library (the Julia frontend's julia/UlmLam/test/vectorspace.jl in Python).
+library (the Julia frontend's julia/UlmLAM/test/vectorspace.jl in Python).
 Needs NumPy.  Run:  python3 -m unittest discover -s python/tests
 """
 
