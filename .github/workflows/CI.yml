@@ -1,0 +1,57 @@
+# Tests of UlmLAM.jl on its default backend (generated Julia code on Julia's
+# own BLAS (Basic Linear Algebra Subprograms)): no C++ compiler at run time.
+# The compiler executable is built here from LLVM (Low Level Virtual
+# Machine) 23 with MLIR (Multi-Level Intermediate Representation): from
+# apt.llvm.org on Linux, from Homebrew on macOS.  Once ulm_lam_jll is
+# registered, this becomes a plain julia-runtest.
+name: CI
+on:
+  push:
+    branches: [master]
+    tags: ['*']
+  pull_request:
+  workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    name: Julia ${{ matrix.julia }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        julia: ['1.10', '1']
+        os: [ubuntu-24.04, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: LLVM and MLIR 23 (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          wget -q https://apt.llvm.org/llvm.sh
+          sudo bash llvm.sh 23
+          sudo apt-get install -y libmlir-23-dev mlir-23-tools ninja-build
+          echo "MLIR_DIR=/usr/lib/llvm-23/lib/cmake/mlir" >> "$GITHUB_ENV"
+      - name: LLVM and MLIR (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install llvm ninja
+          echo "MLIR_DIR=$(brew --prefix llvm)/lib/cmake/mlir" >> "$GITHUB_ENV"
+      - name: Build the compiler
+        run: |
+          cmake -S . -B build/cmake -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DMLIR_DIR="$MLIR_DIR"
+          cmake --build build/cmake
+          echo "ULM_LAM=$PWD/build/cmake/bin/ulm-lam" >> "$GITHUB_ENV"
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.julia }}
+      - uses: julia-actions/cache@v2
+      - uses: julia-actions/julia-buildpkg@v1
+        with:
+          project: julia/UlmLAM
+      - uses: julia-actions/julia-runtest@v1
+        with:
+          project: julia/UlmLAM
+        env:
+          ULM_LAM_TEST_BACKENDS: julia
