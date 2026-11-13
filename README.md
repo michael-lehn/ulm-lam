@@ -209,19 +209,27 @@ stored in their lower triangle.  ulm.lam turns them into `syrk` with
 run-time α for the running averages, `potrf` + `potri` for the damped
 inverses (every T steps), and for the step the cheapest order of the chain
 `Gi gᵀ a Ai` with `symm`: with a batch smaller than the layer, the
-n × n gradient is never multiplied by an n × n inverse.  Compared with the
-method of [kfac-pytorch](https://github.com/gpauloski/kfac-pytorch)
-(`torch.linalg.inv` of the damped factors, `g_inv @ grad @ a_inv`),
-reproduced operation by operation in float64, and with a version written
-by hand in PyTorch (Cholesky-based inverses, the thin order of the chain);
-Apple M5, PyTorch 2.15 and ulm.lam on Accelerate, the same iterates (to
-1e-14):
+n × n gradient is never multiplied by an n × n inverse.  Compared with
+[kfac-pytorch](https://github.com/gpauloski/kfac-pytorch) 0.4.2 itself
+(`KFACPreconditioner`, inverse method, KL (Kullback-Leibler) clipping off),
+with its method reproduced operation by operation in float64
+(`torch.linalg.inv` of the damped factors, `g_inv @ grad @ a_inv`), and
+with a version written by hand in PyTorch (Cholesky-based inverses, the thin
+order of the chain); Apple M5, PyTorch 2.15 and ulm.lam on Accelerate,
+times in ms:
 
-| | ulm.lam | kfac-pytorch's method | by hand |
-|:--|--:|--:|--:|
-| one layer, n = 1024, batch 128, T = 10: ms per step | 6.2 | 16.5 (2.7×) | 7.7 (1.3×) |
-| one layer, n = 2048 | 30.6 | 121.2 (4.0×) | 34.1 (1.1×) |
-| MLP (multilayer perceptron) 256-1024-1024-10, K-FAC's part of a step | 14.3 ms | 28.3 ms (2.0×) | 16.1 ms (1.1×) |
+| | ulm.lam | kfac-pytorch 0.4.2 | its method, float64 | by hand |
+|:--|--:|--:|--:|--:|
+| one layer, n = 1024, batch 128, T = 10, per step | 6.4 | – | 16.0 (2.5×) | 6.9 (1.1×) |
+| one layer, n = 2048 | 28.1 | – | 113.3 (4.0×) | 31.9 (1.1×) |
+| MLP (multilayer perceptron) 256-1024-1024-10, K-FAC's part of a step | 13.5 | 23.2 (1.7×) | 27.1 (2.0×) | 15.9 (1.2×) |
+
+The reproduction, the version by hand and ulm.lam produce the same
+iterates (to 1e-14).  kfac-pytorch as shipped inverts in float32, whatever
+its `inv_dtype` says (`layers/inverse.py` casts before `torch.linalg.inv`),
+so its weights differ by 0.15 after 300 steps, at the same loss; with that
+cast replaced they agree with ulm.lam's to 5e-15, which confirms the
+reproduction.
 
 The example found three things on the way: a bug in ulm.lam (a run-time
 scalar times a Gram matrix added to a whole matrix missed the upper
