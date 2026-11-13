@@ -24,7 +24,11 @@ symmetrised; the damped inverses by torch.linalg.inv; the step as
 g_inv @ grad @ a_inv, two dense n x n x n products per layer and step.  (Its
 defaults also compute the inverses in float32 and clip the step by a KL
 (Kullback-Leibler) bound; here everything is float64 and unclipped, so that
-both produce the same iterates.)  And an expert version in PyTorch: what a
+both produce the same iterates.)  If kfac-pytorch is installed, the
+package itself runs in the training too (KFACPreconditioner, inverse
+method, KL clipping off): as shipped it inverts in float32 whatever
+inv_dtype says; with that cast replaced its iterates are those of the
+reproduction and of ulm.lam.  And an expert version in PyTorch: what a
 numerical linear algebra person would write by hand (Cholesky-based
 inverses, the thin order of the chain).
 
@@ -165,6 +169,71 @@ class KfacLam:
                           self.rho, c, lr)
 
 
+def kfac_pytorch_package():
+    """kfac-pytorch itself, if installed (from its repository: pip install
+    <clone>), else None.  This file is also called kfac.py, so the package is
+    imported without this directory on the path."""
+    here = Path(__file__).resolve().parent
+    saved = sys.path[:]
+    sys.path[:] = [d for d in sys.path
+                   if Path(d or ".").resolve() != here]
+    try:
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")    # "NVIDIA Apex is not installed"
+            import kfac.layers.inverse
+            from kfac.preconditioner import KFACPreconditioner
+        import importlib.metadata
+        version = importlib.metadata.version("kfac_pytorch")
+    except ImportError:
+        return None
+    finally:
+        sys.path[:] = saved
+    return KFACPreconditioner, kfac.layers.inverse.KFACInverseLayer, version
+
+
+class KfacPackage:
+    """kfac-pytorch's KFACPreconditioner with the inverse method, followed
+    by SGD (it preconditions the gradients, SGD applies them).  The same
+    hyperparameters as above, KL clipping off; grad_scaler = 1/B makes its
+    G the one of the others (it takes g of the mean loss).  It computes the
+    inverses in float32 whatever inv_dtype says (layers/inverse.py casts
+    to float32 before torch.linalg.inv); float64=True replaces that cast,
+    to check that otherwise the iterates are the same."""
+
+    def __init__(self, package, model, B, lr, rho=0.95, gamma=1e-2, T=10,
+                 float64=False):
+        Pre, Layer, _ = package
+        if float64:
+            def inverse(name):
+                def compute(self, damping=0.001):
+                    F = getattr(self, name + "_factor")
+                    I = torch.eye(F.shape[0], dtype=F.dtype)
+                    setattr(self, name + "_inv",
+                            torch.linalg.inv(F + damping * I))
+                return compute
+            self.patched = Layer.compute_a_inv, Layer.compute_g_inv
+            Layer.compute_a_inv = inverse("a")
+            Layer.compute_g_inv = inverse("g")
+        self.pre = Pre(model, factor_update_steps=1, inv_update_steps=T,
+                       damping=gamma, factor_decay=rho,
+                       kl_clip=lambda step: None, lr=lr,
+                       compute_method="inverse",
+                       factor_dtype=torch.float64,
+                       inv_dtype=torch.float64,
+                       grad_scaler=lambda: 1.0 / B)
+        self.sgd = torch.optim.SGD(model.parameters(), lr=lr)
+        self.Layer = Layer
+
+    def step(self):
+        self.pre.step()
+        self.sgd.step()
+
+    def close(self):
+        if hasattr(self, "patched"):
+            self.Layer.compute_a_inv, self.Layer.compute_g_inv = self.patched
+
+
 # ---- one layer: the preconditioner alone -----------------------------------
 
 def layer_benchmark(libs, sizes, B, T, rounds=3):
@@ -297,7 +366,8 @@ def mlp(widths, seed):
     return torch.nn.Sequential(*layers)
 
 
-def training(libs, widths, B, steps, T, lr=0.02, gamma=0.1):
+def training(libs, widths, B, steps, T, lr=0.02, gamma=0.1,
+             package=None):
     """A teacher network labels random inputs; the student (same widths)
     is trained with cross-entropy.  K-FAC by the three implementations
     (the same iterates), and SGD for the cost of a plain step: what K-FAC
@@ -316,11 +386,17 @@ def training(libs, widths, B, steps, T, lr=0.02, gamma=0.1):
     runs = [("SGD (lr 0.1)", "sgd"), ("K-FAC, kfac-pytorch method", "pytorch"),
             ("K-FAC, expert by hand", "expert"),
             ("K-FAC, ulm.lam (Accelerate)", "lam")]
+    if package:
+        runs[1:1] = [(f"K-FAC, kfac-pytorch {package[2]}", "package"),
+                     ("  same, float64 inverses", "package64")]
     weights, ms = {}, {}
     for label, impl in runs:
         model = mlp(widths, seed=3)
         if impl == "sgd":
             opt = torch.optim.SGD(model.parameters(), lr=0.1)
+        elif impl.startswith("package"):
+            opt = KfacPackage(package, model, B, lr, gamma=gamma, T=T,
+                              float64=impl == "package64")
         else:
             opt = Kfac(model, impl, lr, gamma=gamma, T=T,
                        lib=libs["Accelerate"])
@@ -334,6 +410,8 @@ def training(libs, widths, B, steps, T, lr=0.02, gamma=0.1):
             opt.step()
             losses.append(loss.item())
         ms[impl] = 1e3 * (time.perf_counter() - t0) / steps
+        if impl.startswith("package"):
+            opt.close()
         weights[impl] = [m.weight.detach().clone() for m in model
                          if isinstance(m, torch.nn.Linear)]
         part = "" if impl == "sgd" else \
@@ -344,11 +422,22 @@ def training(libs, widths, B, steps, T, lr=0.02, gamma=0.1):
     print(f"  K-FAC's part, kfac-pytorch method / ulm.lam: "
           f"{(ms['pytorch'] - base) / (ms['lam'] - base):.1f}x, "
           f"expert / ulm.lam: {(ms['expert'] - base) / (ms['lam'] - base):.1f}x")
-    diff = max((w - r).abs().max().item() / r.abs().max().item()
-               for w, r in zip(weights["lam"], weights["pytorch"]))
+    if package:
+        print(f"  K-FAC's part, kfac-pytorch {package[2]} / ulm.lam: "
+              f"{(ms['package'] - base) / (ms['lam'] - base):.1f}x")
+
+    def diff(k):
+        return max((w - r).abs().max().item() / r.abs().max().item()
+                   for w, r in zip(weights["lam"], weights[k]))
     print(f"  K-FAC weights after {steps} steps, ulm.lam against the "
-          f"kfac-pytorch method: {diff:.1e} (relative)")
-    return diff < 1e-8
+          f"kfac-pytorch method: {diff('pytorch'):.1e} (relative)")
+    ok = diff("pytorch") < 1e-8
+    if package:
+        print(f"    against kfac-pytorch {package[2]}: {diff('package'):.1e} "
+              "(its float32 inverses), with float64 inverses: "
+              f"{diff('package64'):.1e}")
+        ok &= diff("package64") < 1e-8
+    return ok
 
 
 def main():
@@ -359,7 +448,12 @@ def main():
         print(getattr(libs["ulmBLAS"], f).code)
     print(f"PyTorch {torch.__version__}, {torch.get_num_threads()} threads\n")
     ok = layer_benchmark(libs, (512, 1024, 2048), B=128, T=10)
-    ok &= training(libs, (256, 1024, 1024, 10), B=128, steps=300, T=10)
+    package = kfac_pytorch_package()
+    if package is None:
+        print("\n(kfac-pytorch is not installed: only its method, "
+              "reproduced, is compared)")
+    ok &= training(libs, (256, 1024, 1024, 10), B=128, steps=300, T=10,
+                   package=package)
     print("PASS" if ok else "FAIL")
     return 0 if ok else 1
 
