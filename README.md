@@ -232,6 +232,31 @@ multithreaded `dlauum` with `UPLO = 'U'` (wrong inverses from `dpotri`,
 nondeterministically, on macOS 26.6; the CBLAS backend calls it with
 `'L'`).
 
+
+**The Laplace approximation of a last layer: one formula, two
+algorithms.**  The predictive mean and covariance of a Bayesian last layer,
+`β Φ* A⁻¹ Φᵀ y` and `Φ* A⁻¹ Φ*ᵀ` with `A = αI + β ΦᵀΦ` (N training points,
+p features), can be computed with a p × p Cholesky factorisation, or, by
+the Woodbury identity
+`A⁻¹ = (1/α)(I − β Φᵀ (αI + β ΦΦᵀ)⁻¹ Φ)`, with an N × N one.  Which is
+cheaper depends on N < p, often known only at run time.  ulm.lam generates
+both from the formula, chooses at run time, and in the Woodbury branch
+applies the products to the terms of the identity, so that no p × p matrix
+is formed ([`python/examples/laplace.py`](python/examples/laplace.py);
+1000 test points, OpenBLAS, seconds):
+
+| N, p | ulm.lam | NumPy, `inv` | SciPy, direct by hand | SciPy, Woodbury by hand |
+|:--|--:|--:|--:|--:|
+| 20000, 500 | 0.030 | 0.131 (4.4×) | 0.031 (1.0×) | 16.1 (538×) |
+| 4000, 2000 | 0.122 | 0.412 (3.4×) | 0.135 (1.1×) | 0.515 (4.2×) |
+| 2000, 4000 | 0.207 | 1.49 (7.2×) | 0.449 (2.2×) | 0.224 (1.1×) |
+| 1000, 8000 | 0.154 | 9.36 (61×) | 1.87 (12×) | 0.185 (1.2×) |
+
+The Woodbury identity is the first rewrite of ulm.lam that changes the
+algorithm rather than the order of kernels; it came out of the
+[e-graph experiment](experiments/egraph), where it is one rule, and the
+e-graph agrees with the choice (and its flops) in both regimes.
+
 ## How it works
 
 ```

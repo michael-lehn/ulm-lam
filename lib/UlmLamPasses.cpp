@@ -57,6 +57,7 @@
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/Support/SaveAndRestore.h"
 
+#include <functional>
 #include <limits>
 #include <map>
 #include <optional>
@@ -474,8 +475,10 @@ class Selector
     {
 	if (!lapack)
 	    normalEquations();
-	if (distributeSums)
+	if (distributeSums) {
+	    woodbury();
 	    distribute();
+	}
 	formIdentities();
 	formInverses();
 	SmallVector<Operation *> ops;
@@ -821,6 +824,291 @@ class Selector
 	}
     }
 
+    // ---- the Woodbury identity ---------------------------------------------
+
+    /// On a sum of the Woodbury form: distributed without a cost
+    /// comparison.
+    static constexpr llvm::StringLiteral kDistributeAttr = "ulm_lam.distribute";
+
+    /// alpha I + beta Z^T Z (a sum of a scaled identity and a scaled Gram
+    /// matrix, Z^T Z or X X^T = Z^T Z with Z = X^T): the scales and Z.
+    struct LowRank
+    {
+	SmallVector<Value> alphas, betas;
+	Value z;
+    };
+
+    static std::optional<LowRank>
+    lowRankPlusIdentity(Value a)
+    {
+	while (auto as = a.getDefiningOp<AssumeOp>())
+	    a = as.getOperand();
+	auto add = a.getDefiningOp<AddOp>();
+	if (!add || add.getTerms().size() != 2)
+	    return std::nullopt;
+	LowRank lr;
+	bool id = false, gram = false;
+	for (Value t : add.getTerms()) {
+	    auto [scales, u] = unscaled(t);
+	    if (isIdentity(u)) {
+		lr.alphas = scales;
+		id = true;
+		continue;
+	    }
+	    while (auto as = u.getDefiningOp<AssumeOp>())
+		u = as.getOperand();
+	    auto m = u.getDefiningOp<MulOp>();
+	    if (!m || m.getFactors().size() != 2)
+		return std::nullopt;
+	    Value f0 = m.getFactors()[0], f1 = m.getFactors()[1];
+	    auto t0 = f0.getDefiningOp<TransposeOp>();
+	    auto t1 = f1.getDefiningOp<TransposeOp>();
+	    if (!(t0 && t0.getOperand() == f1) &&
+	        !(t1 && t1.getOperand() == f0))
+		return std::nullopt;
+	    lr.z = f1; // Z^T Z: Z; X X^T: Z = X^T
+	    lr.betas = scales;
+	    gram = true;
+	}
+	if (!id || !gram)
+	    return std::nullopt;
+	return lr;
+    }
+
+    /// The product of scalars (1 for none), at b's insertion point.
+    Value
+    scalarProduct(ArrayRef<Value> xs, Type elt, Location loc)
+    {
+	Value r;
+	for (Value x : xs)
+	    r = r ? arith::MulFOp::create(b, loc, r, x).getResult() : x;
+	return r ? r : constant(elt, 1.0, loc);
+    }
+
+    /// A tensor type of the shape rows(r) x cols(c) (static where known).
+    static RankedTensorType
+    shapeOf(Value r, unsigned rd, Value c, unsigned cd, Type elt)
+    {
+	auto rt = cast<RankedTensorType>(r.getType());
+	auto ct = cast<RankedTensorType>(c.getType());
+	return RankedTensorType::get({rt.getDimSize(rd), ct.getDimSize(cd)},
+	                             elt);
+    }
+
+    /// The identity of size n x n with n = dimension d of v.
+    Value
+    identityLike(Value v, unsigned d, Type elt, Location loc)
+    {
+	RankedTensorType t = shapeOf(v, d, v, d, elt);
+	SmallVector<Value> sizes;
+	for (unsigned k = 0; k < 2; ++k)
+	    if (t.isDynamicDim(k))
+		sizes.push_back(dimValue(b, loc, v, d));
+	return IdentityOp::create(
+	           b, loc, TypeRange{withProperties(t, Properties::identity)},
+	           sizes)
+	    .getResult();
+    }
+
+    /// (alpha I + beta Z^T Z)^-1 = (1/alpha) (I - beta Z^T K^-1 Z) with
+    /// K = alpha I + beta Z Z^T (the Woodbury identity): Z is N x p, the
+    /// matrix to factorise is N x N instead of p x p.  K is spd if and only
+    /// if alpha I + beta Z^T Z is (they share the eigenvalues alpha + beta
+    /// s_i^2, and for N < p alpha is one of them).
+    ///
+    /// For an inverse used only inside products, the computation that
+    /// depends on it, with the forming of the matrix itself, is generated
+    /// twice, in an scf.if on N < p: with the Woodbury identity, and as
+    /// written.  Then distribute() applies the products to the terms of
+    /// the Woodbury form, so that no p x p matrix is formed: the predictive
+    /// covariance Phi* A^-1 Phi*^T of Bayesian linear regression (the
+    /// Laplace approximation of a last layer) needs, with N training points
+    /// and p features, an N x N factorisation when N < p.
+    void
+    woodbury()
+    {
+	SmallVector<InverseOp> invs;
+	func.walk([&](InverseOp i) { invs.push_back(i); });
+	for (InverseOp inv : invs) {
+	    std::optional<LowRank> lr = lowRankPlusIdentity(inv.getOperand());
+	    // (used inside products, also scaled: beta A^-1 X^T t)
+	    std::function<bool(Operation *)> inProducts = [&](Operation *u) {
+		if (isa<MulOp>(u))
+		    return true;
+		return isa<ScaleOp>(u) && !u->use_empty() &&
+		       llvm::all_of(u->getUsers(), inProducts);
+	    };
+	    if (!lr || inv->use_empty() ||
+	        !llvm::all_of(inv->getUsers(), inProducts))
+		continue;
+	    Block *blk = inv->getBlock();
+	    // the computation that depends on the inverse (ulm_lam ops of
+	    // this block), and the ops that form the matrix, used by nothing
+	    // else
+	    llvm::SetVector<Operation *> slice;
+	    slice.insert(inv);
+	    bool ok = true;
+	    for (size_t k = 0; k < slice.size() && ok; ++k)
+		for (Value r : slice[k]->getResults())
+		    for (Operation *u : r.getUsers()) {
+			if (!isUlmLamOp(u))
+			    continue; // a use outside: a result of the if
+			if (u->getBlock() != blk) {
+			    ok = false;
+			    break;
+			}
+			slice.insert(u);
+		    }
+	    if (!ok)
+		continue;
+	    for (bool grown = true; grown;) {
+		grown = false;
+		for (size_t k = 0; k < slice.size(); ++k)
+		    for (Value o : slice[k]->getOperands()) {
+			Operation *d = o.getDefiningOp();
+			if (!d || slice.contains(d) || d->getBlock() != blk ||
+			    !isUlmLamOp(d) || o == lr->z)
+			    continue;
+			if (llvm::all_of(d->getUsers(), [&](Operation *u) {
+			        return slice.contains(u);
+			    })) {
+			    slice.insert(d);
+			    grown = true;
+			}
+		    }
+	    }
+	    SmallVector<Operation *> ops(slice.begin(), slice.end());
+	    llvm::sort(ops, [](Operation *x, Operation *y) {
+		return x->isBeforeInBlock(y);
+	    });
+	    Operation *last = ops.back();
+	    // values used after the computation (results, calls, loops)
+	    SmallVector<Value> outs;
+	    for (Operation *op : ops)
+		for (Value r : op->getResults())
+		    for (Operation *u : r.getUsers())
+			if (!slice.contains(u)) {
+			    Operation *a = blk->findAncestorOpInBlock(*u);
+			    if (!a || !last->isBeforeInBlock(a))
+				ok = false;
+			    if (!llvm::is_contained(outs, r))
+				outs.push_back(r);
+			}
+	    // (the scalars must be defined before the computation)
+	    for (Value x : llvm::concat<Value>(lr->alphas, lr->betas))
+		if (Operation *d = x.getDefiningOp();
+		    d && d->getBlock() == blk && !d->isBeforeInBlock(ops[0]))
+		    ok = false;
+	    if (!ok || outs.empty())
+		continue;
+	    Location loc = inv.getLoc();
+	    Value z = lr->z;
+	    Type elt = elementType(z);
+	    b.setInsertionPointAfter(last);
+	    Value n = dimValue(b, loc, z, 0), p = dimValue(b, loc, z, 1);
+	    if (!n || !p)
+		continue;
+	    Value cond =
+	        arith::CmpIOp::create(b, loc, arith::CmpIPredicate::ult, n, p);
+	    SmallVector<Type> types;
+	    for (Value r : outs)
+		types.push_back(r.getType());
+	    auto ifOp = scf::IfOp::create(b, loc, types, cond, true);
+	    // as written
+	    {
+		b.setInsertionPointToStart(&ifOp.getElseRegion().front());
+		IRMapping map;
+		for (Operation *op : ops)
+		    b.clone(*op, map);
+		SmallVector<Value> ys;
+		for (Value r : outs)
+		    ys.push_back(map.lookup(r));
+		scf::YieldOp::create(b, loc, ys);
+	    }
+	    // with the Woodbury identity
+	    {
+		b.setInsertionPointToStart(&ifOp.getThenRegion().front());
+		Value alpha = scalarProduct(lr->alphas, elt, loc);
+		Value beta = scalarProduct(lr->betas, elt, loc);
+		Value zt = TransposeOp::create(b, loc, z).getResult();
+		Value zzt =
+		    MulOp::create(b, loc, ValueRange{z, zt}).getResult();
+		Value in = identityLike(z, 0, elt, loc);
+		auto nn = cast<RankedTensorType>(
+		    stripProperties(shapeOf(z, 0, z, 0, elt)));
+		Value k =
+		    AddOp::create(
+		        b, loc, TypeRange{nn},
+		        ValueRange{
+		            ScaleOp::create(b, loc, TypeRange{nn}, alpha, in)
+		                .getResult(),
+		            ScaleOp::create(b, loc, TypeRange{nn}, beta, zzt)
+		                .getResult()})
+		        .getResult();
+		k = AssumeOp::create(
+		    b, loc, withProperties(nn, Properties::spd), k, false);
+		Value ki = InverseOp::create(b, loc, k).getResult();
+		Value one = constant(elt, 1.0, loc);
+		Value ia =
+		    arith::DivFOp::create(b, loc, one, alpha).getResult();
+		Value nb = arith::NegFOp::create(b, loc, beta).getResult();
+		auto pp = cast<RankedTensorType>(
+		    stripProperties(shapeOf(z, 1, z, 1, elt)));
+		// a fresh (1/alpha)(I - beta Z^T K^-1 Z) for every use, so that
+		// each product can distribute it (K^-1 is shared: one
+		// factorisation)
+		auto wFor = [&]() {
+		    Value inner = MulOp::create(b, loc, ValueRange{zt, ki, z})
+		                      .getResult();
+		    Value t2 = ScaleOp::create(b, loc, TypeRange{pp}, nb, inner)
+		                   .getResult();
+		    Value ip = identityLike(z, 1, elt, loc);
+		    auto sumOp = AddOp::create(b, loc, TypeRange{pp},
+		                               ValueRange{ip, t2});
+		    // (always distributed: the branch runs only for N < p)
+		    sumOp->setAttr(kDistributeAttr, b.getUnitAttr());
+		    Value sum = sumOp.getResult();
+		    return ScaleOp::create(b, loc, TypeRange{pp}, ia, sum)
+		        .getResult();
+		};
+		IRMapping map;
+		for (Operation *op : ops) {
+		    if (op == inv.getOperation())
+			continue;
+		    if (llvm::is_contained(op->getOperands(),
+		                           inv.getResult())) {
+			Operation *c = b.clone(*op, map);
+			for (OpOperand &o : c->getOpOperands())
+			    if (o.get() == inv.getResult()) {
+				OpBuilder::InsertionGuard g(b);
+				b.setInsertionPoint(c);
+				Value w = wFor();
+				o.set(w.getType() == o.get().getType()
+				          ? w
+					  : AssumeOp::create(b, loc,
+					                     o.get().getType(),
+					                     w, false)
+					        .getResult());
+			    }
+			continue;
+		    }
+		    b.clone(*op, map);
+		}
+		SmallVector<Value> ys;
+		for (Value r : outs)
+		    ys.push_back(map.lookup(r));
+		scf::YieldOp::create(b, loc, ys);
+	    }
+	    for (auto [k, r] : llvm::enumerate(outs))
+		r.replaceUsesWithIf(ifOp.getResult(k), [&](OpOperand &o) {
+		    return !slice.contains(o.getOwner()) &&
+		           !ifOp->isAncestor(o.getOwner());
+		});
+	    for (Operation *op : llvm::reverse(ops))
+		op->erase();
+	}
+    }
+
     // ---- distributivity -----------------------------------------------------
 
     /// The cost of a product by the generalised matrix chain at the current
@@ -887,6 +1175,15 @@ class Selector
 	return {scales, t};
     }
 
+    /// An identity matrix (also under assume).
+    static bool
+    isIdentity(Value v)
+    {
+	while (auto as = v.getDefiningOp<AssumeOp>())
+	    v = as.getOperand();
+	return static_cast<bool>(v.getDefiningOp<IdentityOp>());
+    }
+
     /// The cost of forming a term of a sum (a product, or an inverse as a
     /// solve with the identity), plus adding it.
     double
@@ -933,19 +1230,32 @@ class Selector
 	    MulOp m = work.pop_back_val();
 	    auto factors = llvm::to_vector(m.getFactors());
 	    for (auto [i, f] : llvm::enumerate(factors)) {
-		auto add = f.getDefiningOp<AddOp>();
+		// (a scaled sum, s (T_1 + T_2): s scales every term)
+		// (and through assume: its facts are about the sum, which is
+		// not formed)
+		SmallVector<Value> outer;
+		Value u0 = f;
+		while (Operation *d = u0.getDefiningOp()) {
+		    if (!d->hasOneUse())
+			break;
+		    if (auto sc = dyn_cast<ScaleOp>(d)) {
+			outer.push_back(sc.getAlpha());
+			u0 = sc.getOperand();
+		    } else if (auto as = dyn_cast<AssumeOp>(d)) {
+			u0 = as.getOperand();
+		    } else {
+			break;
+		    }
+		}
+		auto add = u0.getDefiningOp<AddOp>();
 		if (!add || !add->hasOneUse())
 		    continue;
-		// (a scaled identity is adddiag, already cheap; a run-time
-		// scale stays with the sum)
-		bool plain = llvm::all_of(add.getTerms(), [](Value t) {
-		    auto [scales, u] = unscaled(t);
-		    if (u.getDefiningOp<IdentityOp>())
-			return false;
-		    return llvm::all_of(scales, [](Value s) {
-			return matchPattern(s, m_Constant());
-		    });
-		});
+		// an identity term is dropped from its product (L I R = L R;
+		// alone, s I stays adddiag, already cheap)
+		bool plain = factors.size() > 1 ||
+		             llvm::none_of(add.getTerms(), [](Value t) {
+		                 return isIdentity(unscaled(t).second);
+		             });
 		// a sum of given matrices, A (B - C) x, stays formed: its
 		// parentheses may have been set for accuracy (B - C exact or
 		// nearly so when B and C are close; A B x - A C x subtracts
@@ -971,16 +1281,22 @@ class Selector
 		SmallVector<MulOp> products;
 		for (Value t : add.getTerms()) {
 		    auto [scales, u] = unscaled(t);
+		    scales.append(outer.begin(), outer.end());
 		    SmallVector<Value> fs(factors.begin(), factors.begin() + i);
 		    if (auto um = u.getDefiningOp<MulOp>())
 			llvm::append_range(fs, um.getFactors());
-		    else
+		    else if (!isIdentity(u))
 			fs.push_back(u);
 		    fs.append(factors.begin() + i + 1, factors.end());
-		    auto p = MulOp::create(b, loc, TypeRange{plainTy}, fs);
-		    created.push_back(p);
-		    products.push_back(p);
-		    Value v = p.getResult();
+		    Value v;
+		    if (fs.size() == 1) { // L I = L
+			v = fs[0];
+		    } else {
+			auto p = MulOp::create(b, loc, TypeRange{plainTy}, fs);
+			created.push_back(p);
+			products.push_back(p);
+			v = p.getResult();
+		    }
 		    for (Value s : llvm::reverse(scales)) {
 			auto sc =
 			    ScaleOp::create(b, loc, TypeRange{plainTy}, s, v);
@@ -999,8 +1315,9 @@ class Selector
 		for (MulOp p : products)
 		    for (Value g : p.getFactors())
 			collect(g);
-		bool cheaper = syms.size() <= 4;
-		unsigned masks = 1u << syms.size();
+		bool forced = add->hasAttr(kDistributeAttr);
+		bool cheaper = forced || syms.size() <= 4;
+		unsigned masks = forced ? 0 : 1u << syms.size();
 		for (unsigned mask = 0; cheaper && mask < masks; ++mask) {
 		    sample.clear();
 		    for (auto [k, v] : llvm::enumerate(syms))
@@ -1010,7 +1327,8 @@ class Selector
 			keep += termCost(t);
 		    double dist = 0;
 		    for (MulOp p : products)
-			dist += productCost(p) + sizeOf(m, 0) * sizeOf(m, 1);
+			dist += productCost(p);
+		    dist += add.getTerms().size() * sizeOf(m, 0) * sizeOf(m, 1);
 		    cheaper = dist < keep;
 		}
 		sample.clear();
@@ -1022,8 +1340,8 @@ class Selector
 		Value sum = AddOp::create(b, loc, TypeRange{rt}, terms);
 		m.getResult().replaceAllUsesWith(sum);
 		m->erase();
-		if (add->use_empty())
-		    eraseDead(add);
+		if (Operation *d = f.getDefiningOp(); d && d->use_empty())
+		    eraseDead(d);
 		for (MulOp p : products)
 		    work.push_back(p);
 		break;
@@ -1800,12 +2118,32 @@ class Selector
 	                                constant(elt, alpha, loc), r)
 	        ->getResult(0);
 	}
+	// one triangle plus one triangle stays one triangle; one triangle plus
+	// a whole matrix: completed first
+	bool lower = lowerOnly.contains(dest) && lowerOnly.contains(x);
+	if (lowerOnly.contains(dest) && !lower)
+	    dest = completeNow(dest, loc);
+	if (lowerOnly.contains(x) && !lower)
+	    x = completeNow(x, loc);
 	if (beta != 1)
 	    dest = lk::GescalOp::create(b, loc, TypeRange{dest.getType()},
 	                                constant(elt, beta, loc), dest)
 	               ->getResult(0);
-	return lk::GeaxpyOp::create(b, loc, TypeRange{dest.getType()},
-	                            constant(elt, alpha, loc), x, dest)
+	Value r = lk::GeaxpyOp::create(b, loc, TypeRange{dest.getType()},
+	                               constant(elt, alpha, loc), x, dest)
+	              ->getResult(0);
+	if (lower)
+	    lowerOnly.insert(r);
+	return r;
+    }
+
+    /// A value of which only the lower triangle is computed, completed here
+    /// (sycomplete at b's insertion point).
+    Value
+    completeNow(Value v, Location loc)
+    {
+	return lk::SycompleteOp::create(b, loc, TypeRange{v.getType()},
+	                                lk::Uplo::lower, v)
 	    ->getResult(0);
     }
 
@@ -1820,6 +2158,9 @@ class Selector
 	};
 	if (!dest)
 	    dest = empty(l, r, elt, loc);
+	// (an accumulator of which only the lower triangle is computed)
+	if (beta != 0 && lowerOnly.contains(dest))
+	    dest = completeNow(dest, loc);
 	auto t = [](bool x) { return x ? lk::Trans::trans : lk::Trans::none; };
 	// a symmetric factor stored as one triangle: symm / symv (if both
 	// are, one of them is completed first)
@@ -1970,7 +2311,8 @@ class Selector
 	    bool top = i == 0 && j + 1 == static_cast<int>(c.leaves.size());
 	    bool fresh =
 	        beta == 0 && (!dest || dest.getDefiningOp<tensor::EmptyOp>());
-	    bool update = beta != 0 && dest && symmetricAcc(dest);
+	    bool update = beta != 0 && dest &&
+	                  (symmetricAcc(dest) || lowerOnly.contains(dest));
 	    if (!inBranch && z.stored == Leaf::Full &&
 	        (fresh || (top && update))) {
 		Type elt = elementType(z.v);
@@ -1992,6 +2334,8 @@ class Selector
 	    }
 	    Leaf zt = z;
 	    zt.trans = !z.trans;
+	    if (dest && beta != 0 && lowerOnly.contains(dest))
+		dest = completeNow(dest, loc); // gemm reads the whole matrix
 	    return gemm(zt, z, dest, alpha, beta, loc);
 	}
 	case Choice::SolveLeft: {
@@ -2519,7 +2863,8 @@ class Selector
 	    // symmetric accumulator (A <- rho A + c a^T a with c known at run
 	    // time: one triangle, completed where needed, see replace)
 	    if (plans.size() == 1 && plans[0][0][k - 1].kind == Choice::Gram &&
-	        !inBranch && (!dest || symmetricAcc(dest))) {
+	        !inBranch &&
+	        (!dest || symmetricAcc(dest) || lowerOnly.contains(dest))) {
 		c.choice = plans[0];
 		int h = c.choice[0][k - 1].split;
 		Location loc = mul.getLoc();
@@ -2558,10 +2903,14 @@ class Selector
 		b.restoreInsertionPoint(ip);
 	    if (failed(r))
 		return failure();
-	    // (a scalar defined after the product, e.g. 1/a in A^-1 x / a:
-	    // the scaling goes after it)
-	    for (auto &sc : scales) {
-		Operation *d = sc.first.getDefiningOp();
+	    // (a scalar defined after the product, e.g. 1/a in A^-1 x / a,
+	    // or the product itself emitted after the accumulator's position,
+	    // e.g. a choice at run time: the scaling goes after it)
+	    SmallVector<Value> after{*r};
+	    for (auto &sc : scales)
+		after.push_back(sc.first);
+	    for (Value x : after) {
+		Operation *d = x.getDefiningOp();
 		Block *blk = b.getInsertionBlock();
 		if (!d || d->getBlock() != blk)
 		    continue;
@@ -3021,6 +3370,11 @@ class Selector
 	}
 	for (Product &pr : products) {
 	    MulOp mul = pr.mul;
+	    // (a one-triangle accumulator: only syrk updates it as such; a
+	    // gemm reads and writes the whole matrix)
+	    if (acc && lowerOnly.contains(acc) && !gram(mul) &&
+	        pr.scales.empty())
+		acc = completeNow(acc, loc);
 	    FailureOr<Value> r = chain(mul, acc, pr.alpha, beta, pr.scales);
 	    if (failed(r)) {
 		transposedProduct = false;

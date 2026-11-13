@@ -240,7 +240,10 @@ def egraph_plan(term, facts, iters=12):
     for f in facts:
         eg.register(f)
     t0 = time.perf_counter()
-    eg.run((G.sizes.saturate() + G.rules) * iters + G.sizes.saturate())
+    half = iters // 2
+    eg.run((G.sizes.saturate() + G.rules) * half + G.sizes.saturate()
+           + G.woodbury + (G.sizes.saturate() + G.rules) * (iters - half)
+           + G.sizes.saturate())
     t = time.perf_counter() - t0
     try:
         _, greedy = eg.extract(root, include_cost=True,
@@ -368,6 +371,23 @@ def kalman_gain_cov(P: Matrix(1500, 1500, "spd"), H: Matrix(300, 1500),
     return P - P @ H.T @ S.inv @ H @ P
 
 
+@problem
+def laplace_wide(Phi: Matrix(500, 4000), y: Vector(500),
+                 Phis: Matrix(200, 4000)):
+    # the last-layer Laplace approximation with few data, wide features
+    # (N < p): the Woodbury identity, an N x N factorisation
+    A = lam.assume(lam.eye(4000) + Phi.T @ Phi, "spd")
+    return Phis @ A.inv @ Phi.T @ y, Phis @ A.inv @ Phis.T
+
+
+@problem
+def laplace_tall(Phi: Matrix(4000, 500), y: Vector(4000),
+                 Phis: Matrix(200, 500)):
+    # many data (N > p): as written, a p x p factorisation
+    A = lam.assume(lam.eye(500) + Phi.T @ Phi, "spd")
+    return Phis @ A.inv @ Phi.T @ y, Phis @ A.inv @ Phis.T
+
+
 def main(names):
     verbose = "-v" in names
     names = [x for x in names if x != "-v"]
@@ -388,7 +408,18 @@ def main(names):
             ulm, " ".join(k for k, _ in kernels)))
         try:
             term, facts = ir_to_term(text, name)
-            greedy, cost, result, lines, t, t_ilp = egraph_plan(term, facts)
+            try:
+                greedy, cost, result, lines, t, t_ilp = egraph_plan(
+                    term, facts)
+            except RuntimeError as ex:
+                # (distributivity and the Woodbury identity let the e-graph
+                # grow: fewer rounds of rules, so that the ILP is solved)
+                if "Time limit" not in str(ex):
+                    raise
+                print("   e-graph:  ILP time limit, 8 rounds of rules "
+                      "instead of 12")
+                greedy, cost, result, lines, t, t_ilp = egraph_plan(
+                    term, facts, iters=8)
         except Exception as ex:
             print("   e-graph:", type(ex).__name__, str(ex)[:200])
             continue

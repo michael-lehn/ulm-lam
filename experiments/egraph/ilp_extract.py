@@ -21,12 +21,14 @@ solved with HiGHS (scipy.optimize.milp).
 from __future__ import annotations
 
 import json
+import sys
 
 import numpy as np
 from scipy.optimize import Bounds, LinearConstraint, milp
 from scipy.sparse import coo_matrix
 
 MAT = "lamp_egraph.Mat"
+DEBUG = False
 
 
 def node_flops(op, kids, size, props=None):
@@ -75,7 +77,7 @@ def node_flops(op, kids, size, props=None):
     raise ValueError(f"no flop count for {op}")
 
 
-def extract(egraph, root="$root", time_limit=60.0, inverses=True):
+def extract(egraph, root="$root", time_limit=30.0, inverses=True):
     """The cheapest DAG of the let `root`: (flops, plan as text, kernels)."""
     data = json.loads(egraph._serialize(split_primitive_outputs=False)
                       .to_json())
@@ -156,7 +158,7 @@ def extract(egraph, root="$root", time_limit=60.0, inverses=True):
                              np.concatenate([np.ones(nx),
                                              np.full(nt, big)])),
                options={"time_limit": time_limit, "mip_rel_gap": 1e-9})
-    if res.x is None:
+    if res.x is None or res.status != 0:  # (0: optimal)
         raise RuntimeError(f"ILP: {res.message}")
     chosen = {i for i in range(nx) if res.x[i] > 0.5}
     pick = {}
@@ -167,10 +169,20 @@ def extract(egraph, root="$root", time_limit=60.0, inverses=True):
 
     # the plan: kernels in topological order, shared ones named once
     names, lines, total = {}, [], 0.0
+    visiting = set()
+    sys.setrecursionlimit(max(sys.getrecursionlimit(), 20 * len(pick) + 1000))
 
     def show(c):
         if c in names:
             return names[c]
+        if c in visiting:  # (the levels' tolerance admitted a cycle)
+            if DEBUG:
+                for cc in visiting:
+                    j = pick[cc]
+                    print("  ", cc, nodes[cand[j]]["op"], kids[j],
+                          res.x[j], res.x[nx + ci[cc]])
+            raise RuntimeError("ILP: cyclic solution")
+        visiting.add(c)
         i = pick[c]
         op = nodes[cand[i]]["op"]
         args = [show(d) for d in kids[i]]
