@@ -80,7 +80,59 @@ The covariance, however, is now exactly symmetric in every step; without the
 rule it drifts away from symmetry by rounding, a known problem of Kalman
 filters.
 
-Next: the experiment driven by ulm.lam's IR (the traced `ulm_lam` functions
-instead of hand-written terms) and its plans lowered back to `ulm_lamk`, as
-`strategy=egraph`; MLIR's own equality saturation work (eqsat, DialEgg) as
-an alternative to egglog.
+## Driven by ulm.lam's IR
+
+`lamp_ir.py` (`make egraph-ir`) does the same for problems written with the
+Python frontend, with static sizes, instead of hand-written terms: the
+traced `ulm_lam` IR becomes the e-graph term (properties of the parameters
+and of `lam.assume` become facts), and the same IR goes through ulm.lam's
+kernel selection (`ulm-lam-opt`), whose `ulm_lamk` kernels are counted with
+the same flop formulas.  No count is written by hand any more, so any
+function can be checked; where the e-graph is cheaper, the selection misses
+something.  The problems: the showcases and Linnea's application problems
+(Barthels, Psarras, Bientinesi, 2021) that the frontend can express.
+
+| problem | ulm.lam | e-graph (DAG) | e-graph / ulm.lam |
+|:--|--:|--:|--:|
+| gls | 2.88e+09 | 2.88e+09 | 1.00 |
+| gp | 4.14e+10 | 4.14e+10 | 1.00 |
+| fpft | 1.87e+10 | 1.87e+10 | 1.00 |
+| kalman_update | 3.21e+08 | 3.22e+08 | 1.00 |
+| attention | 6.71e+07 | 6.71e+07 | 1.00 |
+| ridge | 1.24e+08 | 1.27e+08 | 1.02 |
+| normal_equations | 1.24e+08 | 1.24e+08 | 1.00 |
+| optimization | 4.44e+08 | 4.46e+08 | 1.00 |
+| ensemble_kalman | 4.87e+08 | 5.25e+08 | 1.08 |
+| image_restoration | 2.34e+09 | 2.67e+09 | 1.14 |
+| two_solves | 3.39e+09 | 3.39e+09 | 1.00 |
+| triangular_sandwich | 1.6e+10 | 1.87e+10 | 1.17 |
+| chain_vector | 1.3e+07 | 1.3e+07 | 1.00 |
+| gram_of_solve | 3.09e+09 | 3.09e+09 | 1.00 |
+| kalman_gain_cov | 2.3e+09 | 2.31e+09 | 1.00 |
+
+Its first finding, now fixed: for the Kalman update `x + K (z − H x)`,
+`P − K H P` the e-graph was 3 % cheaper.  `expand-factors` expanded
+`K H P` (the syrk of the first finding), but decided for `K r` on its own,
+where K exists already and one `gemv` is cheapest; that K is then needed
+for nothing else, and forming it costs a `trsm`, was not seen.  Now, if all
+other uses of a computed factor are expanded, its forming cost counts for
+the expansion, and the expanded chain must not reuse the factor itself:
+`K r` becomes `Wᵀ (L⁻¹ r)` with `W = L⁻¹ (H P)` from the syrk, one `trsv`
+and one `gemv`, and K is never formed (`test/select/expand_unformed.mlir`).
+With sizes known only at run time this exposed a second weakness: the
+selection compared the plans of its size samples by their whole tables,
+including intervals no plan uses, and so decided at run time between two
+identical branches, in which `syrk` is not used.  Plans are now compared by
+the intervals they reach.
+
+Where the e-graph is more expensive, its model lacks what the selection
+knows: `A + αI` adds to the diagonal (n flops, not n²: ridge, image
+restoration), and its DAG extraction is greedy (ensemble Kalman,
+triangular sandwich).  For these problems ulm.lam's hand-written rules and
+the generalised matrix chain find the plans the e-graph finds, and more.
+
+Next: plans lowered back to `ulm_lamk` (`strategy=egraph`), which needs
+symbolic costs when sizes are known only at run time; more problems from
+Linnea's benchmark (which needs more of its operations in the frontend);
+MLIR's own equality saturation work (eqsat, DialEgg) as an alternative to
+egglog.

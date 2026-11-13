@@ -605,6 +605,9 @@ class Selector
     /// leaves; a later product can also use one transposed.
     using Key = std::vector<intptr_t>;
     std::map<Key, Value> computed;
+    /// Computed products whose every use is expanded (expandFactors): they
+    /// are not formed, so no chain may reuse them.
+    llvm::DenseSet<Value> unreusable;
 
     static Key
     keyOf(ArrayRef<Leaf> leaves, int i, int j, bool transposed)
@@ -1326,6 +1329,7 @@ class Selector
 		    for (bool tr : {false, true}) {
 			auto it = computed.find(keyOf(L, i, j, tr));
 			if (it != computed.end() &&
+			    !unreusable.contains(it->second) &&
 			    dom.properlyDominates(it->second, user)) {
 			    c.cost[i][j] = 0;
 			    c.choice[i][j] = {Choice::Reuse, 0, it->second, tr};
@@ -1734,14 +1738,35 @@ class Selector
     static bool
     samePlan(const Plan &a, const Plan &b)
     {
-	for (size_t i = 0; i < a.size(); ++i)
-	    for (size_t j = 0; j < a.size(); ++j) {
-		const Choice &x = a[i][j], &y = b[i][j];
-		if (x.kind != y.kind || x.split != y.split ||
-		    x.value != y.value || x.trans != y.trans)
-		    return false;
-	    }
-	return true;
+	return a.empty() || sameFrom(a, b, 0, a.size() - 1);
+    }
+
+    /// The same kernels for interval [i, j]: only the intervals the plan
+    /// reaches from there count (the DP fills the whole table, and two
+    /// size samples may differ in an interval no plan uses, which would
+    /// give a decision at run time between identical branches).
+    static bool
+    sameFrom(const Plan &a, const Plan &b, int i, int j)
+    {
+	const Choice &x = a[i][j], &y = b[i][j];
+	if (x.kind != y.kind || x.split != y.split || x.value != y.value ||
+	    x.trans != y.trans)
+	    return false;
+	if (i == j)
+	    return true;
+	int s = x.split;
+	switch (x.kind) {
+	case Choice::Gemm:
+	    return sameFrom(a, b, i, s) && sameFrom(a, b, s + 1, j);
+	case Choice::SolveLeft:
+	    return sameFrom(a, b, s + 1, j);
+	case Choice::SolveRight:
+	    return sameFrom(a, b, i, s);
+	case Choice::Gram:
+	    return sameFrom(a, b, s, j);
+	default:
+	    return true;
+	}
     }
 
     /// The plans that are optimal for some sizes: the DP for every
@@ -1986,6 +2011,73 @@ class Selector
     /// and intervals already computed (H P, the factorisation of S, L^-1 H P)
     /// are reused.  Found by the equality saturation experiment
     /// (experiments/egraph): the e-graph keeps both forms of the product.
+    /// The cost of product mul with its factor fi as it is (first) and
+    /// with fi replaced by the factors of the product it was computed by
+    /// (second), the expanded chain in *expandedOut.
+    std::optional<std::pair<double, double>>
+    expansionCosts(MulOp mul, unsigned fi, MulOp om, Chain *expandedOut,
+                   bool symmetric)
+    {
+	auto factors = mul.getFactors();
+	Chain c1, c2;
+	c1.symmetric = c2.symmetric = symmetric;
+	SmallVector<std::pair<Value, bool>> saved = std::move(dynScales);
+	dynScales.clear();
+	bool ok = true;
+	for (unsigned j = 0; j < factors.size() && ok; ++j) {
+	    ok = succeeded(leavesOf(factors[j], mul, c1.leaves, c1.alpha));
+	    if (j != fi) {
+		ok = ok &&
+		     succeeded(leavesOf(factors[j], mul, c2.leaves, c2.alpha));
+		continue;
+	    }
+	    for (Value g : om.getFactors())
+		ok = ok && succeeded(leavesOf(g, mul, c2.leaves, c2.alpha));
+	}
+	ok = ok && dynScales.empty();
+	dynScales = std::move(saved);
+	if (!ok)
+	    return std::nullopt;
+	int k1 = c1.leaves.size(), k2 = c2.leaves.size();
+	solveChain(c1, mul);
+	solveChain(c2, mul);
+	std::pair<double, double> r{c1.cost[0][k1 - 1], c2.cost[0][k2 - 1]};
+	if (expandedOut)
+	    *expandedOut = std::move(c2);
+	return r;
+    }
+
+    /// The cost of computing the product om (its own chain).
+    double
+    formingCost(MulOp om)
+    {
+	Chain c;
+	SmallVector<std::pair<Value, bool>> saved = std::move(dynScales);
+	dynScales.clear();
+	bool ok = true;
+	for (Value g : om.getFactors())
+	    ok = ok && succeeded(leavesOf(g, om, c.leaves, c.alpha));
+	ok = ok && dynScales.empty();
+	dynScales = std::move(saved);
+	if (!ok || c.leaves.empty())
+	    return 0;
+	solveChain(c, om);
+	return c.cost[0][c.leaves.size() - 1];
+    }
+
+    /// A factor that is itself a computed product (K in K H P, with
+    /// K = P H^T S^-1) may be replaced by the leaves of that product, if
+    /// the longer chain is cheaper: it can expose structure across the two
+    /// products (here (H P)^T S^-1 (H P): trsm and syrk instead of gemm),
+    /// and intervals already computed (H P, the factorisation of S, L^-1 H P)
+    /// are reused.  Found by the equality saturation experiment
+    /// (experiments/egraph): the e-graph keeps both forms of the product.
+    ///
+    /// If every other use of the factor is expanded as well, the factor
+    /// itself is never needed: then the cost of forming it counts for the
+    /// expansion (K r in the Kalman update, x + K r, with K H P expanded:
+    /// (H P)^T L^-T L^-1 r, two trsv and a gemv instead of the trsm that
+    /// forms K; found by experiments/egraph/lamp_ir.py).
     void
     expandFactors(Chain &c, MulOp mul)
     {
@@ -1999,29 +2091,60 @@ class Selector
 		continue;
 	    MulOp om = it->second;
 	    Chain c2;
-	    c2.symmetric = c.symmetric;
-	    bool ok = true;
-	    for (unsigned j = 0; j < factors.size() && ok; ++j) {
-		if (j != fi) {
-		    ok = succeeded(
-		        leavesOf(factors[j], mul, c2.leaves, c2.alpha));
+	    auto costs = expansionCosts(mul, fi, om, &c2, c.symmetric);
+	    if (!costs)
+		continue;
+	    auto [cost1, cost2] = *costs;
+	    if (!(cost2 < cost1) && otherUsesExpand(f, mul)) {
+		// f never formed: the expanded chain without reusing it
+		unreusable.insert(f);
+		Chain c3;
+		auto costs3 = expansionCosts(mul, fi, om, &c3, c.symmetric);
+		if (costs3 && costs3->second < cost1 + formingCost(om)) {
+		    c = std::move(c3);
 		    continue;
 		}
-		for (Value g : om.getFactors())
-		    ok = ok && succeeded(leavesOf(g, mul, c2.leaves, c2.alpha));
+		unreusable.erase(f);
 	    }
-	    if (!ok || !dynScales.empty()) {
-		dynScales.clear();
-		continue;
-	    }
-	    int k1 = c.leaves.size(), k2 = c2.leaves.size();
-	    solveChain(c, mul);
-	    double cost1 = c.cost[0][k1 - 1];
-	    solveChain(c2, mul);
-	    double cost2 = c2.cost[0][k2 - 1];
 	    if (cost2 < cost1)
 		c = std::move(c2);
 	}
+    }
+
+    /// Are all uses of the computed product f other than `mul` factors of
+    /// products that expand it (by the cost comparison alone)?
+    bool
+    otherUsesExpand(Value f, MulOp mul)
+    {
+	auto it = origin.find(f);
+	if (it == origin.end())
+	    return false;
+	MulOp om = it->second;
+	SmallVector<Value> vals{f};
+	bool any = false;
+	for (size_t i = 0; i < vals.size(); ++i)
+	    for (OpOperand &u : vals[i].getUses()) {
+		Operation *o = u.getOwner();
+		if (auto as = dyn_cast<AssumeOp>(o)) {
+		    vals.push_back(as.getResult());
+		    continue;
+		}
+		auto um = dyn_cast<MulOp>(o);
+		if (!um)
+		    return false;
+		if (um == mul)
+		    continue;
+		auto t = cast<RankedTensorType>(um.getType());
+		bool sym =
+		    bitEnumContainsAll(closure(propertiesOf(t), t.getShape()),
+		                       Properties::symmetric);
+		auto costs =
+		    expansionCosts(um, u.getOperandNumber(), om, nullptr, sym);
+		if (!costs || !(costs->second < costs->first))
+		    return false;
+		any = true;
+	    }
+	return any;
     }
 
     /// beta * dest + alpha * (product), dest null: a new value.
