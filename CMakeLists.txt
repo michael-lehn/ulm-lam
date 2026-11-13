@@ -18,6 +18,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(MLIR REQUIRED CONFIG)
 message(STATUS "MLIR (Multi-Level Intermediate Representation): ${MLIR_DIR}")
+# ULM_LAM_TABLEGEN: an mlir-tblgen other than MLIR's own (the build
+# machine's when cross-compiling; MLIRConfig.cmake sets MLIR_TABLEGEN_EXE)
+set(ULM_LAM_TABLEGEN "" CACHE FILEPATH "mlir-tblgen to run")
+if(ULM_LAM_TABLEGEN)
+  set(MLIR_TABLEGEN_EXE ${ULM_LAM_TABLEGEN})
+endif()
 
 set(LLVM_RUNTIME_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/bin)
 set(LLVM_LIBRARY_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/lib)

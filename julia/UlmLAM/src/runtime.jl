@@ -284,6 +284,8 @@ mutable struct Library
     pending::Vector{Any}
     eltype::DataType  # Float64 or Float32: the element type of all arrays
     julia::Bool       # the program is Julia code (backend :julia), not C++
+    jlmodule::Any     # its module (kept referenced: Julia 1.10 frees an
+                      # unreferenced anonymous module under its functions)
 end
 
 function Base.getproperty(lib::Library, s::Symbol)
@@ -404,7 +406,7 @@ function compile(functions::Vector{LamFunction}; name::AbstractString=cname(func
         end
     end
     L = Library(lib, src, handle, Dict{Symbol,CompiledFunction}(), externs, decls,
-                callbacks, Workspace(), Any[], eltype, julia)
+                callbacks, Workspace(), Any[], eltype, julia, mod)
     codes = info_codes(src)
     # (the functions they call too: callable from Julia as well)
     byname = Dict{String,LamFunction}()

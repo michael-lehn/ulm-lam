@@ -1,0 +1,59 @@
+# Checks the ingredients of the ulm_lam_jll recipe
+# (packaging/yggdrasil/U/ulm_lam/build_tarballs.jl) without BinaryBuilder:
+# builds the compiler against the artifact of LLVM_full_jll 23.1.4 for
+# x86_64 Linux with ULM_LAM_STATIC_LLVM=ON (static MLIR (Multi-Level
+# Intermediate Representation) and LLVM (Low Level Virtual Machine)
+# libraries from the artifact, its CMake files), then runs the tests of
+# UlmLAM with that executable.
+name: jll-check
+on:
+  workflow_dispatch:
+  push:
+    tags: ['*']
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+      - name: Artifact of LLVM_full_jll 23.1.4
+        run: |
+          julia -e '
+            using Pkg
+            Pkg.activate(temp=true)
+            Pkg.add(name="LLVM_full_jll", version="23.1.4")
+            import LLVM_full_jll
+            open(ENV["GITHUB_ENV"], "a") do io
+                println(io, "LLVM_FULL=", LLVM_full_jll.artifact_dir)
+            end'
+      - name: What the artifact contains
+        run: |
+          echo "static MLIR libraries: $(ls $LLVM_FULL/lib/libMLIR*.a | wc -l)"
+          echo "static LLVM libraries: $(ls $LLVM_FULL/lib/libLLVM*.a | wc -l)"
+          ls $LLVM_FULL/lib/cmake
+          ls $LLVM_FULL/bin $LLVM_FULL/tools 2>/dev/null | grep -i tblgen || echo "no tblgen"
+      - name: Build against it
+        run: |
+          sudo apt-get install -y ninja-build zlib1g-dev libzstd-dev
+          # mlir-tblgen of the artifact, or of apt.llvm.org's MLIR 23
+          if [ ! -x "$LLVM_FULL/bin/mlir-tblgen" ] && [ ! -x "$LLVM_FULL/tools/mlir-tblgen" ]; then
+            wget -q https://apt.llvm.org/llvm.sh && sudo bash llvm.sh 23
+            sudo apt-get install -y mlir-23-tools
+            TBLGEN=(-DULM_LAM_TABLEGEN=/usr/lib/llvm-23/bin/mlir-tblgen)
+          fi
+          cmake -S . -B build/jll -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DMLIR_DIR=$LLVM_FULL/lib/cmake/mlir -DULM_LAM_STATIC_LLVM=ON "${TBLGEN[@]}"
+          cmake --build build/jll
+          ldd build/jll/bin/ulm-lam
+          ls -la build/jll/bin/ulm-lam
+          echo "ULM_LAM=$PWD/build/jll/bin/ulm-lam" >> "$GITHUB_ENV"
+      - uses: julia-actions/julia-buildpkg@v1
+        with:
+          project: julia/UlmLAM
+      - uses: julia-actions/julia-runtest@v1
+        with:
+          project: julia/UlmLAM
+        env:
+          ULM_LAM_TEST_BACKENDS: julia
