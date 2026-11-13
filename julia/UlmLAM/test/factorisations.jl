@@ -1,6 +1,6 @@
 # L D L^T for symmetric indefinite matrices and least squares by QR (where
 # the backend has LAPACK; ulmBLAS: LU and the normal equations).
-using UlmLam, LinearAlgebra, Random, Test
+using UlmLAM, LinearAlgebra, Random, Test
 
 @testset "LDL^T and QR" begin
     Random.seed!(21)
@@ -14,8 +14,8 @@ using UlmLam, LinearAlgebra, Random, Test
     @lam fa_lsm(X::Mat(:m, :n, :full_rank), Y::Mat(:m, :k)) = lstsq(X, Y)
     rel(a, b) = norm(a - b) / norm(b)
     t = range(0, 1, length=100); V = [ti^j for ti in t, j in 0:11]; xt = randn(12)
-    for backend in (:julia, :ulmblas, :cblas)
-        lib = UlmLam.compile([fa_sym, fa_symr, fa_ls, fa_lsm]; name="fact_$backend",
+    for backend in BACKENDS
+        lib = UlmLAM.compile([fa_sym, fa_symr, fa_ls, fa_lsm]; name="fact_$backend",
                              backend=backend)
         @test rel(lib.fa_sym(S, B), S \ B) < 1e-10
         @test rel(lib.fa_symr(B', S), B' / S) < 1e-10

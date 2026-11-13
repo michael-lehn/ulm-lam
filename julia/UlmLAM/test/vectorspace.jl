@@ -2,7 +2,7 @@
 # (constants and run-time Float) on either side, division by scalars,
 # linear combinations; with transposes, products, solves and explicit
 # inverses.  Every expression against Julia; all in one library.
-using UlmLam, LinearAlgebra, Random, Test
+using UlmLAM, LinearAlgebra, Random, Test
 
 @testset "vector spaces" begin
     Random.seed!(3)
@@ -48,7 +48,7 @@ using UlmLam, LinearAlgebra, Random, Test
                 "H" => H, "S" => S, "a" => a, "b" => b)
     names_in(ex) = ex isa Symbol ? Set([string(ex)]) :
                    ex isa Expr ? union(Set{String}(), map(names_in, ex.args)...) : Set{String}()
-    fs, used = UlmLam.LamFunction[], Vector{String}[]
+    fs, used = UlmLAM.LamFunction[], Vector{String}[]
     for (i, e) in enumerate(exprs)
         u = [v for v in ("x", "y", "z", "A", "B", "C", "G", "H", "S", "a", "b")
              if v in names_in(Meta.parse(e))]
@@ -56,7 +56,7 @@ using UlmLam, LinearAlgebra, Random, Test
         push!(fs, Core.eval(@__MODULE__, Meta.parse("@lam vs$i($args) = $e")))
         push!(used, u)
     end
-    lib = UlmLam.compile(fs; name="vector_spaces")
+    lib = UlmLAM.compile(fs; name="vector_spaces")
     for (i, e) in enumerate(exprs)
         args = [vals[v] for v in used[i]]
         jf = Core.eval(@__MODULE__, Meta.parse("(" * join(used[i], ", ") *

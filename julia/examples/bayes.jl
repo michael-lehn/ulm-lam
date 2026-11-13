@@ -7,9 +7,9 @@
 # full covariance of all test hours.  Compared with Julia as written (inv)
 # and by hand (cholesky, \, C.L \ Phi*', V'V).
 #
-#     julia --project=julia/UlmLam julia/examples/bayes.jl
+#     julia --project=julia/UlmLAM julia/examples/bayes.jl
 
-using UlmLam, LinearAlgebra, Random
+using UlmLAM, LinearAlgebra, Random
 include("data.jl")
 
 @lam function blr(Phi::Mat(:n, :p), t::Vec(:n), Phis::Mat(:m, :p), alpha::Float, beta::Float)
@@ -34,7 +34,7 @@ end
 besttime(f, reps) = minimum(@elapsed(f()) for _ in 1:reps)
 
 function main()
-    lib = UlmLam.compile(blr; name="bayes_jl", backend=:ulmblas)
+    lib = UlmLAM.compile(blr; name="bayes_jl", backend=:ulmblas)
     X0, y0 = bike_data()
     Random.seed!(2)
     perm = randperm(length(y0))

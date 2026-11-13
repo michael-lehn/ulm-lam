@@ -10,9 +10,9 @@
 # (LinearAlgebra, OpenBLAS): the formula as written, and the operator
 # G = (H' R^-1 H)^-1 H' R^-1 computed by hand before the loop.
 #
-#     julia --project=julia/UlmLam julia/examples/kalman.jl
+#     julia --project=julia/UlmLAM julia/examples/kalman.jl
 
-using UlmLam, LinearAlgebra, Random
+using UlmLAM, LinearAlgebra, Random
 
 const observe = extern(:observe, [Index], Vec(:n))
 const record = extern(:record, [Index, Vec(:m)])
@@ -37,7 +37,7 @@ end
 besttime(f, reps=3) = minimum(@elapsed(f()) for _ in 1:reps)
 
 function main(n=4000, m=200, steps=200)
-    t = @elapsed lib = UlmLam.compile(estimate; name="kalman_jl", backend=:ulmblas)
+    t = @elapsed lib = UlmLAM.compile(estimate; name="kalman_jl", backend=:ulmblas)
     println("compiled in $(round(t, digits=1)) s (cached when unchanged)\n")
     println(cpp(lib.estimate))
     Random.seed!(3)

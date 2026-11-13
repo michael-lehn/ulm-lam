@@ -1,6 +1,6 @@
-# foo calls bar, and bar needs a workspace (julia --project=julia/UlmLam
+# foo calls bar, and bar needs a workspace (julia --project=julia/UlmLAM
 # examples/calls/calls.jl; the same in Python: calls.py)
-using UlmLam, LinearAlgebra, Random
+using UlmLAM, LinearAlgebra, Random
 
 @lam bar(M::Mat(:n, :n, :spd), y::Vec(:n)) = M \ y
 @lam foo(M::Mat(:n, :n, :spd), N::Mat(:n, :n, :spd), y::Vec(:n)) = bar(M, bar(N, y))
@@ -11,12 +11,12 @@ A, B = randn(n, n), randn(n, n)
 M, N, y = A * A' + n * I, B * B' + n * I, randn(n)
 
 x = foo(M, N, y)                     # compiled at the first call, bar with it
-lib = UlmLam.library(foo)            # the library: foo and bar
+lib = UlmLAM.library(foo)            # the library: foo and bar
 println("error: ", norm(x - M \ (N \ y)) / norm(x))
 println("workspace of bar: ", workspace_size(lib.bar, M, y), " bytes, of foo: ",
         workspace_size(lib.foo, M, N, y), " bytes")
 # the IR as traced, and the generated C++
-write(joinpath(@__DIR__, "generated", "calls_jl.mlir"), first(UlmLam.lam_module([foo])))
+write(joinpath(@__DIR__, "generated", "calls_jl.mlir"), first(UlmLAM.lam_module([foo])))
 write(joinpath(@__DIR__, "generated", "calls_jl.cpp"), lib.source)
 display(@code_lam foo(M, N, y)); println()
 display(@code_lam bar(M, y)); println()
@@ -29,7 +29,7 @@ display(@code_lam bar(M, y)); println()
 @lam foo3(M::InOut(Mat(:n, :n, :spd)), N::InOut(Mat(:n, :n, :spd)), y::Vec(:n)) =
     bar2(M, bar2(N, y))
 
-lib2 = UlmLam.compile([foo2, foo3]; name="calls_inout_jl")
+lib2 = UlmLAM.compile([foo2, foo3]; name="calls_inout_jl")
 M2, N2 = copy(M), copy(N)
 x2 = lib2.foo2(M2, N2, y)
 M3, N3 = copy(M), copy(N)
@@ -39,7 +39,7 @@ println("errors: ", norm(x2 - M \ (N \ y)) / norm(x2), ", ", norm(x3 - M \ (N \ 
 println("workspace of bar2: ", workspace_size(lib2.bar2, M, y), " bytes, of foo2: ",
         workspace_size(lib2.foo2, M, N, y), " bytes, of foo3: ",
         workspace_size(lib2.foo3, M, N, y), " bytes")
-write(joinpath(@__DIR__, "generated", "calls_inout_jl.mlir"), first(UlmLam.lam_module([foo2, foo3])))
+write(joinpath(@__DIR__, "generated", "calls_inout_jl.mlir"), first(UlmLAM.lam_module([foo2, foo3])))
 write(joinpath(@__DIR__, "generated", "calls_inout_jl.cpp"), lib2.source)
 display(code_lam(foo2)); println()
 display(code_lam(foo3)); println()
@@ -54,7 +54,7 @@ display(code_lam(bar2)); println()
     update!(y, bar!(M, bar!(N, y)))
 @lam foo_matlab(M::Mat(:n, :n, :spd), N::Mat(:n, :n, :spd), y::Vec(:n)) = foo!(M, N, y)
 
-lib3 = UlmLam.compile([foo_matlab]; name="calls_lapack_jl")   # and foo!, bar!
+lib3 = UlmLAM.compile([foo_matlab]; name="calls_lapack_jl")   # and foo!, bar!
 M4, N4, y4 = copy(M), copy(N), copy(y)
 lib3.foo!(M4, N4, y4)                # y4 is the solution now
 x5 = lib3.foo_matlab(M, N, y)
@@ -64,7 +64,7 @@ println("errors: ", norm(y4 - M \ (N \ y)) / norm(y4), ", ", norm(x5 - M \ (N \ 
 println("workspace (LAPACK style) of bar: ", workspace_size(lib3.bar!, M, y), " bytes, of foo: ",
         workspace_size(lib3.foo!, M, N, y), " bytes; of foo_matlab: ",
         workspace_size(lib3.foo_matlab, M, N, y), " bytes")
-write(joinpath(@__DIR__, "generated", "calls_lapack_jl.mlir"), first(UlmLam.lam_module([foo_matlab])))
+write(joinpath(@__DIR__, "generated", "calls_lapack_jl.mlir"), first(UlmLAM.lam_module([foo_matlab])))
 write(joinpath(@__DIR__, "generated", "calls_lapack_jl.cpp"), lib3.source)
 display(code_lam(foo!)); println()
 display(code_lam(bar!)); println()

@@ -1,8 +1,11 @@
-# The Julia frontend of ulm.lam: julia --project=julia/UlmLam -e 'using Pkg; Pkg.test()'
-using UlmLam, LinearAlgebra, Random, Test
+# The Julia frontend of ulm.lam: julia --project=julia/UlmLAM -e 'using Pkg; Pkg.test()'
+using UlmLAM, LinearAlgebra, Random, Test
 
 Random.seed!(7)
 rel(a, b) = norm(a - b) / norm(b)
+# the backends tested: :julia needs nothing but the compiler; the C++ ones a
+# C++ compiler, ulmBLAS (ULMBLAS_DIR) and a CBLAS (ULM_LAM_BLAS_LIBS)
+const BACKENDS = Symbol.(split(get(ENV, "ULM_LAM_TEST_BACKENDS", "julia ulmblas cblas lbt")))
 spd(n) = (A = randn(n, n); A * A' + n * I)
 
 @lam function gls(X::Mat(:n, :m, :full_rank), M::Mat(:n, :n, :spd), y::Vec(:n))
@@ -69,8 +72,8 @@ end
 const ALL = [gls, gls_static, left_spd, left_lu, right_lu, chain, two, estimate,
              accumulate, gp, blr, overwrite]
 
-for backend in (:julia, :ulmblas, :cblas)
-    lib = UlmLam.compile(ALL; name="jltest_$backend", backend=backend)
+for backend in BACKENDS
+    lib = UlmLAM.compile(ALL; name="jltest_$backend", backend=backend)
     @testset "$backend" begin
         @testset "GLS" begin
             for (n, m) in ((40, 6), (100, 13), (7, 7))
@@ -82,7 +85,7 @@ for backend in (:julia, :ulmblas, :cblas)
             @test rel(lib.gls_static(X, M, y), (X' * (M \ X)) \ (X' * (M \ y))) < 1e-12
             # the same kernels as from Python: Cholesky, syrk, no LU
             src = cpp(lib.gls)
-            @test occursin("potrf", src) && occursin("rk<", src) && !occursin("getrf", src)
+            @test occursin("potrf", src) && occursin(r"rk[<(]", src) && !occursin("getrf", src)
         end
         @testset "solves" begin
             M, A, B, C = spd(30), randn(30, 30), randn(30, 4), randn(4, 30)
@@ -158,7 +161,7 @@ end
     @lam ufoo(M::Mat(:n, :n, :spd), N::Mat(:n, :n, :spd), y::Vec(:n)) = ufoo!(M, N, y)
     @lam uadd!(A::Mat(:m, :n), Y::InOut(Mat(:m, :n))) = update!(Y, Y + 2A)
     @lam ukeep(M::InOut(Mat(:n, :n, :spd)), y::Vec(:n)) = ubar!(M, y) + y
-    lib = UlmLam.compile([ufoo, uadd!, ukeep]; name="test_update")
+    lib = UlmLAM.compile([ufoo, uadd!, ukeep]; name="test_update")
     n = 30
     A, B = randn(n, n), randn(n, n)
     M, N, y = A * A' + n * I, B * B' + n * I, randn(n)
@@ -179,7 +182,7 @@ end
     M3 = copy(M)
     @test lib.ukeep(M3, y) ≈ M \ y + y
     @test occursin("ubar!(N, y)", string(code_lam(ufoo!)))
-    @test_throws LamError UlmLam.lam_module([@lam bad_upd(A::Mat(:n, :n), y::Vec(:n)) = update!(y, A * y)])
+    @test_throws LamError UlmLAM.lam_module([@lam bad_upd(A::Mat(:n, :n), y::Vec(:n)) = update!(y, A * y)])
 end
 
 @testset "selection: distribution, Gram, explicit inverses" begin
@@ -188,8 +191,8 @@ end
     @lam invs(S::Mat(:n, :n, :spd), A::Mat(:n, :n), C::Mat(:n, :n)) = (inv(S), inv(A), C + inv(A)')
     @lam information(P::Mat(:n, :n, :spd), H::Mat(:k, :n), R::Mat(:k, :k, :spd)) =
         inv(inv(P) + H' * inv(R) * H)
-    for backend in (:julia, :ulmblas, :cblas)
-        lib = UlmLam.compile([lora, gramleft, invs, information]; name="selection_$backend",
+    for backend in BACKENDS
+        lib = UlmLAM.compile([lora, gramleft, invs, information]; name="selection_$backend",
                              backend=backend)
         W, B, A, x = randn(50, 50), randn(50, 3), randn(3, 50), randn(50)
         @test rel(lib.lora(W, B, A, x), (W + B * A) * x) < 1e-12
@@ -208,7 +211,7 @@ end
 @testset "frontend" begin
     @test_throws LamError Mat(3, 3, :spdd)
     @lam bad(A::Mat(3, 4), B::Mat(3, 4)) = A * B
-    @test_throws LamError UlmLam.lam_module([bad])
+    @test_throws LamError UlmLAM.lam_module([bad])
 end
 
 @testset "code_lam" begin

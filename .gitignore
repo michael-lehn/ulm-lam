@@ -12,4 +12,4 @@ doc/*.log
 doc/*.lst
 doc/*.out
 doc/*.toc
-julia/UlmLam/Manifest.toml
+julia/UlmLAM/Manifest.toml

@@ -5,9 +5,9 @@
 # ulm.lam runs on ulmBLAS (whose gemm is single threaded so far) and on
 # OpenBLAS with as many threads as Julia's BLAS.
 #
-#     julia --project=julia/UlmLam julia/examples/attention.jl
+#     julia --project=julia/UlmLAM julia/examples/attention.jl
 
-using UlmLam, LinearAlgebra, Random
+using UlmLAM, LinearAlgebra, Random
 # the OpenBLAS of backend=:cblas with as many threads as Julia's BLAS
 ENV["OPENBLAS_NUM_THREADS"] = string(BLAS.get_num_threads())
 
@@ -19,8 +19,8 @@ phi(x) = x > 0 ? x + 1 : exp(x)
 besttime(f, reps) = minimum(@elapsed(f()) for _ in 1:reps)
 
 function main()
-    lib = UlmLam.compile(attention; name="attention_jl", backend=:ulmblas)
-    lib_ob = UlmLam.compile(attention; name="attention_jl_cblas", backend=:cblas)
+    lib = UlmLAM.compile(attention; name="attention_jl", backend=:ulmblas)
+    lib_ob = UlmLAM.compile(attention; name="attention_jl_cblas", backend=:cblas)
     Random.seed!(4)
     d = 64
     println("linear attention, d = $d, Julia $(VERSION), $(BLAS.get_num_threads()) BLAS threads; seconds, (x): relative to ulm.lam/OpenBLAS")

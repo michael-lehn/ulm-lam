@@ -1,11 +1,11 @@
 # runtime.jl: compile ulm.lam functions and call them from Julia.
 #
-#     lib = UlmLam.compile([gls])        # ulm_lam IR -> C++ -> shared library
+#     lib = UlmLAM.compile([gls])        # ulm_lam IR -> Julia (or C++)
 #     b = lib.gls(X, M, y)               # Julia arrays in and out
 #
-# compile runs the ulm.lam pipeline (scripts/ulm-lam-compile.sh), builds a
-# shared library and returns its functions.  An unchanged program reuses
-# its library (named after a hash of program, compiler and flags).
+# compile runs the ulm.lam compiler (the executable ulm-lam) and loads the
+# result.  An unchanged program reuses its result (named after a hash of
+# program, compiler and flags), kept in a scratch space of the package.
 #
 # Calling convention (from the interface comment the compiler generates):
 #   * matrices: Matrix{Float64} (column-major; passed as the row-major
@@ -15,14 +15,76 @@
 #   * results: allocated here and returned;
 #   * the workspace: queried and allocated here, 64-byte aligned, reused.
 #
-# Backends: :julia (default) calls Julia's BLAS and LAPACK through
-# libblastrampoline (OpenBLAS, or ulmBLAS after UlmBLAS.forward()), :ulmblas
-# the header-only ulmBLAS (ULMBLAS_DIR), :cblas a CBLAS/LAPACK library
-# (ULM_LAM_BLAS_LIBS, default Homebrew's OpenBLAS).
-# Environment: LLVM_PREFIX, ULMBLAS_DIR (default ~/git/ulmBLAS), ARCHFLAGS
-# (default -mcpu=native on macOS, -march=native elsewhere), CXX (default c++), OPENMP (0: without).
+# Backends:
+#   :julia (default)  Julia code calling Julia's BLAS and LAPACK through
+#                     libblastrampoline (OpenBLAS, MKL, or ulmBLAS after
+#                     UlmBLAS.forward()); no C++ compiler needed
+#   :ulmblas          C++ on the header-only ulmBLAS (ULMBLAS_DIR)
+#   :cblas            C++ on a CBLAS/LAPACK library (ULM_LAM_BLAS_LIBS,
+#                     default OpenBLAS)
+#   :lbt              C++ on Julia's libblastrampoline (as :julia, compiled)
+# Environment: ULM_LAM (the compiler executable), ULMBLAS_DIR, ARCHFLAGS
+# (default -mcpu=native on macOS, -march=native elsewhere), CXX (default
+# c++), OPENMP (0: without), ULM_LAM_SELECT_OPTIONS, ULM_LAM_REBUILD.
 
+# the repository, if the package is used from a checkout of it
 const ROOT = normpath(joinpath(@__DIR__, "..", "..", ".."))
+in_checkout() = isfile(joinpath(ROOT, "scripts", "build-driver.sh"))
+
+const TOOL = Ref{String}("")
+
+"""The compiler executable: ULM_LAM, else (in a checkout of the repository)
+build/bin/ulm-lam, built if out of date, else the one of ulm_lam_jll."""
+function tool()
+    isempty(TOOL[]) || return TOOL[]
+    p = get(ENV, "ULM_LAM", "")
+    if isempty(p) && in_checkout()
+        out, err = IOBuffer(), IOBuffer()
+        ok = success(pipeline(`$(joinpath(ROOT, "scripts", "build-driver.sh"))`;
+                              stdout=out, stderr=err))
+        ok || throw(LamError("building the compiler (scripts/build-driver.sh) failed:\n" *
+                             String(take!(err))))
+        p = String(strip(String(take!(out))))
+    end
+    if isempty(p)
+        p = jll_tool()
+    end
+    isfile(p) || throw(LamError("the ulm.lam compiler was not found (set ULM_LAM to the " *
+                                "path of the executable ulm-lam)"))
+    TOOL[] = p
+end
+
+# ulm_lam_jll, once registered: its executable product
+jll_tool() = ""
+
+"""clang-format for the generated C++ (\$LLVM_PREFIX, Homebrew's keg-only LLVM,
+then PATH), or "" if there is none: the C++ is then left unformatted."""
+function clang_format()
+    for d in (get(ENV, "LLVM_PREFIX", ""), "/opt/homebrew/opt/llvm", "/usr/local/opt/llvm")
+        p = joinpath(d, "bin", "clang-format")
+        !isempty(d) && isfile(p) && return p
+    end
+    something(Sys.which("clang-format"), "")
+end
+
+"""The headers of the C++ backends (cblas_backend.h): next to the compiler
+(include/ of the binary package) or in the repository."""
+function include_dir()
+    d = joinpath(dirname(dirname(tool())), "include")
+    isfile(joinpath(d, "ulm_lam", "cblas_backend.h")) && return d
+    joinpath(ROOT, "include")
+end
+
+const CACHE = Ref{String}("")
+
+"""Where compiled programs are kept: ULM_LAM_CACHE, else a scratch space of
+the package (a package's own directory is read-only)."""
+function cache_dir()
+    isempty(CACHE[]) || return CACHE[]
+    d = get(ENV, "ULM_LAM_CACHE", "")
+    isempty(d) && (d = Scratch.@get_scratch!("programs"))
+    CACHE[] = d
+end
 
 # ---------------------------------------------------------------------------
 # Compilation
@@ -50,9 +112,9 @@ lbt_path() = Libdl.dlpath(LinearAlgebra.BLAS.libblastrampoline)
 
 function cxx_flags(backend::Symbol)
     arch = split(get(ENV, "ARCHFLAGS", Sys.isapple() ? "-mcpu=native" : "-march=native"))
-    if backend == :julia
+    if backend == :lbt
         lbt = lbt_path()
-        return ["-std=c++17", "-O3", arch..., "-I", joinpath(ROOT, "include"),
+        return ["-std=c++17", "-O3", arch..., "-I", include_dir(),
                 "-DULM_LAM_CBLAS_ILP64", lbt, "-Wl,-rpath," * dirname(lbt)]
     end
     if backend == :cblas
@@ -61,7 +123,7 @@ function cxx_flags(backend::Symbol)
                ["-L/opt/homebrew/opt/openblas/lib",
                 "-Wl,-rpath,/opt/homebrew/opt/openblas/lib", "-lopenblas"] :
                ["-lopenblas"]
-        return ["-std=c++17", "-O3", arch..., "-I", joinpath(ROOT, "include"), libs...]
+        return ["-std=c++17", "-O3", arch..., "-I", include_dir(), libs...]
     end
     ulm = get(ENV, "ULMBLAS_DIR", joinpath(homedir(), "git", "ulmBLAS"))
     isfile(joinpath(ulm, "ulmblas", "ulmblas.h")) ||
@@ -69,15 +131,14 @@ function cxx_flags(backend::Symbol)
     ["-std=c++17", "-O3", arch..., "-isystem", ulm, openmp_flags()...]
 end
 
-"""Modification time of the newest part of the compiler and of the
-headers the C++ depends on."""
+"""Modification time of the newest part of the compiler (the executable,
+this package's sources) and of the headers the C++ depends on."""
 function newest(backend::Symbol)
-    files = String[]
-    for d in (joinpath(ROOT, "lib"), joinpath(ROOT, "scripts"),
-              joinpath(ROOT, "include", "ulm_lam"), @__DIR__)
-        append!(files, joinpath.(d, readdir(d)))
-    end
-    if backend == :ulmblas
+    files = [tool()]
+    append!(files, joinpath.(@__DIR__, readdir(@__DIR__)))
+    if backend in (:cblas, :lbt)
+        push!(files, joinpath(include_dir(), "ulm_lam", "cblas_backend.h"))
+    elseif backend == :ulmblas
         ulm = joinpath(get(ENV, "ULMBLAS_DIR", joinpath(homedir(), "git", "ulmBLAS")), "ulmblas")
         for (r, _, fs) in walkdir(ulm), f in fs
             push!(files, joinpath(r, f))
@@ -215,6 +276,7 @@ mutable struct Library
     workspace::Workspace
     pending::Vector{Any}
     eltype::DataType  # Float64 or Float32: the element type of all arrays
+    julia::Bool       # the program is Julia code (backend :julia), not C++
 end
 
 function Base.getproperty(lib::Library, s::Symbol)
@@ -225,12 +287,20 @@ function Base.getproperty(lib::Library, s::Symbol)
 end
 Base.propertynames(lib::Library) = (fieldnames(Library)..., keys(lib.functions)...)
 
-"""The generated C++ of a compiled function (interface comment and
-definition)."""
+"""The generated code of a compiled function (interface comment and
+definition): C++, or Julia with backend :julia."""
 function cpp(f::CompiledFunction)
     src = f.lib.source
     start = findfirst("/* $(f.name): matrices by reference", src)
-    m = match(Regex("extern \"C\" \\w+\\n$(f.name)\\("), src)
+    if f.lib.julia
+        start === nothing && return ""
+        s = something(findprev("#=", src, first(start)), start)
+        i = findfirst("function lam_$(f.name)(", src)
+        i === nothing && return ""
+        j = findnext(r"^end$"m, src, last(i))
+        return src[first(s):last(j)] * "\n"
+    end
+    m = match(Regex("extern \"C\" \\w+\\s+$(f.name)\\("), src)
     (start === nothing || m === nothing) && return ""
     i = findnext('{', src, findnext(')', src, m.offset))
     depth = 0
@@ -245,62 +315,89 @@ function cpp(f::CompiledFunction)
 end
 
 """
-    compile(functions; name, backend=:ulmblas) -> Library
+    compile(functions; name, backend=:julia, eltype=Float64) -> Library
 
-Compile ulm.lam functions into a shared library.  backend=:cblas runs the
-same kernel calls on CBLAS/LAPACK (OpenBLAS by default).
+Compile ulm.lam functions.  backend=:julia (the default) generates Julia
+code calling Julia's BLAS and LAPACK; :ulmblas, :cblas and :lbt generate C++
+(a C++ compiler is needed) on ulmBLAS, a CBLAS/LAPACK library, or Julia's
+libblastrampoline.
 """
 function compile(functions::Vector{LamFunction}; name::AbstractString=cname(functions[1]),
                  backend::Symbol=Symbol(get(ENV, "ULM_LAM_BACKEND", "julia")),
                  eltype::Type=Float64)
-    backend in (:julia, :ulmblas, :cblas) ||
-        throw(LamError("backend must be :julia, :ulmblas or :cblas"))
+    backend in (:julia, :ulmblas, :cblas, :lbt) ||
+        throw(LamError("backend must be :julia, :ulmblas, :cblas or :lbt"))
     eltype in (Float64, Float32) || throw(LamError("eltype must be Float64 or Float32"))
-    work = joinpath(ROOT, "build", "julia", name)
+    julia = backend == :julia
+    work = joinpath(cache_dir(), name)
     mkpath(work)
     text, externs, allfunctions = lam_module(functions)
     # Float32: the same program on f32 (all kernels are generic in it)
     eltype == Float32 && (text = replace(text, "f64" => "f32"))  # (f64 occurs only as a type)
-    flags = cxx_flags(backend)
-    key = bytes2hex(sha256(text * "\n" * string(newest(backend)) * "\n" *
-                           get(ENV, "CXX", "c++") * " " * string(backend) * " " * join(flags, " ")))
-    lib = joinpath(work, "lib$name.$(key[1:12]).$(Libdl.dlext)")
+    flags = julia ? String[] : cxx_flags(backend)
+    selopts = get(ENV, "ULM_LAM_SELECT_OPTIONS", "")
+    key = bytes2hex(sha256(text * "\n" * string(newest(backend)) * "\n" * selopts * " " *
+                           (julia ? "" : get(ENV, "CXX", "c++")) * " " * string(backend) *
+                           " " * join(flags, " ")))
+    lib = joinpath(work, "lib$name.$(key[1:12]).$(julia ? "jl" : Libdl.dlext)")
     mlirfile = joinpath(work, "$name.mlir")
-    write(mlirfile, text)
-    cppfile = joinpath(work, "$name.cpp")
+    srcfile = joinpath(work, "$name.$(julia ? "jl" : "cpp")")
     # the kernels after selection, for @code_lam (kept per program)
     selected = joinpath(work, "$name.$(key[1:12]).selected.mlir")
     cached = !haskey(ENV, "ULM_LAM_REBUILD") && isfile(lib) && isfile(selected)
     if !cached
-        script = joinpath(ROOT, "scripts", "ulm-lam-compile.sh")
-        irbackend = backend == :ulmblas ? "ulmblas" : "cblas"  # :julia is CBLAS too
-        run_or_fail(addenv(`$script $mlirfile $(joinpath(work, name))`, "BACKEND" => irbackend),
-                    "ulm-lam-compile")
-        cp(joinpath(work, "$name.selected.mlir"), selected; force=true)
+        write(mlirfile, text)
+        irbackend = backend == :ulmblas ? "ulmblas" : "cblas"  # the others are CBLAS too
+        opts = isempty(selopts) ? String[] : ["--select-options=$selopts"]
+        haskey(ENV, "LICM") && push!(opts, "--no-licm")
+        run_or_fail(`$(tool()) --backend=$irbackend --emit=$(julia ? "julia" : "cpp") $opts
+                     --selected=$selected $mlirfile -o $srcfile`, "ulm.lam")
+        if !julia
+            cf = clang_format()
+            # the project's style in a checkout, else the one found from the cache
+            style = in_checkout() ? ["--style=file:" * joinpath(ROOT, ".clang-format")] : String[]
+            isempty(cf) || run_or_fail(`$cf -i $style $srcfile`, "clang-format")
+        end
     end
-    src = read(cppfile, String)
+    if julia
+        cached || cp(srcfile, lib; force=true)
+        src = read(lib, String)
+    else
+        src = read(srcfile, String)
+    end
     ifaces = interfaces(src)
     decls = Dict(k => v for (k, v) in declarations(src) if !haskey(ifaces, k))
-    sources = [cppfile]
-    if !isempty(decls)
-        tramp = joinpath(work, "$(name)_externs.cpp")
-        write(tramp, trampolines(decls))
-        push!(sources, tramp)
+    handle = C_NULL
+    mod = nothing
+    callbacks = Dict{Symbol,Any}()
+    if julia
+        mod = load_julia(src, decls, callbacks)
+    else
+        sources = [srcfile]
+        if !isempty(decls)
+            tramp = joinpath(work, "$(name)_externs.cpp")
+            write(tramp, trampolines(decls))
+            push!(sources, tramp)
+        end
+        if !cached
+            partial = lib * ".partial"
+            cxx = get(ENV, "CXX", "c++")
+            run_or_fail(`$cxx -shared -fPIC $sources $flags -o $partial`, "C++ compilation")
+            mv(partial, lib; force=true)
+        end
+        handle = Libdl.dlopen(lib)
     end
     if !cached
-        partial = lib * ".partial"
-        cxx = get(ENV, "CXX", "c++")
-        run_or_fail(`$cxx -shared -fPIC $sources $flags -o $partial`, "C++ compilation")
-        mv(partial, lib; force=true)
         for f in readdir(work)
-            if startswith(f, "lib$name.") && joinpath(work, f) != lib
-                rm(joinpath(work, f); force=true)
+            p = joinpath(work, f)
+            if (startswith(f, "lib$name.") && p != lib) ||
+               (endswith(f, ".selected.mlir") && startswith(f, "$name.") && p != selected)
+                rm(p; force=true)
             end
         end
     end
-    handle = Libdl.dlopen(lib)
     L = Library(lib, src, handle, Dict{Symbol,CompiledFunction}(), externs, decls,
-                Dict{Symbol,Any}(), Workspace(), Any[], eltype)
+                callbacks, Workspace(), Any[], eltype, julia)
     codes = info_codes(src)
     # (the functions they call too: callable from Julia as well)
     byname = Dict{String,LamFunction}()
@@ -316,10 +413,14 @@ function compile(functions::Vector{LamFunction}; name::AbstractString=cname(func
     end
     for (fname, rows) in ifaces
         haskey(byname, fname) || continue
-        fptr = Libdl.dlsym(handle, fname)
-        types = [ctype(t) for (t, _) in rows]
-        argnames = [Symbol("a$k") for k in 1:length(types)]
-        caller = eval(:(($(argnames...),) -> ccall($fptr, Int64, ($(types...),), $(argnames...))))
+        caller = if julia
+            Base.invokelatest(getfield, mod, Symbol("lam_", fname))
+        else
+            fptr = Libdl.dlsym(handle, fname)
+            types = [ctype(t) for (t, _) in rows]
+            argnames = [Symbol("a$k") for k in 1:length(types)]
+            eval(:(($(argnames...),) -> ccall($fptr, Int64, ($(types...),), $(argnames...))))
+        end
         L.functions[byname[fname].name] = CompiledFunction(L, fname, rows, byname[fname], caller,
                                                        get(codes, fname, Dict{Int,String}()),
                                                        !isempty(rows) && rows[end][2] == "info",
@@ -327,6 +428,30 @@ function compile(functions::Vector{LamFunction}; name::AbstractString=cname(func
     end
     L
 end
+
+"""The generated Julia code, evaluated in a module of its own: K is the
+module of kernels, and each external function forwards to the callback
+bound with bind! (with the arguments as the C trampolines pass them)."""
+function load_julia(src::String, decls, callbacks)
+    mod = Module(:UlmLAMProgram)
+    Core.eval(mod, :(const K = $Kernels))
+    Core.eval(mod, :(const CALLBACKS = $callbacks))
+    for (name, _) in decls
+        f = Symbol("lam_", name)   # the emitter calls every function as lam_<name>
+        key = QuoteNode(Symbol(name))
+        Core.eval(mod, quote
+            function $f(args...)
+                cb = get(CALLBACKS, $key, nothing)
+                cb === nothing && error("ulm.lam: external function " * $name * " is not bound (bind!)")
+                cb(map(a -> a isa Ptr ? Ptr{Cvoid}(a) : a, args)...)
+                nothing
+            end
+        end)
+    end
+    Base.include_string(mod, src)
+    mod
+end
+
 compile(f::LamFunction; kw...) = compile([f]; kw...)
 
 # -- arguments ---------------------------------------------------------------
@@ -534,6 +659,10 @@ function bind!(lib::Library; impls...)
                 push!(task_pending(L), e)
             end
             nothing
+        end
+        if lib.julia  # the generated code calls the Julia function directly
+            lib.callbacks[name] = tramp
+            continue
         end
         types = Tuple(ctype(t) for t in params)
         # a closure: @cfunction($tramp, ...), the $ kept in the expression

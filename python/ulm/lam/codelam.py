@@ -10,7 +10,7 @@
 It reads the kernels after selection (ulm_lamk on tensors, before
 bufferization) and writes each as an assignment in place: B ← L⁻¹ B
 overwrites B, as the BLAS call does.  (The Julia frontend's @code_lam,
-julia/UlmLam/src/codelam.jl, does the same; Julia's column-major arrays
+julia/UlmLAM/src/codelam.jl, does the same; Julia's column-major arrays
 add the orientation of every value, which Python's row-major ones do not
 need.)
 """

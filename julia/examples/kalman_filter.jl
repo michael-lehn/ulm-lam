@@ -2,9 +2,9 @@
 # periodic grid (python/examples/kalman_filter.py in Python).  Compared with
 # Julia as written (inv(S), P - K * H * P) and by hand (H P once, Cholesky).
 #
-#     julia --project=julia/UlmLam julia/examples/kalman_filter.jl
+#     julia --project=julia/UlmLAM julia/examples/kalman_filter.jl
 
-using UlmLam, LinearAlgebra, Random
+using UlmLAM, LinearAlgebra, Random
 
 const measure = extern(:measure, [Index], Vec(:m))
 const estimate = extern(:estimate, [Index, Vec(:n)])
@@ -78,7 +78,7 @@ end
 besttime(f, reps) = minimum(@elapsed(f()) for _ in 1:reps)
 
 function main()
-    lib = UlmLam.compile(kalman; name="kalman_filter_jl", backend=:ulmblas)
+    lib = UlmLAM.compile(kalman; name="kalman_filter_jl", backend=:ulmblas)
     Random.seed!(5)
     println("Kalman filter, Julia $(VERSION); seconds, (x): relative to ulm.lam")
     println("     n     m  steps   ulm.lam   Julia as written   Julia by hand   difference")
