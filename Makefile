@@ -1,8 +1,8 @@
 # ULMBLAS_DIR (default ~/git/ulmBLAS) and ARCHFLAGS (default -mcpu=native)
 # select ulmBLAS and its micro kernels, see scripts/ulmblas-env.sh.
-.PHONY: all ods plugin tool check egraph egraph-ir egraph-fuzz calls stages loop gls kalman compose cases dynamic gp showcases torch kfac python julia doc clean
+.PHONY: all ods plugin tool driver mojo check egraph egraph-ir egraph-fuzz calls stages loop gls kalman compose cases dynamic gp showcases torch kfac python julia doc clean
 
-all: ods plugin check stages loop gls kalman compose calls cases dynamic python julia doc
+all: ods plugin check stages loop gls kalman compose calls cases dynamic python julia mojo doc
 
 ods:            ## run all mlir-tblgen backends on the dialect sketch
 	scripts/check-ods.sh
@@ -13,7 +13,10 @@ plugin:         ## build the mlir-opt plugin: dialects + passes (lib/*.cpp)
 tool:           ## build ulm-lam-opt (tools/ulm-lam-opt.cpp): mlir-opt with ulm.lam's dialects and passes
 	scripts/build-tool.sh
 
-check: tool     ## the pass tests in test/ (lit, FileCheck; lit from PyPI into build/venv-lit)
+driver:         ## build ulm-lam (tools/ulm-lam.cpp): the compiler in one executable
+	scripts/build-driver.sh
+
+check: tool driver ## the pass tests in test/ (lit, FileCheck; lit from PyPI into build/venv-lit)
 	@test -x build/venv-lit/bin/lit || (python3 -m venv build/venv-lit && build/venv-lit/bin/pip install -q lit)
 	build/venv-lit/bin/lit -sv test
 
@@ -82,6 +85,9 @@ python:         ## the Python frontend: unit tests and the Kalman examples
 	python3 -m unittest discover -s python/tests
 	python3 python/examples/kalman.py
 	python3 python/examples/adaptive_kalman.py
+
+mojo:           ## the Mojo backend (mojo/, Mojo via pixi): kernels, GLS, Python tests, the sensor example
+	mojo/check.sh
 
 julia:          ## the Julia frontend (julia/UlmLAM): tests and the showcases in Julia
 	julia --project=julia/UlmLAM julia/UlmLAM/test/runtests.jl

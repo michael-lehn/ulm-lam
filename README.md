@@ -24,7 +24,8 @@ LAPACK Julia uses (OpenBLAS, or whatever libblastrampoline forwards to,
 e.g. [UlmBLAS.jl](https://github.com/michael-lehn/UlmBLAS.jl), `Pkg.add("UlmBLAS")`), the
 header-only C++ library [ulmBLAS](https://github.com/michael-lehn/ulmBLAS),
 or any CBLAS (C interface to the BLAS) and LAPACK, such as MKL (Intel Math
-Kernel Library) or Apple's Accelerate.
+Kernel Library) or Apple's Accelerate.  ulm.lam also generates
+[Mojo](mojo/README.md) (on Apple Accelerate for now).
 
 An early research prototype: dense real matrices, in double or single
 precision (from Julia a function called with `Float32` arrays is compiled
@@ -34,6 +35,7 @@ for `Float32`; from Python `lam.compile(f, dtype="float32")`).
 
 - [Julia](#julia)
 - [Python](#python)
+- [Mojo](#mojo)
 - [What you can write](#what-you-can-write)
 - [Measurements](#measurements)
 - [How it works](#how-it-works)
@@ -133,6 +135,18 @@ b = lib.gls(X, M, y)       # NumPy arrays (or any float64 buffer), no copies
 print(lib.gls.code)        # the derivation, as @code_lam shows it in Julia
 print(lib.gls.cpp)         # the generated C++
 ```
+
+## Mojo
+
+`lam.emit_mojo(f, "f.mojo")` writes the Mojo module of a Python-frontend
+function: the same derivation, the calls on Apple Accelerate through
+`mojo/ulm_lam/kernels.mojo`, external functions as a trait the Mojo
+program implements.  The example of my numerical linear algebra lectures,
+`x = inv(A) * b` for sensor data b in every step, becomes the LU
+(lower-upper) factorization once and a solve in place per step, 25 times
+faster than the formula as written (n = 1000, 200 steps).  Details and the
+example: [mojo/README.md](mojo/README.md); `make mojo` runs its tests
+(Mojo via [pixi](https://pixi.sh)).
 
 ## What you can write
 
@@ -348,7 +362,8 @@ showcases torch` runs the Python showcases.
 | `include/ulm_lam/*.td` | ODS of the `ulm_lam` and `ulm_lamk` dialects, interfaces, passes, the kernel catalogue |
 | `lib/` | the mlir-opt plugin: both dialects, normalisation, property inference, kernel selection, workspace, info, lowering to EmitC |
 | `tools/ulm-lam-opt.cpp` | `ulm-lam-opt`: mlir-opt with the ulm.lam dialects and passes (`build/bin/`) |
-| `tools/ulm-lam.cpp` | `ulm-lam`: the whole pipeline in one executable, to C++ or Julia (`scripts/build-driver.sh`, or `CMakeLists.txt`) |
+| `tools/ulm-lam.cpp` | `ulm-lam`: the whole pipeline in one executable, to C++, Julia or Mojo (`scripts/build-driver.sh`, or `CMakeLists.txt`) |
+| `mojo/` | the Mojo backend: kernels on Accelerate, tests, the sensor example ([mojo/README.md](mojo/README.md)) |
 | `test/` | lit/FileCheck tests of the passes: normalisation, property inference, kernel selection, lowering |
 | `scripts/ulm-lam-compile.sh` | the pipeline from `ulm_lam` to C++ (keeps every stage) |
 | `include/ulm_lam/cblas_backend.h` | the CBLAS/LAPACK backend of the generated code |
@@ -374,7 +389,8 @@ open":
 - **Usability and reach.** Registering UlmLAM.jl and ulm_lam_jll (the
   code is ready: no LLVM/MLIR and no C++ compiler needed by users);
   differentiation at the matrix level; a connection to
-  Reactant.jl/Enzyme-JAX; a `torch.compile` backend; a GPU backend.
+  Reactant.jl/Enzyme-JAX; a `torch.compile` backend; a GPU backend; the
+  Mojo backend on native Mojo kernels instead of Accelerate.
 
 ## Background
 

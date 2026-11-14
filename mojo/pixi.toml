@@ -1,0 +1,16 @@
+# Mojo for the Mojo backend of ulm.lam (ulm-lam --emit=mojo): the kernels
+# in ulm_lam/ and the programs generated for them call Apple Accelerate.
+[workspace]
+channels = ['https://conda.modular.com/max', 'conda-forge']
+name = "ulm-lam-mojo"
+platforms = ['osx-arm64']
+version = "0.1.0"
+
+[dependencies]
+mojo = ">=1.2.0,<2"
+
+[tasks]
+# the example of the lectures: generate (python3, ulm.lam's frontend),
+# build, run
+sensor = { cmd = "python3 examples/sensor/gen.py && mkdir -p build && mojo build -O3 -I . -I examples/sensor -Xlinker -framework -Xlinker Accelerate examples/sensor/main.mojo -o build/sensor && build/sensor" }
+test-kernels = { cmd = "mkdir -p build && mojo build -I . -Xlinker -framework -Xlinker Accelerate tests/test_kernels.mojo -o build/test_kernels && build/test_kernels" }

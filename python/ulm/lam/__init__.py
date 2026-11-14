@@ -17,11 +17,12 @@ See lam.frontend (the language) and lam.runtime (compiling, calling).
 from .frontend import (Float, In, Index, InOut, LamError, Matrix, Vector,
                        assume, extern, eye, function, inv, loop, lstsq, module,
                        update)
-from .runtime import InfoError, Library, Workspace, compile
+from .runtime import InfoError, Library, Workspace, compile, emit_mojo
 
 __all__ = [
     "Float", "In", "Index", "InfoError", "InOut", "LamError", "Library",
-    "Matrix", "Vector", "Workspace", "assume", "compile", "extern", "eye",
+    "Matrix", "Vector", "Workspace", "assume", "compile", "emit_mojo",
+    "extern", "eye",
     "function", "inv", "lstsq",
     "loop", "module", "update",
 ]

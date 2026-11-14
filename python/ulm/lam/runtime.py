@@ -30,8 +30,13 @@ exception in a callback is re-raised when the ulm.lam function returns.
 
 Environment: LLVM_PREFIX (Homebrew llvm), ULMBLAS_DIR (default
 ~/git/ulmBLAS), ARCHFLAGS (default -mcpu=native), CXX (default c++),
-ULM_LAM_BACKEND (ulmblas, or cblas: the same kernel calls on CBLAS and
-LAPACK) and ULM_LAM_BLAS_LIBS (its link flags, default OpenBLAS).
+ULM_LAM_BACKEND (ulmblas, cblas: the same kernel calls on CBLAS and
+LAPACK, or mojo: generated Mojo on Apple Accelerate), ULM_LAM_BLAS_LIBS
+(the link flags of cblas, default OpenBLAS) and ULM_LAM_MOJO (the mojo
+compiler, default the pixi environment in mojo/).
+
+lam.emit_mojo writes the Mojo module of a program, for Mojo programs (the
+caller implements the external functions as a trait, see mojo/README.md).
 """
 
 from __future__ import annotations
@@ -70,12 +75,85 @@ def _run(cmd: list[str], what: str, env=None) -> None:
 
 def _backend(b: str | None = None) -> str:
     """The backend argument of compile, else ULM_LAM_BACKEND: ulmblas
-    (default) or cblas (the same kernel calls on CBLAS and LAPACK,
-    include/ulm_lam/cblas_backend.h)."""
+    (default), cblas (the same kernel calls on CBLAS and LAPACK,
+    include/ulm_lam/cblas_backend.h) or mojo (generated Mojo calling
+    mojo/ulm_lam/kernels.mojo on Apple Accelerate)."""
     b = b or os.environ.get("ULM_LAM_BACKEND", "ulmblas")
-    if b not in ("ulmblas", "cblas"):
-        raise fe.LamError(f"ULM_LAM_BACKEND must be ulmblas or cblas, not {b}")
+    if b not in ("ulmblas", "cblas", "mojo"):
+        raise fe.LamError("ULM_LAM_BACKEND must be ulmblas, cblas or mojo, "
+                          f"not {b}")
     return b
+
+
+def _driver() -> str:
+    """The compiler in one executable (tools/ulm-lam.cpp): ULM_LAM, else
+    build/bin/ulm-lam (built or rebuilt by scripts/build-driver.sh)."""
+    if os.environ.get("ULM_LAM"):
+        return os.environ["ULM_LAM"]
+    p = subprocess.run([str(ROOT / "scripts" / "build-driver.sh")],
+                       capture_output=True, text=True)
+    if p.returncode != 0:
+        raise fe.LamError(f"building ulm-lam failed:\n{p.stdout}{p.stderr}")
+    return p.stdout.strip().splitlines()[-1]
+
+
+def _mojo() -> tuple[str, dict]:
+    """The mojo compiler and its environment: ULM_LAM_MOJO, else the pixi
+    environment in mojo/ (pixi install there; MODULAR_HOME as pixi's
+    activation sets it), else mojo on the PATH."""
+    if os.environ.get("ULM_LAM_MOJO"):
+        return os.environ["ULM_LAM_MOJO"], dict(os.environ)
+    env = ROOT / "mojo" / ".pixi" / "envs" / "default"
+    if (env / "bin" / "mojo").exists():
+        return str(env / "bin" / "mojo"), {
+            **os.environ, "CONDA_PREFIX": str(env),
+            "MODULAR_HOME": str(env / "share" / "max")}
+    found = shutil.which("mojo")
+    if not found:
+        raise fe.LamError("mojo not found: run pixi install in mojo/ or set "
+                          "ULM_LAM_MOJO")
+    return found, dict(os.environ)
+
+
+def _module_text(functions, dtype: str):
+    if isinstance(functions, fe.Function):
+        functions = [functions]
+    text, all_functions = fe.module_and_functions(list(functions))
+    if dtype == "float32":  # (f64 occurs in the IR only as a type)
+        text = text.replace("f64", "f32")
+    return text, all_functions
+
+
+def emit_mojo(functions, path, dtype: str = "float64",
+              c_abi: bool = False) -> str:
+    """Write the Mojo module of ulm.lam functions (and what they call) to
+    path and return its text.  The module imports ulm_lam.kernels
+    (mojo/ulm_lam: build with -I <ulm-lam>/mojo and Accelerate); its
+    functions take the caller's implementation of the trait Externs first
+    if the program has external functions.  c_abi: also export every
+    function with the C calling convention (the shared library of
+    compile(backend="mojo"))."""
+    if dtype not in _ELT:
+        raise fe.LamError('dtype must be "float64" or "float32"')
+    text, _ = _module_text(functions, dtype)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    mlir = path.with_suffix(".mlir")
+    mlir.write_text(text)
+    _run([_driver(), "--backend=cblas", "--emit=mojo",
+          *(["--mojo-c-abi"] if c_abi else []), str(mlir), "-o", str(path)],
+         "ulm-lam --emit=mojo")
+    _mojo_format(path)
+    return path.read_text()
+
+
+def _mojo_format(path: Path) -> None:
+    """Format generated Mojo with mojo format (if a mojo is found)."""
+    try:
+        mojo, env = _mojo()
+    except fe.LamError:
+        return
+    _run([mojo, "format", "-q", str(path)], "mojo format", env=env)
 
 
 def _blas_libs() -> list[str]:
@@ -204,6 +282,8 @@ def _newest_tool() -> float:
     library older than that is rebuilt)."""
     parts = [*ROOT.joinpath("lib").glob("*"), *ROOT.joinpath("scripts").glob("*"),
              *ROOT.joinpath("include", "ulm_lam").glob("*"),
+             *ROOT.joinpath("tools").glob("*.cpp"),
+             *ROOT.joinpath("mojo", "ulm_lam").glob("*.mojo"),
              *Path(__file__).parent.glob("*.py")]
     return max(p.stat().st_mtime for p in parts)
 
@@ -212,6 +292,8 @@ def _toolchain(backend: str) -> str:
     """What the C++ compilation depends on besides the generated code: the
     compiler, the ulmBLAS flags (directory, micro kernels) and the newest
     ulmBLAS header (a branch switch or an edit changes it)."""
+    if backend == "mojo":
+        return " ".join([_mojo()[0], os.environ.get("CXX", "c++"), backend])
     flags = _cxx_flags(backend)
     if backend == "cblas":
         hdr = ROOT / "include" / "ulm_lam" / "cblas_backend.h"
@@ -229,7 +311,7 @@ def compile(functions, name: str | None = None, workdir=None,
             backend: str | None = None,
             dtype: str = "float64") -> "Library":
     """Compile ulm.lam functions (and what they call) into a library.
-    backend: "ulmblas" (default, or ULM_LAM_BACKEND) or "cblas".
+    backend: "ulmblas" (default, or ULM_LAM_BACKEND), "cblas" or "mojo".
     dtype: "float64" (default) or "float32", the element type of all
     matrices (the same kernels on float)."""
     backend = _backend(backend)
@@ -242,9 +324,7 @@ def compile(functions, name: str | None = None, workdir=None,
     work = Path(workdir) if workdir else ROOT / "build" / "python" / name
     work.mkdir(parents=True, exist_ok=True)
     mlir = work / f"{name}.mlir"
-    text, all_functions = fe.module_and_functions(functions)
-    if dtype == "float32":  # (f64 occurs in the IR only as a type)
-        text = text.replace("f64", "f32")
+    text, all_functions = _module_text(functions, dtype)
     ext = ".dylib" if sys.platform == "darwin" else ".so"
     # The library is named after its program and the compiler version
     # (the newest part of the compiler), so that
@@ -266,7 +346,22 @@ def compile(functions, name: str | None = None, workdir=None,
     cached = (not os.environ.get("ULM_LAM_REBUILD") and lib.exists()
               and selected.exists())
     mlir.write_text(text)
-    if not cached:
+    if not cached and backend == "mojo":
+        # the C++ of the cblas backend for the interfaces (the same
+        # program), the Mojo with C entry points for the library
+        drv = _driver()
+        _run([drv, "--backend=cblas", "--emit=cpp",
+              f"--selected={work / f'{name}.selected.mlir'}", str(mlir), "-o",
+              str(work / f"{name}.cpp")], "ulm-lam")
+        fmt = shutil.which("clang-format")
+        if fmt:
+            _run([fmt, "-i", str(work / f"{name}.cpp")], "clang-format")
+        _run([drv, "--backend=cblas", "--emit=mojo", "--mojo-c-abi",
+              str(mlir), "-o", str(work / f"{name}.mojo")],
+             "ulm-lam --emit=mojo")
+        _mojo_format(work / f"{name}.mojo")
+        shutil.copyfile(work / f"{name}.selected.mlir", selected)
+    elif not cached:
         _run([str(ROOT / "scripts" / "ulm-lam-compile.sh"), str(mlir),
               str(work / name)], "ulm-lam-compile",
              env={**os.environ, "BACKEND": backend})
@@ -280,7 +375,9 @@ def compile(functions, name: str | None = None, workdir=None,
         tramp = work / f"{name}_externs.cpp"
         tramp.write_text(_trampolines(decls))
         sources.append(str(tramp))
-    if not cached:
+    if not cached and backend == "mojo":
+        _build_mojo(work, name, key, lib, tramp if decls else None)
+    elif not cached:
         cxx = os.environ.get("CXX", "c++")
         partial = lib.with_name(lib.name + ".partial")
         _run([cxx, "-shared", "-fPIC", *sources, *_cxx_flags(backend), "-o",
@@ -295,9 +392,38 @@ def compile(functions, name: str | None = None, workdir=None,
     library = Library(lib, ifaces, decls, prog_fns, _externs_of(functions),
                       work / f"{name}.cpp", _ELT[dtype])
     library.selected = selected
+    if backend == "mojo":
+        library.mojo = (work / f"{name}.mojo").read_text()
     if externs:
         library.bind(**externs)
     return library
+
+
+def _build_mojo(work: Path, name: str, key: str, lib: Path,
+                tramp: Path | None) -> None:
+    """The shared library of the generated Mojo (C entry points).  The C
+    trampolines of external functions are a library of their own that the
+    Mojo library links (dlsym finds their setters through it)."""
+    ext = lib.suffix
+    link = []
+    if tramp is not None:
+        tlib = work / f"lib{name}_externs.{key[:12]}{ext}"
+        _run([os.environ.get("CXX", "c++"), "-shared", "-fPIC", str(tramp),
+              "-o", str(tlib)], "C++ compilation (trampolines)")
+        link = ["-Xlinker", str(tlib)]
+        for old in work.glob(f"lib{name}_externs.*{ext}"):
+            if old != tlib:
+                old.unlink(missing_ok=True)
+    partial = lib.with_name(lib.stem + ".partial" + ext)
+    mojo, env = _mojo()
+    _run([mojo, "build", "--emit", "shared-lib", "-I", str(ROOT / "mojo"),
+          "-Xlinker", "-framework", "-Xlinker", "Accelerate", *link,
+          str(work / f"{name}.mojo"), "-o", str(partial)], "mojo build",
+         env=env)
+    partial.replace(lib)
+    for old in work.glob(f"lib{name}.*{ext}"):
+        if old != lib:
+            old.unlink(missing_ok=True)
 
 
 def _externs_of(functions) -> dict[str, fe.Extern]:
@@ -505,6 +631,7 @@ class Library:
 
     lib.source         the whole generated C++ file
     lib.f.cpp          the generated C++ of function f
+    lib.mojo           the generated Mojo (backend "mojo"; lib.f.mojo: of f)
     """
 
     def __init__(self, path, ifaces, decls, functions, externs, cpp,
@@ -513,6 +640,7 @@ class Library:
         self.elt = elt or _ELT["float64"]  # the element type of all matrices
         self.cpp = cpp
         self.source = Path(cpp).read_text()
+        self.mojo = None
         self._dll = ctypes.CDLL(str(path))
         self._decls = decls
         self._externs = externs
@@ -698,6 +826,19 @@ class CompiledFunction:
         """The generated C++ of this function (interface comment and
         definition; the helpers in front of it are in Library.source)."""
         return _function_source(self.lib.source, self.name)
+
+    @property
+    def mojo(self) -> str:
+        """The generated Mojo of this function (backend "mojo"): its
+        interface comment and its definition."""
+        src = self.lib.mojo or ""
+        m = re.search(rf"^# {self.name}: matrices by reference", src, re.M)
+        d = re.search(rf"^def {self.name}\b", src, re.M)
+        if not d:
+            return ""
+        start = m.start() if m and m.start() < d.start() else d.start()
+        end = src.find("\n\n\n", d.start())
+        return src[start:end if end >= 0 else len(src)] + "\n"
 
     @property
     def code(self) -> "Code":
