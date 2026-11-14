@@ -1303,13 +1303,8 @@ struct ConvertUlmLamkToUlmBLAS
 	    include("ulmblas/lapack/potrf.h");
 	if (getrf)
 	    include("ulmblas/lapack/getrf.h");
-	if (potri) {
-	    // (getri.h, which includes trtri.h, first: potri.h alone does
-	    // not compile, lauum.tcc uses inversetasks.h before it declares
-	    // lauum_impl; includes are sorted, so it must sort before potri)
-	    include("ulmblas/lapack/getri.h");
+	if (potri)
 	    include("ulmblas/lapack/potri.h");
-	}
 	if (getri)
 	    include("ulmblas/lapack/getri.h");
 	if (getrs)
