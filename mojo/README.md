@@ -19,13 +19,17 @@ get_sensor_data = lam.extern("get_sensor_data", [Index], Vector("n"))
 react = lam.extern("react", [Index, Vector("n")])
 
 @lam.function
-def control(A: Matrix("n", "n"), steps: Index):
+def control(A: InOut(Matrix("n", "n")), steps: Index):
     with lam.loop(steps) as L:
         b = get_sensor_data(L.index)
         x = A.inv @ b
         react(L.index, x)
 
-lam.emit_mojo(control, "sensor_lam.mojo")
+@lam.function
+def control_keep(A: Matrix("n", "n"), steps: Index):
+    control(A, steps)
+
+lam.emit_mojo([control, control_keep], "sensor_lam.mojo")
 ```
 
 The generated [`sensor_lam.mojo`](examples/sensor/sensor_lam.mojo)
@@ -33,22 +37,29 @@ factorizes A once, before the loop (`K.getrf`), and in the loop solves on
 b in place (`K.getrs`: the row swaps and the two triangular solves):
 
 ```mojo
-var v44: Int = K.getrf(v1, v1, v40, v1, 1, v38, 1)
+var v35: Int = K.getrf(v1, v1, v2, v1, 1, v34, 1)
 ...
-for v50 in range(v14, v3, v7):
-    ext.get_sensor_data(v1, v50, v49)
+for v41 in range(v14, v3, v7):
+    ext.get_sensor_data(v1, v41, v40)
     _ = K.getrs(
-        False, False, v1, 1, v40, v1, 1, v38, 1, v49, 1, 1
+        False, False, v1, 1, v2, v1, 1, v34, 1, v40, 1, 1
     )
-    ext.react(v1, v50, v49)
+    ext.react(v1, v41, v40)
 ```
+
+As in LAPACK, `control` overwrites A with its LU (lower-upper) factors
+(`InOut`): no copy, and its workspace holds only the pivots and b (12 KB
+for n = 1000).  `control_keep` is the wrapper for a caller that still
+needs A: it copies A into its own workspace (8 MB more) and calls
+`control`.  A matrix parameter without `InOut` is read only, and the
+function factorizes a copy.
 
 The application implements the external functions as a Mojo struct that
 conforms to the generated trait `Externs`
 ([`examples/sensor/main.mojo`](examples/sensor/main.mojo)):
 
 ```mojo
-from sensor_lam import Externs, control
+from sensor_lam import Externs, control, control_keep
 
 struct Sensor(Externs):
     def get_sensor_data(mut self, n: Int, l: Int, b: P[DType.float64]): ...
@@ -58,9 +69,10 @@ struct Sensor(Externs):
 ```
 $ pixi run sensor
 n = 1000  steps = 200  (Apple Accelerate)
-  ulm.lam (getrf once, getrs per step)  85 ms  info 0  max error 7.0e-15
-  as written (inv(A) * b per step)      2078 ms           max error 6.9e-15
-  speedup 24.5
+  ulm.lam control      (A overwritten)  59 ms  info 0  max error 7.0e-15  workspace 12032 bytes
+  ulm.lam control_keep (A kept)         59 ms  info 0  max error 7.0e-15  workspace 8012032 bytes
+  as written (inv(A) * b per step)    1455 ms          max error 6.9e-15
+  speedup 24.7
 ```
 
 (Apple M5; "as written" computes inv(A) and the product in every step,
@@ -73,13 +85,15 @@ with the same Accelerate calls.)
 - **Calling convention**: the comment in front of every generated function
   lists its parameters.  Matrices are raw pointers
   (`P[DType.float64]`, `ulm_lam.kernels.P`) to row-major arrays the caller
-  owns; sizes are `Int`.  Mojo frees a `List` after its last use, so keep
+  owns; sizes are `Int`.  A parameter marked `inout` in the comment may
+  be overwritten (LAPACK's "on exit, A is destroyed").  Mojo frees a `List` after its last use, so keep
   the lists alive while the function runs (`_ = A^` after the call).
 - **Workspace**: the last two parameters are the workspace (bytes) and
   `info`.  Call once with `info[0] = -1` (a query: the size in bytes is
   returned in `info[0]`), allocate it once, then call with `info[0]` set
   to that size, as often as needed: no allocation in the call.  (`info[0]
-  = 0` lets the function allocate it itself.)  The result is LAPACK's
+  = 0` lets the function allocate it itself, in every call: a
+  convenience, not for loops.)  The result is LAPACK's
   `info`: 0 on success, otherwise what the comment lists (a singular
   matrix, a matrix that is not positive definite, ...).
 - **External functions**: the methods of the trait `Externs`; every

@@ -15,10 +15,10 @@ trait Externs:
 
 # control: matrices by reference (row-major), owned by the caller
 #   v1  size_t          in
-#   v2  double[v1][v1]  in    read only
+#   v2  double[v1][v1]  inout  may be overwritten (unspecified on exit)
 #   v3  size_t          in
-#   v4  int8_t *        work  workspace (bytes)
-#   v5  int64_t *       info  -1: query, 0: allocate, >0: size of work
+#   v4  int8_t *        work   workspace (bytes)
+#   v5  int64_t *       info   -1: query, 0: allocate, >0: size of work
 # returns info:
 #     0  success
 #     1  LU factorisation of v2: singular
@@ -48,63 +48,149 @@ def control[
     var v17: Int = v16 + v12
     var v18: Int = v17 & v11
     var v19: Int = v1 * v10
-    var v20: Int = v19 * v1
-    var v21: Int = v20 + v12
-    var v22: Int = v21 & v11
-    var v23: Int = v18 + v22
-    var v24: Int = v19 + v12
-    var v25: Int = v24 & v11
-    var v26: Int = v23 + v25
-    var v27: Bool = v15 == v9
-    var v28: Int
-    if v27:
-        v5[unsafe_offset=v14] = Scalar[DType.int64](v26)
-        v28 = v8
+    var v20: Int = v19 + v12
+    var v21: Int = v20 & v11
+    var v22: Int = v18 + v21
+    var v23: Bool = v15 == v9
+    var v24: Int
+    if v23:
+        v5[unsafe_offset=v14] = Scalar[DType.int64](v22)
+        v24 = v8
     else:
-        var v29: Bool = v15 > v8
-        var v30: Bool = v15 < v26
-        var v31: Bool = v29 & v30
-        var v32: Int
-        if v31:
-            v32 = v6
+        var v25: Bool = v15 > v8
+        var v26: Bool = v15 < v22
+        var v27: Bool = v25 & v26
+        var v28: Int
+        if v27:
+            v28 = v6
         else:
-            var v33: Bool = v15 == v8
-            var v34: P[DType.int8]
-            if v33:
-                var v35: P[DType.int8] = K.aligned_alloc(64, v26)
-                v34 = v35
+            var v29: Bool = v15 == v8
+            var v30: P[DType.int8]
+            if v29:
+                var v31: P[DType.int8] = K.aligned_alloc(64, v22)
+                v30 = v31
             else:
-                v34 = v4
-            var v36: P[DType.int8] = v34
-            var v37: P[DType.int8] = v36.unsafe_offset(v14)
-            var v38: P[DType.int32] = v37.unsafe_bitcast[Scalar[DType.int32]]()
-            var v39: P[DType.int8] = v36.unsafe_offset(v18)
-            var v40: P[DType.float64] = v39.unsafe_bitcast[
-                Scalar[DType.float64]
-            ]()
-            var v41: Int = 8
-            var v42: Int = v41 * v1
-            var v43: Int = v42 * v1
-            _ = K.copy(v40, v2, v43)
-            var v44: Int = K.getrf(v1, v1, v40, v1, 1, v38, 1)
-            var v45: Bool = v44 != v8
-            var v46: Int = Int(v45)
-            var v47: Bool = v46 == v8
-            if v47:
-                var v48: P[DType.int8] = v36.unsafe_offset(v23)
-                var v49: P[DType.float64] = v48.unsafe_bitcast[
+                v30 = v4
+            var v32: P[DType.int8] = v30
+            var v33: P[DType.int8] = v32.unsafe_offset(v14)
+            var v34: P[DType.int32] = v33.unsafe_bitcast[Scalar[DType.int32]]()
+            var v35: Int = K.getrf(v1, v1, v2, v1, 1, v34, 1)
+            var v36: Bool = v35 != v8
+            var v37: Int = Int(v36)
+            var v38: Bool = v37 == v8
+            if v38:
+                var v39: P[DType.int8] = v32.unsafe_offset(v18)
+                var v40: P[DType.float64] = v39.unsafe_bitcast[
                     Scalar[DType.float64]
                 ]()
-                for v50 in range(v14, v3, v7):
-                    ext.get_sensor_data(v1, v50, v49)
+                for v41 in range(v14, v3, v7):
+                    ext.get_sensor_data(v1, v41, v40)
                     _ = K.getrs(
-                        False, False, v1, 1, v40, v1, 1, v38, 1, v49, 1, 1
+                        False, False, v1, 1, v2, v1, 1, v34, 1, v40, 1, 1
                     )
-                    ext.react(v1, v50, v49)
-            if v33:
-                _ = K.free(v36)
-            v32 = v46
-        var v51: Int = v32
-        v28 = v51
-    var v52: Int = v28
+                    ext.react(v1, v41, v40)
+            if v29:
+                _ = K.free(v32)
+            v28 = v37
+        var v42: Int = v28
+        v24 = v42
+    var v43: Int = v24
+    return v43
+
+
+# control_keep: matrices by reference (row-major), owned by the caller
+#   v1  size_t          in
+#   v2  double[v1][v1]  in    read only
+#   v3  size_t          in
+#   v4  int8_t *        work  workspace (bytes)
+#   v5  int64_t *       info  -1: query, 0: allocate, >0: size of work
+# returns info:
+#     0  success
+#     1  call of control returned info != 0
+#    -5  v5: workspace too small
+# (info != 0: the outputs are unspecified)
+def control_keep[
+    E: Externs
+](
+    mut ext: E,
+    v1: Int,
+    v2: P[DType.float64],
+    v3: Int,
+    v4: P[DType.int8],
+    v5: P[DType.int64],
+) -> Int:
+    var v6: Int = -5
+    var v7: Int = 0
+    var v8: Int = -64
+    var v9: Int = 63
+    var v10: Int = -1
+    var v11: Int = 1
+    var v12: Int = -64
+    var v13: Int = 63
+    var v14: Int = 8
+    var v15: Int = 0
+    var v16: Int = Int(v5[unsafe_offset=v15])
+    var v17: Int = v1 * v14
+    var v18: Int = v17 * v1
+    var v19: Int = v18 + v13
+    var v20: Int = v19 & v12
+    var v21: P[DType.int8] = v4.unsafe_offset(v11)
+    var v22: P[DType.float64] = v21.unsafe_bitcast[Scalar[DType.float64]]()
+    v5[unsafe_offset=v15] = Scalar[DType.int64](v10)
+    var v23: Int = control(ext, v1, v22, v3, v4, v5)
+    var v24: Bool = v23 == v7
+    var v25: Int
+    if v24:
+        var v26: Int = Int(v5[unsafe_offset=v15])
+        var v27: Int = v26 + v9
+        var v28: Int = v27 & v8
+        var v29: Int = v20 + v28
+        v5[unsafe_offset=v15] = Scalar[DType.int64](v16)
+        var v30: Bool = v16 == v10
+        var v31: Int
+        if v30:
+            v5[unsafe_offset=v15] = Scalar[DType.int64](v29)
+            v31 = v7
+        else:
+            var v32: Bool = v16 > v7
+            var v33: Bool = v16 < v29
+            var v34: Bool = v32 & v33
+            var v35: Int
+            if v34:
+                v35 = v6
+            else:
+                var v36: Bool = v16 == v7
+                var v37: P[DType.int8]
+                if v36:
+                    var v38: P[DType.int8] = K.aligned_alloc(64, v29)
+                    v37 = v38
+                else:
+                    v37 = v4
+                var v39: P[DType.int8] = v37
+                var v40: P[DType.int8] = v39.unsafe_offset(v15)
+                var v41: P[DType.float64] = v40.unsafe_bitcast[
+                    Scalar[DType.float64]
+                ]()
+                var v42: Int = 8
+                var v43: Int = v42 * v1
+                var v44: Int = v43 * v1
+                _ = K.copy(v41, v2, v44)
+                var v45: P[DType.int8] = v39.unsafe_offset(v20)
+                v5[unsafe_offset=v15] = Scalar[DType.int64](v26)
+                var v46: Int = control(ext, v1, v41, v3, v45, v5)
+                var v47: Bool = v46 != v7
+                var v48: Int = Int(v47)
+                var v49: Bool = v48 == v7
+                if v49:
+                    v5[unsafe_offset=v15] = Scalar[DType.int64](v16)
+                if v36:
+                    _ = K.free(v39)
+                v35 = v48
+            var v50: Int = v35
+            v31 = v50
+        var v51: Int = v31
+        v25 = v51
+    else:
+        v25 = v23
+    var v52: Int = v25
     return v52

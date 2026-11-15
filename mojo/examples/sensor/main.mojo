@@ -12,6 +12,10 @@
 # multiplies (gemv): O(n^3) per step.  ulm.lam's code factorizes A once and
 # solves in place in every step: O(n^2) per step.
 #
+# control overwrites A with its LU factors (as LAPACK does); control_keep
+# is the wrapper that leaves A as it is (it factorizes a copy in its
+# workspace).
+#
 #   pixi run sensor     (in mojo/: generates sensor_lam.mojo, builds, runs)
 
 from std.math import abs, sin
@@ -19,7 +23,7 @@ from std.sys import argv
 from std.time import perf_counter_ns
 from ulm_lam import kernels as K
 from ulm_lam.kernels import P
-from sensor_lam import Externs, control
+from sensor_lam import Externs, control, control_keep
 
 
 comptime Ptr = P[DType.float64]
@@ -117,21 +121,39 @@ def main() raises:
     var pA = ptr(A)
     var s = Sensor(A.copy(), n)
 
-    # the generated code: workspace query (info = -1), then the calls
-    # with the workspace (allocated once, here)
+    # the generated code: workspace query (info = -1), then the call with
+    # the workspace (allocated once, here; it could serve many calls)
     var info = List[Int64](length=1, fill=-1)
     var pinfo = info.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
     var none = List[Int8](length=1, fill=0)
     var pnone = none.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
-    _ = control(s, n, pA, steps, pnone, pinfo)
+
+    # control: A is overwritten, so it gets a copy of A (A is needed below)
+    var LU = A.copy()
+    _ = control(s, n, ptr(LU), steps, pnone, pinfo)
     var work = List[Int8](length=Int(info[0]), fill=0)
     var pwork = work.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
-
+    var bytes = info[0]
     var t0 = perf_counter_ns()
-    var r1 = control(s, n, pA, steps, pwork, pinfo)
+    var r1 = control(s, n, ptr(LU), steps, pwork, pinfo)
     var t_lam = Float64(perf_counter_ns() - t0) * 1e-6
     var err_lam = s.err
     var count = s.reacted
+
+    # control_keep: A stays as it is (the copy is in the workspace)
+    s.err = 0.0
+    info[0] = -1
+    _ = control_keep(s, n, pA, steps, pnone, pinfo)
+    var work2 = List[Int8](length=Int(info[0]), fill=0)
+    var pwork2 = work2.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
+    var bytes2 = info[0]
+    t0 = perf_counter_ns()
+    var r2 = control_keep(s, n, pA, steps, pwork2, pinfo)
+    var t_keep = Float64(perf_counter_ns() - t0) * 1e-6
+    var err_keep = s.err
+    var kept = True
+    for k in range(n * n):
+        kept = kept and A[k] == s.A[k]
 
     s.err = 0.0
     t0 = perf_counter_ns()
@@ -140,24 +162,48 @@ def main() raises:
 
     print("n =", n, " steps =", steps, " (Apple Accelerate)")
     print(
-        "  ulm.lam (getrf once, getrs per step) ",
+        "  ulm.lam control      (A overwritten)",
         t_lam,
         "ms  info",
         r1,
         " max error",
         err_lam,
+        " workspace",
+        bytes,
+        "bytes",
     )
     print(
-        "  as written (inv(A) * b per step)     ",
+        "  ulm.lam control_keep (A kept)       ",
+        t_keep,
+        "ms  info",
+        r2,
+        " max error",
+        err_keep,
+        " workspace",
+        bytes2,
+        "bytes",
+    )
+    print(
+        "  as written (inv(A) * b per step)    ",
         t_lit,
         "ms",
-        "             max error",
+        "         max error",
         s.err,
     )
     print("  speedup", t_lit / t_lam)
-    var ok = r1 == 0 and count == steps and err_lam < 1e-10 and s.err < 1e-10
+    var ok = (
+        r1 == 0
+        and r2 == 0
+        and count == steps
+        and kept
+        and err_lam < 1e-10
+        and err_keep < 1e-10
+        and s.err < 1e-10
+    )
     print("PASS" if ok else "FAIL")
     _ = A^
+    _ = LU^
     _ = info^
     _ = none^
     _ = work^
+    _ = work2^
