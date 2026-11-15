@@ -106,7 +106,7 @@ def control[
 #   v5  int64_t *       info  -1: query, 0: allocate, >0: size of work
 # returns info:
 #     0  success
-#     1  call of control returned info != 0
+#     1  LU factorisation of v2: singular
 #    -5  v5: workspace too small
 # (info != 0: the outputs are unspecified)
 def control_keep[
@@ -178,19 +178,17 @@ def control_keep[
                 var v45: P[DType.int8] = v39.unsafe_offset(v20)
                 v5[unsafe_offset=v15] = Scalar[DType.int64](v26)
                 var v46: Int = control(ext, v1, v41, v3, v45, v5)
-                var v47: Bool = v46 != v7
-                var v48: Int = Int(v47)
-                var v49: Bool = v48 == v7
-                if v49:
+                var v47: Bool = v46 == v7
+                if v47:
                     v5[unsafe_offset=v15] = Scalar[DType.int64](v16)
                 if v36:
                     _ = K.free(v39)
-                v35 = v48
-            var v50: Int = v35
-            v31 = v50
-        var v51: Int = v31
-        v25 = v51
+                v35 = v46
+            var v48: Int = v35
+            v31 = v48
+        var v49: Int = v31
+        v25 = v49
     else:
         v25 = v23
-    var v52: Int = v25
-    return v52
+    var v50: Int = v25
+    return v50

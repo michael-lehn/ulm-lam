@@ -1615,7 +1615,9 @@ class Selector
 	    if (!a)
 		return true;
 	    auto f = dyn_cast<func::FuncOp>(a.getOwner()->getParentOp());
-	    return f && f.getArgAttr(a.getArgNumber(), "ulm_lam.inout");
+	    // (a parameter may be overwritten unless it is read only)
+	    return f && !f.isPrivate() &&
+	           !f.getArgAttr(a.getArgNumber(), "ulm_lam.in");
 	};
 	return writable(l.v) && !writable(r.v);
     }

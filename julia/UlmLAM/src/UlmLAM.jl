@@ -27,7 +27,7 @@ using Libdl
 using SHA: sha256
 import Scratch
 
-export @lam, update!, Mat, Vec, InOut, Index, Float, eye, assume, loop, extern,
+export @lam, update!, Mat, Vec, In, InOut, Index, Float, eye, assume, loop, extern,
        bind!, InfoError, LamError, Workspace, workspace_size, cpp, code_lam, lstsq,
        @code_lam
 

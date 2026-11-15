@@ -1074,10 +1074,27 @@ describe(func::FuncOp f)
     };
     std::string s = "/* " + f.getSymName().str() +
                     ": matrices by reference (row-major), owned by the caller";
+    // (at most 78 columns, as the rest: clang-format would reflow it)
+    if (s.size() > 78)
+	s = "/* " + f.getSymName().str() +
+	    ": matrices by reference (row-major),\n *   owned by the caller";
+    // (the descriptions wrapped at 78 columns, continuation lines aligned
+    // with them: clang-format would otherwise reflow the comment)
     for (auto &r : rows) {
 	std::string line = " *   " + pad(r[0], w0) + "  " + pad(r[1], w1) +
-	                   "  " +
-	                   (r[3].empty() ? r[2] : pad(r[2], w2) + "  " + r[3]);
+	                   "  " + (r[3].empty() ? r[2] : pad(r[2], w2) + "  ");
+	size_t start = line.size();
+	for (StringRef rest = r[3]; !rest.empty();) {
+	    auto [word, tail] = rest.split(' ');
+	    rest = tail;
+	    if (line.size() > start && line.size() + 1 + word.size() > 78) {
+		s += "\n" + line;
+		line = " *" + std::string(start - 2, ' ');
+	    } else if (line.size() > start) {
+		line += ' ';
+	    }
+	    line += word.str();
+	}
 	while (!line.empty() && line.back() == ' ')
 	    line.pop_back();
 	s += "\n" + line;
@@ -1322,6 +1339,44 @@ struct ConvertUlmLamkToUlmBLAS
     }
 };
 
+/// ulm-lam-call-statements, after form-expressions: an expression that
+/// calls a function stays a statement where it is (do_not_inline).  The
+/// C++ emitter would otherwise inline it at the use of its result, past
+/// the operations in between, e.g. a wrapper f_keep that frees its
+/// workspace before it returns f's info:
+///   v11 = f(v17, ...);  free(v15);  v10 = v11;     (as in the IR)
+/// would become
+///   free(v15);  v10 = f(v17, ...);                 (v17 is in v15)
+struct UlmLamCallStatements
+    : PassWrapper<UlmLamCallStatements, OperationPass<ModuleOp>>
+{
+    MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(UlmLamCallStatements)
+
+    StringRef
+    getArgument() const final
+    {
+	return "ulm-lam-call-statements";
+    }
+    StringRef
+    getDescription() const final
+    {
+	return "EmitC expressions that call a function are not inlined at "
+	       "their use (side effects stay in order)";
+    }
+    void
+    runOnOperation() override
+    {
+	getOperation().walk([](emitc::ExpressionOp e) {
+	    bool calls = false;
+	    e->walk([&](Operation *op) {
+		calls |= isa<emitc::CallOp, emitc::CallOpaqueOp>(op);
+	    });
+	    if (calls)
+		e.setDoNotInline(true);
+	});
+    }
+};
+
 } // namespace
 
 namespace ulm_lam {
@@ -1329,5 +1384,6 @@ void
 registerConvertUlmLamkToUlmBLASPass()
 {
     PassRegistration<ConvertUlmLamkToUlmBLAS>();
+    PassRegistration<UlmLamCallStatements>();
 }
 } // namespace ulm_lam

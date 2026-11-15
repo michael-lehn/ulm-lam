@@ -85,6 +85,7 @@
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/BitVector.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/StringSet.h"
 
 using namespace mlir;
@@ -208,11 +209,78 @@ struct UlmLamResultsToOutParams
     runOnOperation() override
     {
 	ModuleOp module = getOperation();
+	if (failed(addKeepWrappers(module)))
+	    return signalPassFailure();
 	if (failed(rewriteDeclarations(module)) ||
 	    failed(rewriteInOut(module)) || failed(rewriteResults(module)))
 	    return signalPassFailure();
 	if (failed(markIntents(module)))
 	    return signalPassFailure();
+    }
+
+    // -- 0. kernels and their wrappers ---------------------------------------
+    //
+    // ulm.lam is portable BLAS/LAPACK: as in LAPACK, a function may
+    // overwrite the matrices it receives ("on exit, A is destroyed"), so
+    // that it needs no copies and little or no workspace.  A matrix
+    // argument of a public function is {ulm_lam.inout} unless it is marked
+    // {ulm_lam.in} (read only).  Every public function f with an argument
+    // that it may overwrite without updating it gets a wrapper f_keep
+    // (MATLAB style): the same parameters, those read only, and a call of
+    // f; bufferization gives f the copies it needs, in f_keep's workspace.
+    // Arguments that f updates ({ulm_lam.inout = i} results) are updated
+    // by f_keep as well.
+    static LogicalResult
+    addKeepWrappers(ModuleOp module)
+    {
+	MLIRContext *ctx = module.getContext();
+	SymbolTable symbols(module);
+	SmallVector<func::FuncOp> kernels;
+	for (auto f : module.getOps<func::FuncOp>())
+	    if (!f.isExternal() && !f.isPrivate())
+		kernels.push_back(f);
+	for (func::FuncOp f : kernels) {
+	    llvm::SmallDenseSet<unsigned> updated;
+	    for (unsigned j = 0, e = f.getNumResults(); j < e; ++j)
+		if (auto a = f.getResultAttrOfType<IntegerAttr>(j, kInOutAttr))
+		    updated.insert(a.getInt());
+	    SmallVector<unsigned> keep;
+	    for (unsigned i = 0, e = f.getNumArguments(); i < e; ++i) {
+		if (!isa<RankedTensorType>(f.getArgumentTypes()[i]) ||
+		    f.getArgAttr(i, kInAttr))
+		    continue;
+		f.setArgAttr(i, kInOutAttr, UnitAttr::get(ctx));
+		if (!updated.contains(i))
+		    keep.push_back(i);
+	    }
+	    if (keep.empty())
+		continue;
+	    std::string name = (f.getSymName() + "_keep").str();
+	    if (symbols.lookup(name))
+		return f.emitError() << "the wrapper @" << name << " of @"
+		                     << f.getSymName() << " exists already";
+	    OpBuilder b(ctx);
+	    b.setInsertionPointAfter(f);
+	    auto w =
+	        func::FuncOp::create(b, f.getLoc(), name, f.getFunctionType());
+	    if (ArrayAttr a = f.getAllArgAttrs())
+		w.setAllArgAttrs(a);
+	    if (ArrayAttr a = f.getAllResultAttrs())
+		w.setAllResultAttrs(a);
+	    // (ulm-lam-info: w's info is f's)
+	    w->setAttr("ulm_lam.wraps", f.getSymNameAttr());
+	    for (unsigned i : keep) {
+		w.removeArgAttr(i, kInOutAttr);
+		w.setArgAttr(i, kInAttr, UnitAttr::get(ctx));
+	    }
+	    Block *entry = w.addEntryBlock();
+	    b.setInsertionPointToStart(entry);
+	    auto call =
+	        func::CallOp::create(b, f.getLoc(), f, entry->getArguments());
+	    func::ReturnOp::create(b, f.getLoc(), call.getResults());
+	    symbols.insert(w);
+	}
+	return success();
     }
 
     // -- 3. results of public functions --------------------------------------
@@ -236,6 +304,23 @@ struct UlmLamResultsToOutParams
 		                       out);
 	    return;
 	}
+	// the result of a call of a function with out parameters (a wrapper
+	// f_keep returns f's result): f writes into `out` directly instead
+	// of into a new buffer
+	if (auto tt = result.getDefiningOp<bufferization::ToTensorOp>())
+	    if (auto alloc = tt.getBuffer().getDefiningOp<memref::AllocOp>())
+		if (alloc.getType() == out.getType() &&
+		    llvm::all_of(alloc->getUsers(),
+		                 [&](Operation *u) {
+		                     return u == tt || isa<func::CallOp>(u);
+		                 }) &&
+		    llvm::count_if(alloc->getUsers(), [](Operation *u) {
+		        return isa<func::CallOp>(u);
+		    }) == 1) {
+		    alloc.getResult().replaceAllUsesWith(out);
+		    alloc.erase();
+		    return;
+		}
 	// the new value of an argument a callee updated, which got a copy:
 	// the copy goes into `out` instead, and the callee works there
 	// (x = copy(y); foo!(..., x) for a MATLAB-style wrapper of foo!)
@@ -620,7 +705,23 @@ struct UlmLamResultsToOutParams
 	    for (auto [j, i] : inout) {
 		Value v = ops[i];
 		auto vt = cast<RankedTensorType>(v.getType());
-		if (!overwritable(v)) {
+		// a parameter whose new value is returned as a result of its
+		// own (not as the parameter's new value): the callee works in a
+		// copy, which startInDestination places in the result (as cheap
+		// as working in the parameter and copying it there, and the
+		// parameter is left as it is: its wrapper needs no copy)
+		bool returned = false;
+		if (auto a = dyn_cast<BlockArgument>(v))
+		    if (auto caller = call->getParentOfType<func::FuncOp>())
+			for (OpOperand &u : call.getResult(j).getUses())
+			    if (isa<func::ReturnOp>(u.getOwner())) {
+				auto k =
+				    caller.getResultAttrOfType<IntegerAttr>(
+				        u.getOperandNumber(), kInOutAttr);
+				if (!k || k.getInt() != a.getArgNumber())
+				    returned = true;
+			    }
+		if (!overwritable(v) || returned) {
 		    FailureOr<SmallVector<Value>> sizes =
 		        ulm_lam::dynamicSizes(b, loc, vt, v, 0, v, 1);
 		    if (failed(sizes))

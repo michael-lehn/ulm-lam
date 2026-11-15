@@ -19,17 +19,13 @@ get_sensor_data = lam.extern("get_sensor_data", [Index], Vector("n"))
 react = lam.extern("react", [Index, Vector("n")])
 
 @lam.function
-def control(A: InOut(Matrix("n", "n")), steps: Index):
+def control(A: Matrix("n", "n"), steps: Index):
     with lam.loop(steps) as L:
         b = get_sensor_data(L.index)
         x = A.inv @ b
         react(L.index, x)
 
-@lam.function
-def control_keep(A: Matrix("n", "n"), steps: Index):
-    control(A, steps)
-
-lam.emit_mojo([control, control_keep], "sensor_lam.mojo")
+lam.emit_mojo(control, "sensor_lam.mojo")
 ```
 
 The generated [`sensor_lam.mojo`](examples/sensor/sensor_lam.mojo)
@@ -47,12 +43,12 @@ for v41 in range(v14, v3, v7):
     ext.react(v1, v41, v40)
 ```
 
-As in LAPACK, `control` overwrites A with its LU (lower-upper) factors
-(`InOut`): no copy, and its workspace holds only the pivots and b (12 KB
-for n = 1000).  `control_keep` is the wrapper for a caller that still
-needs A: it copies A into its own workspace (8 MB more) and calls
-`control`.  A matrix parameter without `InOut` is read only, and the
-function factorizes a copy.
+As in LAPACK, `control` overwrites A with its LU (lower-upper) factors:
+no copy, and its workspace holds only the pivots and b (12 KB for
+n = 1000).  ulm.lam generates the wrapper `control_keep` with it, for a
+caller that still needs A: it copies A into its own workspace (8 MB more)
+and calls `control`.  (A parameter declared `In(Matrix(...))` is read
+only: the function itself would then factorize a copy.)
 
 The application implements the external functions as a Mojo struct that
 conforms to the generated trait `Externs`

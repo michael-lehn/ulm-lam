@@ -9,12 +9,12 @@
  *   v2   size_t          in
  *   v3   size_t          in
  *   v4   size_t          in
- *   v5   double[v1][v2]  in    read only
- *   v6   double[v2][v3]  in    read only
- *   v7   double[v3][v4]  in    read only
- *   v8   double[v1][v4]  out   written
- *   v9   int8_t *        work  workspace (bytes)
- *   v10  int64_t *       info  -1: query, 0: allocate, >0: size of work
+ *   v5   double[v1][v2]  inout  may be overwritten (unspecified on exit)
+ *   v6   double[v2][v3]  inout  may be overwritten (unspecified on exit)
+ *   v7   double[v3][v4]  inout  may be overwritten (unspecified on exit)
+ *   v8   double[v1][v4]  out    written
+ *   v9   int8_t *        work   workspace (bytes)
+ *   v10  int64_t *       info   -1: query, 0: allocate, >0: size of work
  * returns info:
  *      0  success
  *    -10  v10: workspace too small
@@ -77,4 +77,88 @@ chain(size_t v1, size_t v2, size_t v3, size_t v4, double *v5, double *v6,
 	v20 = v21 ? -10 : v13;
     }
     return v20;
+}
+/* chain_keep: matrices by reference (row-major), owned by the caller
+ *   v1   size_t          in
+ *   v2   size_t          in
+ *   v3   size_t          in
+ *   v4   size_t          in
+ *   v5   double[v1][v2]  in    read only
+ *   v6   double[v2][v3]  in    read only
+ *   v7   double[v3][v4]  in    read only
+ *   v8   double[v1][v4]  out   written
+ *   v9   int8_t *        work  workspace (bytes)
+ *   v10  int64_t *       info  -1: query, 0: allocate, >0: size of work
+ * returns info:
+ *      0  success
+ *    -10  v10: workspace too small
+ * (info != 0: the outputs are unspecified)
+ */
+extern "C" int64_t
+chain_keep(size_t v1, size_t v2, size_t v3, size_t v4, double *v5, double *v6,
+           double *v7, double *v8, int8_t *v9, int64_t *v10)
+{
+    int64_t v11 = 0;
+    int64_t v12 = -1;
+    size_t v13 = 0;
+    int64_t v14 = v10[v13];
+    int64_t v15 = (int64_t)4;
+    double *v16 = (double *)(v9 + v15);
+    int64_t v17 = (int64_t)5;
+    double *v18 = (double *)(v9 + v17);
+    int64_t v19 = (int64_t)6;
+    double *v20 = (double *)(v9 + v19);
+    int64_t v21 = (int64_t)7;
+    double *v22 = (double *)(v9 + v21);
+    v10[v13] = v12;
+    int64_t v23 = chain(v1, v2, v3, v4, v16, v18, v20, v22, v9, v10);
+    int64_t v24;
+    if (v23 == v11) {
+	int64_t v25 = v10[v13];
+	uint64_t v26 = (uint64_t)v25;
+	uint64_t v27 = (uint64_t)63;
+	int64_t v28 = (int64_t)(v26 + v27);
+	uint64_t v29 = (uint64_t)v28;
+	uint64_t v30 = (uint64_t)-64;
+	int64_t v31 = (int64_t)(v29 & v30);
+	v10[v13] = v14;
+	int64_t v32;
+	if (v14 == v12) {
+	    v10[v13] = v31;
+	    v32 = v11;
+	} else {
+	    int64_t v33;
+	    if (v14 > v11 & v14 < v31) {
+		v33 = -10;
+	    } else {
+		bool v34 = v14 == v11;
+		int8_t *v35;
+		if (v34) {
+		    ptrdiff_t v36 = (ptrdiff_t)v31;
+		    size_t v37 = (size_t)v36;
+		    void *v38 = aligned_alloc(64, v37);
+		    v35 = (int8_t *)v38;
+		} else {
+		    v35 = v9;
+		}
+		int8_t *v39 = v35;
+		int64_t v40 = (int64_t)v13;
+		v10[v13] = v25;
+		int64_t v41 =
+		    chain(v1, v2, v3, v4, v5, v6, v7, v8, v39 + v40, v10);
+		if (v41 == v11) {
+		    v10[v13] = v14;
+		}
+		if (v34) {
+		    free(v39);
+		}
+		v33 = v41;
+	    }
+	    v32 = v33;
+	}
+	v24 = v32;
+    } else {
+	v24 = v23;
+    }
+    return v24;
 }

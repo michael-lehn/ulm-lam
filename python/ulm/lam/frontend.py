@@ -16,11 +16,19 @@ Matrix properties are declared on parameters; ulm-lam-infer-properties derives
 those of intermediate results.
 
 Parameter intents (the ulm.lam ABI): matrices are passed by reference.
-    Matrix(...)            in: read only (the default)
-    InOut(Matrix(...))     the function may overwrite it; with
-                           lam.update(param, value) it holds `value` on
-                           exit, otherwise its contents are unspecified
+ulm.lam is portable BLAS/LAPACK, as C is portable assembly: as in LAPACK,
+a function may overwrite the matrices it receives, so that it needs no
+copies and little or no workspace.
+    Matrix(...)            inout (the default): the function may overwrite
+                           it; with lam.update(param, value) it holds
+                           `value` on exit, otherwise its contents are
+                           unspecified (LAPACK: "on exit, A is destroyed")
+    In(Matrix(...))        in: read only
     return values          out: buffers the caller provides
+For every function f with a matrix it may overwrite (and not update), the
+compiler adds the wrapper f_keep: the same parameters, read only, the
+copies in its workspace.  lam.compile calls f_keep (lib.f(...)), or f
+itself with lib.f(..., overwrite=True).
 
 Sizes are numbers, or names that are run-time parameters:
     Matrix("n", "m", "full_rank")   n x m, n and m given by the arrays
@@ -68,7 +76,7 @@ class MatrixType:
     rows: int | str  # a number, or the name of a run-time size
     cols: int | str
     props: frozenset = frozenset()
-    intent: str = "in"  # in | inout (parameters only)
+    intent: str = "inout"  # inout | in (parameters only)
 
     def mlir(self, with_props: bool = True) -> str:
         def d(x):
@@ -168,14 +176,16 @@ def Vector(n: int | str, *props: str) -> MatrixType:
 
 
 def InOut(t: MatrixType) -> MatrixType:
-    """A matrix parameter that the function may overwrite."""
+    """A matrix parameter that the function may overwrite (the default; for
+    emphasis)."""
     if not isinstance(t, MatrixType):
         raise LamError("InOut needs a matrix type")
     return MatrixType(t.rows, t.cols, t.props, "inout")
 
 
 def In(t: MatrixType) -> MatrixType:
-    """A read-only matrix parameter (the default)."""
+    """A read-only matrix parameter: the function does not overwrite it
+    (a copy, in its workspace, where a kernel would)."""
     return MatrixType(t.rows, t.cols, t.props, "in")
 
 
@@ -808,7 +818,7 @@ class Function:
                 t = self.params[k][1]
                 if not isinstance(t, MatrixType) or t.intent != "inout":
                     raise LamError(f"lam.update: parameter {self.params[k][0]}"
-                                    " must be InOut(...)")
+                                    " is read only (In(...))")
                 v = _as_value(value)
                 if (v.type.rows, v.type.cols) != (t.rows, t.cols):
                     raise LamError(f"lam.update: {v.type} instead of {t}")

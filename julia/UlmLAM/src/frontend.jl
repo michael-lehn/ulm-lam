@@ -79,17 +79,22 @@ function Mat(rows::Dim, cols::Dim, props::Symbol...; stored=nothing)
             throw(LamError("stored= needs a symmetric matrix"))
         push!(ps, Symbol(stored, "_stored"))
     end
-    MatType(rows, cols, sort!(collect(ps)), :in, false)
+    MatType(rows, cols, sort!(collect(ps)), :inout, false)
 end
 
 """`Vec(n, props...)`: a vector (a Julia `Vector{Float64}`), n x 1."""
 Vec(n::Dim, props::Symbol...) =
-    (t = Mat(n, 1, props...); MatType(t.rows, 1, t.props, :in, true))
+    (t = Mat(n, 1, props...); MatType(t.rows, 1, t.props, :inout, true))
 
-"""`InOut(Mat(...))`: a matrix parameter that the function may overwrite."""
+"""`InOut(Mat(...))`: a matrix parameter that the function may overwrite
+(the default; for emphasis)."""
 InOut(t::MatType) = MatType(t.rows, t.cols, t.props, :inout, t.isvec)
 
-plain(t::MatType) = MatType(t.rows, t.cols, Symbol[], :in, t.isvec)
+"""`In(Mat(...))`: a read-only matrix parameter: the function does not
+overwrite it (a copy, in its workspace, where a kernel would)."""
+In(t::MatType) = MatType(t.rows, t.cols, t.props, :in, t.isvec)
+
+plain(t::MatType) = MatType(t.rows, t.cols, Symbol[], :inout, t.isvec)
 symbols(t::MatType) = [d for d in (t.rows, t.cols) if d isa Symbol]
 symbols(::LamType) = Symbol[]
 
@@ -704,7 +709,7 @@ end
 """
     update!(param, value)
 
-In a `@lam` function: on exit, the `InOut` parameter `param` holds `value`
+In a `@lam` function: on exit, the parameter `param` holds `value`
 (LAPACK style: `update!(y, M \\ y)` overwrites `y` with the solution).  A call
 of such a function from another `@lam` function returns the new values after
 its results: `y = bar(M, y)`.
@@ -717,7 +722,7 @@ function update!(param, value)
                                     "parameter of the function"))
     n, t = f.params[k]
     (t isa MatType && t.intent == :inout) ||
-        throw(LamError("$(f.name): update!: parameter $n must be InOut(...)"))
+        throw(LamError("$(f.name): update!: parameter $n is read only (In(...))"))
     v = value isa LamValue ? value : throw(LamError("$(f.name): update!: $n: not a matrix"))
     (v.type isa MatType && (v.type.rows, v.type.cols) == (param.type.rows, param.type.cols)) ||
         throw(LamError("$(f.name): update!: $n: $(v.type) instead of $(param.type)"))

@@ -186,7 +186,7 @@ def render(fn: fe.Function, selected: str, infos: dict) -> str:
             shape = f"{t.rows}" if t.cols == 1 else f"{t.rows}×{t.cols}"
             props = sorted(p for p in getattr(t, "props", ()) or ())
             return shape + (" " + ",".join(props) if props else "") + (
-                " inout" if getattr(t, "intent", "in") == "inout" else "")
+                " in" if getattr(t, "intent", "inout") == "in" else "")
         return "Float" if isinstance(t, fe.FloatType) else "Index"
     r.lines.append(f"{fn.name}(" + ", ".join(
         f"{n}: {tdesc(t)}" for n, t in fn.params) + ")")

@@ -1,12 +1,14 @@
 # gls_driver.mojo: runs the generated GLS (generalized least squares)
 # program (module gls: ulm-lam --emit=mojo examples/gls/02-normal.mlir) on
-# deterministic data and writes X, M, y and b for tests/check_gls.py.
+# deterministic data and writes X, M, y and b for tests/check_gls.py.  It
+# calls the wrapper gls_keep, which leaves X, M and y as they are (gls itself
+# overwrites them, as a LAPACK routine).
 
 from std.sys import argv
 from std.ffi import external_call
 from ulm_lam import kernels as K
 from ulm_lam.kernels import P
-from gls import gls
+from gls import gls_keep
 
 
 # ---- the test driver -------------------------------------------------------
@@ -63,14 +65,21 @@ def main() raises:
 
     # workspace query, then the call with the workspace
     info[0] = -1
-    _ = gls(pX, pM, py, pb, pw, pinfo)
+    _ = gls_keep(pX, pM, py, pb, pw, pinfo)
     var size = Int(info[0])
     var work = List[Int8](length=size, fill=0)
     var pwork = work.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
     info[0] = Int64(size)
-    var r = gls(pX, pM, py, pb, pwork, pinfo)
+    var r = gls_keep(pX, pM, py, pb, pwork, pinfo)
     print(
-        "gls: info", r, " workspace", size, "bytes  b[0:3] =", b[0], b[1], b[2]
+        "gls_keep: info",
+        r,
+        " workspace",
+        size,
+        "bytes  b[0:3] =",
+        b[0],
+        b[1],
+        b[2],
     )
     write(dir + "/X.bin", pX, n * m)
     write(dir + "/M.bin", pM, n * n)

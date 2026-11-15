@@ -114,106 +114,101 @@ foo(size_t v1, double *v2, double *v3, double *v4, double *v5, int8_t *v6,
     size_t v12 = 0;
     int64_t v13 = v7[v12];
     size_t v14 = v1 * 8 + 63 & -64;
-    size_t v15 = v14 + v14;
-    ptrdiff_t v16 = (ptrdiff_t)v15;
-    int64_t v17 = (int64_t)v16;
-    int64_t v18 = (int64_t)1;
-    double *v19 = (double *)(v6 + v18);
-    int64_t v20 = (int64_t)2;
-    double *v21 = (double *)(v6 + v20);
-    int64_t v22 = (int64_t)3;
-    double *v23 = (double *)(v6 + v22);
+    ptrdiff_t v15 = (ptrdiff_t)v14;
+    int64_t v16 = (int64_t)v15;
+    int64_t v17 = (int64_t)1;
+    double *v18 = (double *)(v6 + v17);
+    int64_t v19 = (int64_t)2;
+    double *v20 = (double *)(v6 + v19);
+    int64_t v21 = (int64_t)3;
+    double *v22 = (double *)(v6 + v21);
     v7[v12] = v11;
-    int64_t v24 = bar(v1, v19, v21, v23, v6, v7);
-    int64_t v25;
-    if (v24 == v8) {
-	int64_t v26 = v7[v12];
-	uint64_t v27 = (uint64_t)v26;
-	uint64_t v28 = (uint64_t)v10;
-	int64_t v29 = (int64_t)(v27 + v28);
-	uint64_t v30 = (uint64_t)v29;
-	uint64_t v31 = (uint64_t)v9;
-	int64_t v32 = (int64_t)(v30 & v31);
-	uint64_t v33 = (uint64_t)v17;
-	uint64_t v34 = (uint64_t)v32;
-	int64_t v35 = (int64_t)(v33 + v34);
+    int64_t v23 = bar(v1, v18, v20, v22, v6, v7);
+    int64_t v24;
+    if (v23 == v8) {
+	int64_t v25 = v7[v12];
+	uint64_t v26 = (uint64_t)v25;
+	uint64_t v27 = (uint64_t)v10;
+	int64_t v28 = (int64_t)(v26 + v27);
+	uint64_t v29 = (uint64_t)v28;
+	uint64_t v30 = (uint64_t)v9;
+	int64_t v31 = (int64_t)(v29 & v30);
+	uint64_t v32 = (uint64_t)v16;
+	uint64_t v33 = (uint64_t)v31;
+	int64_t v34 = (int64_t)(v32 + v33);
 	v7[v12] = v11;
-	int64_t v36 = bar(v1, v19, v21, v23, v6, v7);
-	int64_t v37;
-	if (v36 == v8) {
-	    int64_t v38 = v7[v12];
-	    uint64_t v39 = (uint64_t)v38;
-	    uint64_t v40 = (uint64_t)v10;
-	    int64_t v41 = (int64_t)(v39 + v40);
-	    uint64_t v42 = (uint64_t)v41;
-	    uint64_t v43 = (uint64_t)v9;
-	    int64_t v44 = (int64_t)(v42 & v43);
-	    uint64_t v45 = (uint64_t)v35;
-	    uint64_t v46 = (uint64_t)v44;
-	    int64_t v47 = (int64_t)(v45 + v46);
+	int64_t v35 = bar(v1, v18, v20, v22, v6, v7);
+	int64_t v36;
+	if (v35 == v8) {
+	    int64_t v37 = v7[v12];
+	    uint64_t v38 = (uint64_t)v37;
+	    uint64_t v39 = (uint64_t)v10;
+	    int64_t v40 = (int64_t)(v38 + v39);
+	    uint64_t v41 = (uint64_t)v40;
+	    uint64_t v42 = (uint64_t)v9;
+	    int64_t v43 = (int64_t)(v41 & v42);
+	    uint64_t v44 = (uint64_t)v34;
+	    uint64_t v45 = (uint64_t)v43;
+	    int64_t v46 = (int64_t)(v44 + v45);
 	    v7[v12] = v13;
-	    int64_t v48;
+	    int64_t v47;
 	    if (v13 == v11) {
-		v7[v12] = v47;
-		v48 = v8;
+		v7[v12] = v46;
+		v47 = v8;
 	    } else {
-		int64_t v49;
-		if (v13 > v8 & v13 < v47) {
-		    v49 = -7;
+		int64_t v48;
+		if (v13 > v8 & v13 < v46) {
+		    v48 = -7;
 		} else {
-		    bool v50 = v13 == v8;
-		    int8_t *v51;
-		    if (v50) {
-			ptrdiff_t v52 = (ptrdiff_t)v47;
-			size_t v53 = (size_t)v52;
-			void *v54 = aligned_alloc(64, v53);
-			v51 = (int8_t *)v54;
+		    bool v49 = v13 == v8;
+		    int8_t *v50;
+		    if (v49) {
+			ptrdiff_t v51 = (ptrdiff_t)v46;
+			size_t v52 = (size_t)v51;
+			void *v53 = aligned_alloc(64, v52);
+			v50 = (int8_t *)v53;
 		    } else {
-			v51 = v6;
+			v50 = v6;
 		    }
-		    int8_t *v55 = v51;
-		    int64_t v56 = (int64_t)v12;
-		    double *v57 = (double *)(v55 + v56);
-		    int64_t v58 = (int64_t)v15;
-		    v7[v12] = v26;
-		    bool v59 =
-		        (bool)(bar(v1, v3, v4, v57, v55 + v58, v7) != v8);
-		    uint64_t v60 = (uint64_t)v59;
-		    int64_t v61 = (int64_t)v60;
-		    int64_t v62;
-		    if (v61 == v8) {
-			int64_t v63 = (int64_t)v14;
-			double *v64 = (double *)(v55 + v63);
-			ptrdiff_t v65 = (ptrdiff_t)v35;
-			size_t v66 = (size_t)v65;
-			int64_t v67 = (int64_t)v66;
-			v7[v12] = v38;
-			int64_t v68 =
-			    bar(v1, v2, v57, v64, v55 + v67, v7) != v8 ? 2 : v8;
-			if (v68 == v8) {
-			    size_t v69 = 8 * v1;
-			    ulm_lam_copy(v5, v64, v69);
+		    int8_t *v54 = v50;
+		    int64_t v55 = (int64_t)v12;
+		    double *v56 = (double *)(v54 + v55);
+		    int64_t v57 = (int64_t)v14;
+		    v7[v12] = v25;
+		    bool v58 =
+		        (bool)(bar(v1, v3, v4, v56, v54 + v57, v7) != v8);
+		    uint64_t v59 = (uint64_t)v58;
+		    int64_t v60 = (int64_t)v59;
+		    int64_t v61;
+		    if (v60 == v8) {
+			ptrdiff_t v62 = (ptrdiff_t)v34;
+			size_t v63 = (size_t)v62;
+			int64_t v64 = (int64_t)v63;
+			v7[v12] = v37;
+			int64_t v65 =
+			    bar(v1, v2, v56, v5, v54 + v64, v7) != v8 ? 2 : v8;
+			if (v65 == v8) {
 			    v7[v12] = v13;
 			}
-			v62 = v68;
+			v61 = v65;
 		    } else {
-			v62 = v61;
+			v61 = v60;
 		    }
-		    int64_t v70 = v62;
-		    if (v50) {
-			free(v55);
+		    int64_t v66 = v61;
+		    if (v49) {
+			free(v54);
 		    }
-		    v49 = v70;
+		    v48 = v66;
 		}
-		v48 = v49;
+		v47 = v48;
 	    }
-	    v37 = v48;
+	    v36 = v47;
 	} else {
-	    v37 = v36;
+	    v36 = v35;
 	}
-	v25 = v37;
+	v24 = v36;
     } else {
-	v25 = v24;
+	v24 = v23;
     }
-    return v25;
+    return v24;
 }

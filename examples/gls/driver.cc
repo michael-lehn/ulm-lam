@@ -3,12 +3,16 @@
 //  it.  Everything here uses ulmBLAS, row-major (strides (cols, 1)).
 //
 //  1. random X (n x m), M = A A^T + n I (spd), y
-//  2. b     = gls(X, M, y)                  -- ulm.lam's kernel sequence
+//  2. b     = gls_keep(X, M, y)             -- ulm.lam's kernel sequence
+//             (the wrapper of gls that leaves X, M, y as they are; gls
+//             itself overwrites them, LAPACK style, see 5.)
 //  3. b_inv = explicit-inverse evaluation   -- what a naive library does:
 //             inv(M), two gemms, inv(S), gemvs (getrf + getri)
 //  4. check: relative residual of the normal equations
 //            X^T M^-1 X b = X^T M^-1 y, with M^-1 applied by an independent
 //            LU solve (getrf + getrs), and ||b - b_inv|| / ||b||
+//  5. gls itself on copies (no copies of its own, smaller workspace), and
+//     gls_inout (X read only, M and y overwritten)
 //
 #include <algorithm>
 #include <chrono>
@@ -28,8 +32,11 @@
 
 extern "C" int64_t
 gls(double *X, double *M, double *y, double *b, int8_t *work,
-    int64_t *workspace_info); // generated, returns info
-//  the same with M and y {ulm_lam.inout}: they may be overwritten
+    int64_t *workspace_info); // generated, returns info; overwrites X, M, y
+extern "C" int64_t
+gls_keep(double *X, double *M, double *y, double *b, int8_t *work,
+         int64_t *workspace_info); // generated: gls on copies
+//  the same with X {ulm_lam.in}: only M and y may be overwritten
 extern "C" int64_t
 gls_inout(double *X, double *M, double *y, double *b, int8_t *work,
           int64_t *workspace_info); // generated, returns info
@@ -90,13 +97,14 @@ main()
     double tUlmLam = 1e30, tNaive = 1e30, t0;
     //  query the workspace once, allocate it, pass it to every call
     Workspace ws([&](int8_t *w, int64_t *i) {
-	gls(X.data(), M.data(), y.data(), b.data(), w, i);
+	gls_keep(X.data(), M.data(), y.data(), b.data(), w, i);
     });
     std::printf("workspace: %lld bytes\n", (long long)ws.size);
-    gls(X.data(), M.data(), y.data(), b.data(), ws.work, ws.info()); // warm-up
+    gls_keep(X.data(), M.data(), y.data(), b.data(), ws.work,
+             ws.info()); // warm-up
     for (int r = 0; r < REPS; ++r) {
 	t0 = now();
-	gls(X.data(), M.data(), y.data(), b.data(), ws.work, ws.info());
+	gls_keep(X.data(), M.data(), y.data(), b.data(), ws.work, ws.info());
 	tUlmLam = std::min(tUlmLam, now() - t0);
     }
     glsNaive(X.data(), M.data(), y.data(), bInv.data());
@@ -128,7 +136,7 @@ main()
     double diff = nrm2(bInv) / nrm2(b);
 
     std::printf("n = %d, m = %d\n", N, MM);
-    std::printf("ulm.lam kernels (ulmBLAS)  : %8.2f ms  (best of %d)\n",
+    std::printf("ulm.lam gls_keep (ulmBLAS) : %8.2f ms  (best of %d)\n",
                 1e3 * tUlmLam, REPS);
     std::printf("explicit inverses       : %8.2f ms  (speedup %.1fx)\n",
                 1e3 * tNaive, tNaive / tUlmLam);
@@ -136,13 +144,29 @@ main()
                 "||X^T M^-1 y|| = %.2e\n",
                 res);
     std::printf("||b - b_inv|| / ||b|| = %.2e\n", diff);
+    //  gls itself: X, M and y overwritten, no copies
+    std::vector<double> Xk(X), Mk(M), yk(y), bk(MM);
+    Workspace wsk([&](int8_t *w, int64_t *i) {
+	gls(Xk.data(), Mk.data(), yk.data(), bk.data(), w, i);
+    });
+    gls(Xk.data(), Mk.data(), yk.data(), bk.data(), wsk.work, wsk.info());
+    double num = 0, den = 0;
+    for (int i = 0; i < MM; ++i) {
+	num += (bk[i] - b[i]) * (bk[i] - b[i]);
+	den += b[i] * b[i];
+    }
+    double diffKernel = std::sqrt(num / den);
+    std::printf("gls (LAPACK style)     : workspace %lld bytes instead of "
+                "%lld, ||b - b_keep|| / ||b|| = %.2e, M %s\n",
+                (long long)wsk.size, (long long)ws.size, diffKernel,
+                Mk == M ? "unchanged" : "overwritten");
     //  gls_inout: M and y may be overwritten, X is read only
     std::vector<double> Mc(M), yc(y), Xc(X), b2(MM);
     Workspace ws2([&](int8_t *w, int64_t *i) {
 	gls_inout(X.data(), Mc.data(), yc.data(), b2.data(), w, i);
     });
     gls_inout(X.data(), Mc.data(), yc.data(), b2.data(), ws2.work, ws2.info());
-    double num = 0, den = 0;
+    num = 0, den = 0;
     for (int i = 0; i < MM; ++i) {
 	num += (b2[i] - b[i]) * (b2[i] - b[i]);
 	den += b[i] * b[i];
@@ -154,7 +178,7 @@ main()
                 X == Xc ? "unchanged" : "CHANGED",
                 Mc == M ? "unchanged" : "overwritten");
     bool ok = res < 1e-10 && diff < 1e-8 && diffInout < 1e-13 && X == Xc &&
-              ws2.size < ws.size;
+              ws2.size < ws.size && diffKernel < 1e-13 && wsk.size < ws2.size;
     std::printf("%s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
 }

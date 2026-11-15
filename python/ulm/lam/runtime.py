@@ -9,6 +9,12 @@ builds a shared library and returns its functions as Python callables.
 An unchanged program reuses its library as long as compiler, ulmBLAS
 and flags are unchanged (set ULM_LAM_REBUILD=1 to force a rebuild); the files are in build/python/<name>/.
 
+lib.f(...) leaves the arguments as they are: it calls the wrapper f_keep
+the compiler adds to every function f that may overwrite a matrix (copies
+in the workspace); lib.f(..., overwrite=True) calls f itself, LAPACK
+style: no copies, the matrices are overwritten.  (Arguments updated with
+lam.update are updated by both.)
+
 Calling convention, from the interface comment the compiler generates in
 front of every function:
   * in matrices: any C-contiguous float64 buffer of the right size (NumPy
@@ -213,6 +219,8 @@ def _interfaces(cpp: str) -> dict[str, list[tuple[str, str]]]:
         rows = []
         for line in m.group(2).split(" * returns info:")[0].splitlines():
             parts = line.lstrip(" *").split()
+            if not parts or not re.fullmatch(r"v\d+", parts[0]):
+                continue  # (a description continued)
             # v1  double[2000][200]  in  read only  |  v5  int8_t *  work ...
             ctype = parts[1] + (" *" if len(parts) > 2 and parts[2] == "*"
                                 else "")
@@ -652,9 +660,15 @@ class Library:
         self._tls = threading.local()
         self.functions = {}
         for name, rows in ifaces.items():
-            f = CompiledFunction(self, name, rows, functions.get(name))
+            fn = functions.get(name)
+            if fn is None and name.endswith("_keep"):
+                fn = functions.get(name[:-len("_keep")])  # its wrapper
+            f = CompiledFunction(self, name, rows, fn)
             self.functions[name] = f
             setattr(self, name, f)
+        # lib.f(...) calls the wrapper f_keep, if f has one
+        for name, f in self.functions.items():
+            f.keep = self.functions.get(name + "_keep")
 
 
     def _thread_state(self):
@@ -816,6 +830,7 @@ class CompiledFunction:
         self._c.restype = ctypes.c_int64  # info, as LAPACK
         self._codes = _info_codes(lib.source).get(name, {})
         self._ws = {}
+        self.keep = None  # the wrapper f_keep (set by Library)
         self.has_workspace = bool(rows) and rows[-1][1] == "info"
         # run-time sizes: the leading size_t parameters
         self.sizes = list(fn.sizes) if fn else []
@@ -868,8 +883,10 @@ class CompiledFunction:
                 lines.append(f"  {'':<10} {t:<22} {intent}")
         return "\n".join(lines)
 
-    def workspace_size(self, *args) -> int:
+    def workspace_size(self, *args, overwrite=False) -> int:
         """The workspace this call needs (bytes)."""
+        if self.keep is not None and not overwrite:
+            return self.keep.workspace_size(*args)
         if not self.has_workspace:  # (it takes no work, info parameters)
             return 0
         env = self._sizes(args)
@@ -934,10 +951,15 @@ class CompiledFunction:
         # the caller keeps `keep` alive while C uses the pointers
         return cargs, outs, keep
 
-    def __call__(self, *args, work=None):
+    def __call__(self, *args, work=None, overwrite=False):
         """Call the function.  work: a Workspace (or a writable int8 NumPy
         array) for its temporaries; by default the library's workspace,
-        which grows as needed and is reused by later calls."""
+        which grows as needed and is reused by later calls.  overwrite:
+        call f itself, which may overwrite its matrix arguments (LAPACK
+        style), instead of the wrapper f_keep, which leaves them as they
+        are."""
+        if self.keep is not None and not overwrite:
+            return self.keep(*args, work=work)
         cargs, outs, keep = self._arguments(args)
         st = self.lib._thread_state()
         borrowed = False

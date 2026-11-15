@@ -8,7 +8,9 @@
 //  spd.  observe(i, y) and record(i, b) as in driver.cc.  Compared with
 //  formula (1) evaluated with explicit inverses in every step (getrf +
 //  getri) on the same covariances; every estimate is checked through the
-//  normal equations H^T R_i^-1 (H b_i - y_i) = 0 with an LU solve.
+//  normal equations H^T R_i^-1 (H b_i - y_i) = 0 with an LU solve.  The
+//  driver calls the wrapper estimate_adaptive_keep, which leaves H and R0
+//  as they are (estimate_adaptive itself updates R in R0's buffer).
 //
 #include <algorithm>
 #include <chrono>
@@ -28,8 +30,8 @@ constexpr int N = 2000, M = 200, STEPS = 10;
 
 extern "C" {
 int64_t
-estimate_adaptive(double *H, double *R0, size_t n, int8_t *work,
-                  int64_t *workspace_info); // generated, returns info
+estimate_adaptive_keep(double *H, double *R0, size_t n, int8_t *work,
+                       int64_t *workspace_info); // generated, returns info
 void
 update_covariance(size_t i, double *R);
 void
@@ -121,13 +123,13 @@ main()
 
     std::vector<double> R0copy(R0);
     Workspace ws([&](int8_t *w, int64_t *i) {
-	estimate_adaptive(H.data(), R0.data(), 0, w, i);
+	estimate_adaptive_keep(H.data(), R0.data(), 0, w, i);
     });
     std::printf("workspace: %lld bytes\n", (long long)ws.size);
-    estimate_adaptive(H.data(), R0.data(), STEPS, ws.work,
-                      ws.info()); // warm-up
+    estimate_adaptive_keep(H.data(), R0.data(), STEPS, ws.work,
+                           ws.info()); // warm-up
     double t0 = now();
-    estimate_adaptive(H.data(), R0.data(), STEPS, ws.work, ws.info());
+    estimate_adaptive_keep(H.data(), R0.data(), STEPS, ws.work, ws.info());
     double tUlmLam = now() - t0;
     std::vector<double> bUlmLam(recorded);
     bool unchanged = R0 == R0copy;

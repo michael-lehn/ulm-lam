@@ -295,7 +295,10 @@ hand:
   \item no memory is allocated dynamically, not even inside nested
         calls: all temporaries live in one workspace with a LAPACK-style
         size query, kernels work in place where an input is no longer
-        needed, and errors are returned as LAPACK's \code{info}.
+        needed, and errors are returned as LAPACK's \code{info};
+  \item the result is a LAPACK routine: it may overwrite the matrices it
+        receives, and a wrapper that leaves them alone comes with it
+        (ulm.lam is to BLAS and LAPACK what C is to assembly).
 \end{itemize}
 In short: it generates the code a programmer experienced in numerical
 linear algebra would write on top of BLAS and LAPACK.
@@ -310,26 +313,31 @@ $(K + \sigma^2 I)\inv = L\invT L\inv$, so
 \]
 One factorisation serves both results, no inverse is formed, and $V\T V$
 is symmetric, so only one triangle is computed.
-As calls (all temporaries in the workspace $w$):
+As calls, LAPACK style: like a LAPACK routine, \code{gp} may overwrite
+the matrices it receives, so it works in them instead of in copies:
 \begin{center}
 \small
 \begin{tabular}{@{}lll@{}}
 \toprule
 & operation & kernel \\
 \midrule
-1 & $W \leftarrow K$, \ $W \leftarrow W + \sigma^2 I$ & copy, \code{adddiag} \\
-2 & $W = L L\T$ ($L$ overwrites $W$); if it fails: return \code{info} 1 & \code{potrf} \\
-3 & $a \leftarrow y$, \ $a \leftarrow L\inv a$, \ $a \leftarrow L\invT a$ & copy, \code{trsv}, \code{trsv} \\
-4 & $\mu \leftarrow K_*\T a$ & \code{gemv} \\
-5 & $V \leftarrow K_*$, \ $V \leftarrow L\inv V$ & copy, \code{trsm} \\
+1 & $K \leftarrow K + \sigma^2 I$ & \code{adddiag} \\
+2 & $K = L L\T$ ($L$ overwrites $K$); if it fails: return \code{info} 1 & \code{potrf} \\
+3 & $y \leftarrow L\inv y$, \ $y \leftarrow L\invT y$ (now $y = \alpha$) & \code{trsv}, \code{trsv} \\
+4 & $\mu \leftarrow K_*\T y$ & \code{gemv} \\
+5 & $K_* \leftarrow L\inv K_*$ (now $K_* = V$) & \code{trsm} \\
 6 & $\Sigma \leftarrow K_{**}$, \ $\Sigma \leftarrow \Sigma - V\T V$ (lower triangle), mirror it & copy, \code{syrk}, complete \\
 \bottomrule
 \end{tabular}
 \end{center}
 \noindent
-The copies exist because $K$, $K_*$ and $K_{**}$ are \code{in}
-parameters, which the function must not overwrite; declared
-\code{InOut}, $K$ is factorised in place (\cref{sec:gpcluster}).
+The only copy is $K_{**}$ into the result $\Sigma$.
+ulm.lam generates with \code{gp} the wrapper \code{gp_keep}, which copies
+$K$, $K_*$ and $y$ into its workspace and calls \code{gp}; from Python,
+\code{lib.gp(...)} calls \code{gp_keep}, and \code{lib.gp(...,
+overwrite=True)} calls \code{gp} itself (\cref{sec:ulmblas}): at
+$n = 100\,000$, $K$ has 80\,GB, and a copy is out of the question
+(\cref{sec:gpcluster}).
 \Cref{lst:gpcpp} is the C++ that ulm.lam generates from the five lines of
 Python.
 
@@ -1311,19 +1319,23 @@ All 44 Python tests pass with both backends.
   \item Functions are \code{extern "C"}: C code calls the generated C++,
         and the generated C++ calls C functions.
 \end{itemize}
-\paragraph{Parameter intents.}
+\paragraph{Parameter intents: portable BLAS/LAPACK.}
+ulm.lam is to BLAS and LAPACK what C is to assembly: a portable way to
+write them, and a generated function is a LAPACK routine.
 LAPACK routines commonly overwrite the matrices they receive; the caller
 learns it from the documentation (``on exit, A is destroyed'').
-In ulm.lam the parameter list says it:
+In ulm.lam the parameter list says it, and as in LAPACK, overwriting is
+the default:
 \begin{itemize}
-  \item \code{\{ulm_lam.in\}} (the default for matrix arguments): read only.
-        If a kernel would overwrite the matrix, the function works on a
-        copy, which lives in its workspace.
-  \item \code{\{ulm_lam.inout\}}: the function may overwrite the matrix and
-        use it as workspace.
+  \item \code{\{ulm_lam.inout\}} (the default for matrix arguments): the
+        function may overwrite the matrix and use it as workspace, so
+        that it needs no copy of it.
         If a result is marked \code{\{ulm_lam.inout = k\}}, argument $k$ holds
         that result on exit (the loop example updates $X$ this way);
         otherwise its contents on exit are unspecified.
+  \item \code{\{ulm_lam.in\}} (\code{In(...)} in the frontends): read only.
+        If a kernel would overwrite the matrix, the function works on a
+        copy, which lives in its workspace.
   \item \code{\{ulm_lam.out\}} (the default for results): an out parameter;
         the caller provides the buffer, the function writes it and also
         computes in it (\code{gemv} and the triangular solves of GLS work
@@ -1333,12 +1345,40 @@ In ulm.lam the parameter list says it:
 attributes (\code{in} arguments are not writable, \code{inout}
 arguments are), so One-Shot Bufferize decides copies and in-place updates
 accordingly.
-\file{examples/gls/gls_inout.mlir} is GLS with $M$ and $y$ declared
-\code{inout}: the Cholesky factorisation of $M$ and the solve with $y$
-work on the caller's matrices, only $X$ (\code{in}) is copied for the
-in-place solve $W=L\inv X$, and the workspace shrinks from 35.5\,MB to
+
+\paragraph{The wrapper \code{f_keep}.}
+For a caller that still needs its matrices,
+\code{ulm-lam-results-to-out-params} adds to every public function
+\code{f} with a matrix it may overwrite (and does not update) the wrapper
+\code{f_keep}, MATLAB style: the same parameters, those matrices
+\code{in}, and a call of \code{f}.
+Bufferization does the rest: \code{f_keep} copies into its workspace
+exactly the matrices \code{f} writes, passes \code{f} the remaining part
+of its workspace, and lets \code{f} write its results directly into the
+caller's buffers; a matrix \code{f} updates (\code{\{ulm_lam.inout =
+k\}}) is updated by \code{f_keep} as well.
+\code{ulm-lam-info} gives \code{f_keep} the \code{info} codes of \code{f}
+(it passes \code{f}'s \code{info} on), so a failure is described as in
+\code{f}.
+The frontends call \code{f_keep}: \code{gls(X, M, y)} in Julia and
+\code{lib.gls(X, M, y)} in Python leave the arrays as they are;
+\code{overwrite=true} (Python: \code{overwrite=True}) calls \code{f}
+itself.
+For GLS ($n = 2000$, $m = 200$) \code{gls} needs 320\,KB of workspace, the
+Cholesky factor of $S$: $L$ is computed in $M$, $W = L\inv X$ in $X$,
+$L\inv y$ in $y$; \code{gls_keep} needs 35.5\,MB, for the copies of $M$,
+$X$ and $y$.
+\file{examples/gls/gls_inout.mlir} declares $X$ \code{in}: only $X$ is
+copied (for the in-place solve $W=L\inv X$), and the workspace is
 3.5\,MB.
-The result is bit-identical to that of \code{gls}.
+All three results are bit-identical.
+
+A remark on the emitted C++: the call of \code{f} in \code{f_keep} must
+stay before the \code{free} of a workspace \code{f_keep} allocated
+itself (\code{*workspace_info = 0}).
+MLIR's C++ emitter inlines an \code{emitc.expression} at the use of its
+result, here after the \code{free}; \code{ulm-lam-call-statements} marks
+every expression that calls a function \code{do_not_inline}.
 
 Because the caller has to know the intents, the generated code states
 them: every public function is preceded by a comment generated from its
@@ -1808,11 +1848,15 @@ mlir-opt --load-dialect-plugin=UlmLamPasses.dylib \
     func.func(buffer-loop-hoisting), buffer-deallocation-pipeline,
     canonicalize, ulm-lam-workspace, canonicalize, cse,
     ulm-lam-info, canonicalize,
-    convert-ulm-lamk-to-ulmblas, reconcile-unrealized-casts, form-expressions)'
+    convert-ulm-lamk-to-ulmblas, reconcile-unrealized-casts, form-expressions,
+    ulm-lam-call-statements)' --mlir-print-op-generic -o gls.emitc.mlir gls.mlir
 mlir-translate --mlir-to-cpp gls.emitc.mlir -o gls.cpp
 clang-format -i gls.cpp
 c++ -std=c++17 -O3 -mcpu=native -isystem $ULMBLAS_DIR -c gls.cpp
 \end{lstlisting}
+(The generic form \code{--mlir-print-op-generic} keeps the
+\code{do_not_inline} of \code{ulm-lam-call-statements}: the custom form of
+\code{emitc.expression} drops it.)
 \code{ARCHFLAGS} (default \code{-mcpu=native}) selects the micro kernels of
 ulmBLAS, e.g.\ \code{-mcpu=apple-m4} or \code{-mavx -mfma}.
 
@@ -1877,7 +1921,9 @@ $1.78\cdot10^{10}$ FLOPs.}
 
 \paragraph{Stage 4: bufferized (design).}
 Bufferization inserts exactly three copies, one for each overwritten
-input.
+input (the design, with read-only parameters; the generated \code{gls}
+works in its parameters, and its wrapper \code{gls_keep} makes these
+three copies, \cref{sec:ulmblas}).
 $c$, $d$ and $b$ share the result buffer.
 \lstinputlisting{\src examples/gls/04-bufferized.mlir}
 
@@ -1887,8 +1933,10 @@ $c$, $d$ and $b$ share the result buffer.
 \Cref{lst:glssel} shows the kernels that \code{ulm-lam-select-kernels}
 chooses, \cref{lst:glscpp} the C++ after bufferization and
 \code{convert-ulm-lamk-to-ulmblas}.
-Bufferization copies exactly $M$, $X$ and $y$, the inputs that kernels
-overwrite, and $b$ is written into the caller's buffer.
+\code{gls} works in $M$, $X$ and $y$ (it may overwrite them, as a LAPACK
+routine), and $b$ is written into the caller's buffer; the generated
+wrapper \code{gls_keep} copies exactly $M$, $X$ and $y$, the inputs that
+kernels overwrite, and calls \code{gls}.
 In the C++, the solve with $K\T$ is \code{ulmBLAS::trusv} on the same
 factor $K$ with strides $(1, 200)$, and $W\T$ is the same pointer as $W$
 with strides $(1, 200)$, in the \code{gemm} for $W\T W$ and in the
@@ -2135,9 +2183,9 @@ Kernel selection still shares the factorisation of $R_i$ between both
 occurrences of $R_i\inv$ and reuses $W$ for $H\T R_i\inv y_i$
 (\cref{lst:adaptiveloop}).
 Bufferization copies $R_i$ before the in-place factorisation and $H$
-before the in-place solve; the caller's $R_0$
-is copied once, before the loop, into the workspace and is not
-overwritten.
+before the in-place solve; $R$ is updated in the caller's $R_0$, which
+\code{estimate_adaptive} may overwrite (the wrapper
+\code{estimate_adaptive_keep} copies $R_0$ once, into its workspace).
 There is no allocation inside the loop.
 
 The two copies are necessary with in-place kernels.
@@ -2221,13 +2269,15 @@ a number times a matrix is \code{ulm_lam.scale}, \code{.T} is
         a Python callback gets its own.
         Intermediate results get their properties from
         \code{ulm-lam-infer-properties}.
-  \item Parameters have intents: a matrix is \code{in} by default;
-        \code{InOut(Matrix(...))} may be overwritten, and with
-        \code{lam.update(param, value)} it holds \code{value} on exit (in
-        Julia \code{InOut(Mat(...))} and \code{update!(param, value)});
-        a call of such a function from another one returns the new values
-        after its results (\cref{sec:calls-lapack}).
+  \item Parameters have intents: as in LAPACK, a matrix may be
+        overwritten by default (\code{inout}); \code{In(Matrix(...))} is
+        read only; with \code{lam.update(param, value)} a parameter holds
+        \code{value} on exit (in Julia \code{In(Mat(...))} and
+        \code{update!(param, value)}); a call of such a function from
+        another one returns the new values after its results
+        (\cref{sec:calls-lapack}).
         Return values are \code{out}.
+        \code{InOut(...)} says the default explicitly.
   \item \code{Float} parameters are scalars known only at run time; they
         scale matrices (\code{s2 * A}).  \code{lam.eye(n)} is the
         identity ($n$ a number or a size name), never formed: a term
@@ -2261,13 +2311,17 @@ An unchanged program reuses its library, so recompiling is only needed
 after a change.
 Each function of the library is a Python callable whose signature comes
 from the interface comment the compiler generates
-(\cref{sec:workspace}):
+(\cref{sec:workspace}).
+\code{lib.f(...)} calls the wrapper \code{f_keep} (\cref{sec:ulmblas}),
+which leaves the arrays as they are; \code{lib.f(..., overwrite=True)}
+calls \code{f} itself, LAPACK style:
 \begin{itemize}
   \item \code{in} matrices are any C-contiguous \code{float64} buffer of
         the right size (NumPy arrays, \code{array.array}, nested lists);
         other layouts are copied;
-  \item \code{inout} matrices must be writable and C-contiguous, because
-        the function may overwrite them;
+  \item \code{inout} matrices (of \code{f} itself, or updated ones) must
+        be writable and C-contiguous, because the function may overwrite
+        them;
   \item \code{out} matrices are allocated by the runtime and returned
         (NumPy arrays if NumPy is installed);
   \item the workspace is queried (\code{workspace_info = -1}) and
@@ -2356,8 +2410,8 @@ ulm.lam is $1.6\times$ faster than the hand-written NumPy version
 (Cholesky instead of LU, and $W=L_i\inv H$ reused for $H\T R_i\inv y_i$)
 and $4.6\times$ faster than the formula as written.
 All three times include the Python callback that updates $R$ ($O(n^2)$
-per step), and the caller's $R_0$ (an \code{in} parameter) is not
-overwritten.
+per step), and the caller's $R_0$ is not overwritten (\code{lib.f(...)}
+calls the wrapper \code{f_keep}, which copies it).
 
 % =====================================================================
 \section{Julia frontend}\label{sec:julia}
@@ -2385,9 +2439,13 @@ b = gls(X, M, y)                # Julia arrays; compiled at the first call
 \code{X'}, \code{inv}, \code{A \textbackslash{} B}, \code{B / A},
 \code{I} from \code{LinearAlgebra}, \code{assume}, \code{loop} (a
 do-block, with loop-carried matrices as its further arguments and
-results), \code{extern} with callbacks bound by \code{bind!}, \code{InOut},
-\code{Float} and \code{Index} parameters, sizes as symbols, the workspace,
-\code{InfoError} and both backends work as in Python.
+results), \code{extern} with callbacks bound by \code{bind!}, \code{In}
+(read only), \code{update!}, \code{Float} and \code{Index} parameters,
+sizes as symbols, the workspace, \code{InfoError} and both backends work
+as in Python.
+\code{gls(X, M, y)} calls the wrapper \code{gls_keep} and leaves the
+arrays as they are; \code{gls(X, M, y; overwrite=true)} calls \code{gls}
+itself (\cref{sec:ulmblas}).
 
 \paragraph{Column-major arrays without copies.}
 Julia stores matrices by columns, the generated code by rows.
@@ -2483,7 +2541,8 @@ The frontend divides by run-time scalars ($x / a$, $a \backslash x$).
 run-time sizes, solves from the left and from the right (Cholesky and
 LU), a chain chosen at run time, two results, a loop with callbacks, a
 loop-carried matrix, GP with \code{s2 * I} and a wrong assumption
-(\code{InfoError}), \code{InOut}, a given workspace and argument errors,
+(\code{InfoError}), parameters overwritten (\code{overwrite=true}) or
+left alone, a given workspace and argument errors,
 on Julia's BLAS, on ulmBLAS and on OpenBLAS (\code{backend=:cblas}),
 and \code{@code_lam}.
 \file{julia/examples/gp.jl} and \file{julia/examples/kalman.jl} are the
@@ -2498,20 +2557,24 @@ operator formed by hand).
 
 How to write functions that call functions is a matter of style, and
 ulm.lam takes LAPACK's.
-The functions that do the work are written \emph{LAPACK style}: a matrix
-that may be overwritten is an \code{inout} parameter, a result is written
-into a parameter where one is free for it (as \code{potrs} overwrites the
+The functions that do the work are \emph{LAPACK style}: a matrix may be
+overwritten (\code{inout}, the default), a result is written into a
+parameter where one is free for it (as \code{potrs} overwrites the
 right-hand side with the solution), and so the workspace is minimal,
 often none at all.
 Coming from numerical linear algebra, that is the default.
-Who wants it convenient instead, \emph{MATLAB style}, writes a wrapper:
-\code{foo_matlab} has \code{in} parameters only and calls \code{foo!};
-the copies that this needs, and the workspace for them, are in the
-wrapper only, and the LAPACK-style function stays as lean as it was.
+Who wants it convenient instead, \emph{MATLAB style}, calls a wrapper: the
+compiler generates \code{foo_keep} for every \code{foo}
+(\cref{sec:ulmblas}), and a wrapper written by hand, such as
+\code{foo_matlab} below, has \code{in} parameters only and calls
+\code{foo!}; the copies that this needs, and the workspace for them, are
+in the wrapper only, and the LAPACK-style function stays as lean as it
+was.
 User-friendly but less efficient is then a choice of the caller, not
 something every function in the call tree pays for.
 \Cref{sec:calls-lapack} is this example; the two after it show what the
-compiler does when functions are not written that way.
+compiler does when functions are written MATLAB style throughout
+(\code{In(...)} parameters).
 
 
 A ulm.lam function can call another one, from Python and from Julia: the
@@ -2541,46 +2604,49 @@ or thread and reuses it (or takes one given with \code{work=}).
 with a symmetric positive definite matrix, twice.
 LAPACK style, \code{bar!} factorises $M$ in place and overwrites $y$ with
 the solution, as \code{potrf} and \code{potrs} do, and so does
-\code{foo!}, by calling \code{bar!}: $M$, $N$ and $y$ are \code{inout},
-\code{update!(y, value)} says that $y$ holds \code{value} on exit, and a
-call of a function that updates a parameter returns its new value.
-\code{foo_matlab} is the wrapper with read-only parameters
-(\file{examples/calls}).
+\code{foo!}, by calling \code{bar!}: $M$, $N$ and $y$ are \code{inout}
+(the default), \code{update!(y, value)} says that $y$ holds \code{value}
+on exit, and a call of a function that updates a parameter returns its new
+value.
+\code{foo_matlab} is a wrapper with read-only parameters that returns the
+solution (\file{examples/calls}); the generated \code{foo__keep} keeps $M$
+and $N$ and updates $y$.
 In Julia:
 \begin{lstlisting}[style=py]
-@lam bar!(M::InOut(Mat(:n, :n, :spd)), y::InOut(Vec(:n))) = update!(y, M \ y)
-@lam foo!(M::InOut(Mat(:n, :n, :spd)), N::InOut(Mat(:n, :n, :spd)), y::InOut(Vec(:n))) =
+@lam bar!(M::Mat(:n, :n, :spd), y::Vec(:n)) = update!(y, M \ y)
+@lam foo!(M::Mat(:n, :n, :spd), N::Mat(:n, :n, :spd), y::Vec(:n)) =
     update!(y, bar!(M, bar!(N, y)))
-@lam foo_matlab(M::Mat(:n, :n, :spd), N::Mat(:n, :n, :spd), y::Vec(:n)) = foo!(M, N, y)
+@lam foo_matlab(M::In(Mat(:n, :n, :spd)), N::In(Mat(:n, :n, :spd)), y::In(Vec(:n))) =
+    foo!(M, N, y)
 
 lib = UlmLAM.compile([foo_matlab]; name="calls_lapack_jl")   # and foo!, bar!
 M1, N1, y1 = copy(M), copy(N), copy(y)
-lib.foo!(M1, N1, y1)                # y1 is the solution now
+lib.foo!(M1, N1, y1; overwrite=true)   # y1 is the solution now
 x = lib.foo_matlab(M, N, y)
 \end{lstlisting}
 and in Python, with \code{lam.update} (Python names have no \code{!};
 \code{foo!} is \code{foo_} in the IR and in C, in both frontends):
 \begin{lstlisting}[style=py]
 @lam.function
-def bar_(M: InOut(Matrix("n", "n", "spd")), y: InOut(Vector("n"))):
+def bar_(M: Matrix("n", "n", "spd"), y: Vector("n")):
     lam.update(y, M.inv @ y)
 
 
 @lam.function
-def foo_(M: InOut(Matrix("n", "n", "spd")), N: InOut(Matrix("n", "n", "spd")),
-         y: InOut(Vector("n"))):
+def foo_(M: Matrix("n", "n", "spd"), N: Matrix("n", "n", "spd"),
+         y: Vector("n")):
     lam.update(y, bar_(M, bar_(N, y)))
 
 
 @lam.function
-def foo_matlab(M: Matrix("n", "n", "spd"), N: Matrix("n", "n", "spd"),
-               y: Vector("n")):
+def foo_matlab(M: In(Matrix("n", "n", "spd")), N: In(Matrix("n", "n", "spd")),
+               y: In(Vector("n"))):
     return foo_(M, N, y)
 
 
 lib = lam.compile([foo_matlab], name="calls_lapack_py")   # and foo_, bar_
 M1, N1, y1 = M.copy(), N.copy(), y.copy()
-lib.foo_(M1, N1, y1)                 # y1 is the solution now
+lib.foo_(M1, N1, y1, overwrite=True)  # y1 is the solution now
 x = lib.foo_matlab(M, N, y)
 \end{lstlisting}
 Both give the same IR after normalisation.
@@ -2777,29 +2843,31 @@ parameters, only the matrices, which they overwrite, and the
 \subsection{Example: \code{foo} calls \code{bar}, and \code{bar} needs a
 workspace}
 
-Written differently, MATLAB style throughout, the same computation costs
-memory at every level.
+Written differently, MATLAB style throughout (every parameter
+\code{In(...)}, read only), the same computation costs memory at every
+level.
 
 Here \code{bar} must not overwrite $M$: its Cholesky factor needs a copy
 of $M$, $n^2$ numbers of workspace.
 \code{foo} calls \code{bar} twice, $M\inv(N\inv y)$.
 In Julia:
 \begin{lstlisting}[style=py]
-@lam bar(M::Mat(:n, :n, :spd), y::Vec(:n)) = M \ y
-@lam foo(M::Mat(:n, :n, :spd), N::Mat(:n, :n, :spd), y::Vec(:n)) = bar(M, bar(N, y))
+@lam bar(M::In(Mat(:n, :n, :spd)), y::In(Vec(:n))) = M \ y
+@lam foo(M::In(Mat(:n, :n, :spd)), N::In(Mat(:n, :n, :spd)), y::In(Vec(:n))) =
+    bar(M, bar(N, y))
 
 x = foo(M, N, y)                  # compiled at the first call, bar with it
 \end{lstlisting}
 and the same in Python:
 \begin{lstlisting}[style=py]
 @lam.function
-def bar(M: Matrix("n", "n", "spd"), y: Vector("n")):
+def bar(M: In(Matrix("n", "n", "spd")), y: In(Vector("n"))):
     return M.inv @ y
 
 
 @lam.function
-def foo(M: Matrix("n", "n", "spd"), N: Matrix("n", "n", "spd"),
-        y: Vector("n")):
+def foo(M: In(Matrix("n", "n", "spd")), N: In(Matrix("n", "n", "spd")),
+        y: In(Vector("n"))):
     return bar(M, bar(N, y))
 
 lib = lam.compile(foo)            # foo, and bar, which it calls
@@ -3059,35 +3127,35 @@ then copied into the result \code{v5}, instead of into \code{v5} itself.
 
 \subsection{Example: \code{bar} may overwrite $M$}
 
-If \code{bar} declares $M$ as \code{inout}, it may overwrite it: it
-factorises $M$ in place and needs no workspace at all.
+If \code{bar} leaves $M$ \code{inout} (the default), it may overwrite
+it: it factorises $M$ in place and needs no workspace at all.
 Whoever calls it must then pass a matrix that may be overwritten: \code{foo2},
-whose $M$ and $N$ are only read, passes copies of them, which live in its
-own workspace, and \code{foo3}, which declares $M$ and $N$ \code{inout} as
+whose $M$ and $N$ are read only, passes copies of them, which live in its
+own workspace, and \code{foo3}, whose $M$ and $N$ are \code{inout} as
 well, passes them on.
 In Julia:
 \begin{lstlisting}[style=py]
-@lam bar2(M::InOut(Mat(:n, :n, :spd)), y::Vec(:n)) = M \ y
-@lam foo2(M::Mat(:n, :n, :spd), N::Mat(:n, :n, :spd), y::Vec(:n)) = bar2(M, bar2(N, y))
-@lam foo3(M::InOut(Mat(:n, :n, :spd)), N::InOut(Mat(:n, :n, :spd)), y::Vec(:n)) =
+@lam bar2(M::Mat(:n, :n, :spd), y::In(Vec(:n))) = M \ y
+@lam foo2(M::In(Mat(:n, :n, :spd)), N::In(Mat(:n, :n, :spd)), y::In(Vec(:n))) =
     bar2(M, bar2(N, y))
+@lam foo3(M::Mat(:n, :n, :spd), N::Mat(:n, :n, :spd), y::In(Vec(:n))) = bar2(M, bar2(N, y))
 \end{lstlisting}
 and in Python:
 \begin{lstlisting}[style=py]
 @lam.function
-def bar2(M: InOut(Matrix("n", "n", "spd")), y: Vector("n")):
+def bar2(M: Matrix("n", "n", "spd"), y: In(Vector("n"))):
     return M.inv @ y
 
 
 @lam.function
-def foo2(M: Matrix("n", "n", "spd"), N: Matrix("n", "n", "spd"),
-         y: Vector("n")):
+def foo2(M: In(Matrix("n", "n", "spd")), N: In(Matrix("n", "n", "spd")),
+         y: In(Vector("n"))):
     return bar2(M, bar2(N, y))
 
 
 @lam.function
-def foo3(M: InOut(Matrix("n", "n", "spd")), N: InOut(Matrix("n", "n", "spd")),
-         y: Vector("n")):
+def foo3(M: Matrix("n", "n", "spd"), N: Matrix("n", "n", "spd"),
+         y: In(Vector("n"))):
     return bar2(M, bar2(N, y))
 \end{lstlisting}
 The IR (the same from both after normalisation) differs only in the
@@ -3794,13 +3862,16 @@ halve the second product.
         \code{ulm-lam-select-kernels} with \code{strategy=gmc} including
         inverses, factorisations, solves, $Z\T Z$ and sums
         (\cref{sec:impl}), and \code{ulm-lam-strip-properties};
-  \item parameter intents \code{in}, \code{inout}, \code{out}, and a
-        generated comment that documents them for the caller;
+  \item parameter intents \code{inout} (the default, as in LAPACK),
+        \code{in}, \code{out}, and a generated comment that documents
+        them for the caller; for every function \code{f} that may
+        overwrite a matrix, the wrapper \code{f_keep} that leaves it
+        alone (\code{info} passed on);
   \item \code{ulm-lam-results-to-out-params}: matrices by reference, the
         caller owns them ($X=\mathrm{foo}(i)$ becomes
         $\mathrm{foo}(i,X)$, in/out results are updated in place, also by
-        external functions via \code{ulm_lamk.call}, inputs passed by value
-        are read-only);
+        external functions via \code{ulm_lamk.call}, \code{in} parameters
+        are read-only, \code{f_keep} wrappers);
   \item \code{ulm-lam-workspace}: temporaries from a caller-provided
         workspace (query, allocate, or check), with queries accumulated over
         calls of generated and external functions;
@@ -3878,7 +3949,7 @@ In the generated code that means:
 \toprule
 & Linnea & ulm.lam \\
 \midrule
-inputs & overwritten as needed: after GLS the caller's $M$, $X$ and $y$ hold factors and solutions, after a Kalman step $F$, $P$, $Q$, $R$, $z$ are destroyed & \code{in}: never written (copied if a kernel must overwrite); \code{inout}: may be overwritten \\
+inputs & overwritten as needed: after GLS the caller's $M$, $X$ and $y$ hold factors and solutions, after a Kalman step $F$, $P$, $Q$, $R$, $z$ are destroyed & as in LAPACK: \code{inout} (the default) may be overwritten; \code{in} never written (copied if a kernel must overwrite); the wrapper \code{f_keep} leaves all inputs alone \\
 temporaries & \code{Array\{Float64\}(undef, ...)} in every call (GC) & one workspace, with a LAPACK-style size query; given by the caller or allocated once \\
 reuse & memory locations with liveness: a result overwrites a dead operand & bufferization's in-place analysis; workspace layout by liveness, branches overlap \\
 identity, zero & formed as arrays when a kernel needs them as input (the $C$ of syrk) & never formed (adddiag) \\

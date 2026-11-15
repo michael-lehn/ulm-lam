@@ -132,138 +132,131 @@ function lam_foo(a1, a2, a3, a4, a5, a6, a7)
     v69 = v48 * v66
     v70 = v69 + v65
     v71 = v70 & v64
-    v72 = v71 + v71
+    v72 = Int64(v71)
     v73 = Int64(v72)
-    v74 = Int64(v73)
-    v75 = Int64(v63)
-    v76 = K.at(v53, v75)
-    v77 = Ptr{Float64}(v76)
-    v78 = Int64(v62)
-    v79 = K.at(v53, v78)
-    v80 = Ptr{Float64}(v79)
-    v81 = Int64(v61)
-    v82 = K.at(v53, v81)
-    v83 = Ptr{Float64}(v82)
+    v74 = Int64(v63)
+    v75 = K.at(v53, v74)
+    v76 = Ptr{Float64}(v75)
+    v77 = Int64(v62)
+    v78 = K.at(v53, v77)
+    v79 = Ptr{Float64}(v78)
+    v80 = Int64(v61)
+    v81 = K.at(v53, v80)
+    v82 = Ptr{Float64}(v81)
     unsafe_store!(v54, v60, v67 + 1)
-    v84 = lam_bar(v48, v77, v80, v83, v53, v54)
-    v85 = v84 == v57
-    v86 = zero(Int64)
-    if v85
-        v87 = unsafe_load(v54, v67 + 1)
-        v88 = Int64(v87)
-        v89 = Int64(v59)
-        v90 = v88 + v89
+    v83 = lam_bar(v48, v76, v79, v82, v53, v54)
+    v84 = v83 == v57
+    v85 = zero(Int64)
+    if v84
+        v86 = unsafe_load(v54, v67 + 1)
+        v87 = Int64(v86)
+        v88 = Int64(v59)
+        v89 = v87 + v88
+        v90 = Int64(v89)
         v91 = Int64(v90)
-        v92 = Int64(v91)
-        v93 = Int64(v58)
-        v94 = v92 & v93
-        v95 = Int64(v94)
-        v96 = Int64(v74)
-        v97 = Int64(v95)
-        v98 = v96 + v97
-        v99 = Int64(v98)
+        v92 = Int64(v58)
+        v93 = v91 & v92
+        v94 = Int64(v93)
+        v95 = Int64(v73)
+        v96 = Int64(v94)
+        v97 = v95 + v96
+        v98 = Int64(v97)
         unsafe_store!(v54, v60, v67 + 1)
-        v100 = lam_bar(v48, v77, v80, v83, v53, v54)
-        v101 = v100 == v57
-        v102 = zero(Int64)
-        if v101
-            v103 = unsafe_load(v54, v67 + 1)
-            v104 = Int64(v103)
-            v105 = Int64(v59)
-            v106 = v104 + v105
+        v99 = lam_bar(v48, v76, v79, v82, v53, v54)
+        v100 = v99 == v57
+        v101 = zero(Int64)
+        if v100
+            v102 = unsafe_load(v54, v67 + 1)
+            v103 = Int64(v102)
+            v104 = Int64(v59)
+            v105 = v103 + v104
+            v106 = Int64(v105)
             v107 = Int64(v106)
-            v108 = Int64(v107)
-            v109 = Int64(v58)
-            v110 = v108 & v109
-            v111 = Int64(v110)
-            v112 = Int64(v99)
-            v113 = Int64(v111)
-            v114 = v112 + v113
-            v115 = Int64(v114)
+            v108 = Int64(v58)
+            v109 = v107 & v108
+            v110 = Int64(v109)
+            v111 = Int64(v98)
+            v112 = Int64(v110)
+            v113 = v111 + v112
+            v114 = Int64(v113)
             unsafe_store!(v54, v68, v67 + 1)
-            v116 = v68 == v60
-            v117 = zero(Int64)
-            if v116
-                unsafe_store!(v54, v115, v67 + 1)
-                v117 = v57
+            v115 = v68 == v60
+            v116 = zero(Int64)
+            if v115
+                unsafe_store!(v54, v114, v67 + 1)
+                v116 = v57
             else
-                v118 = v68 > v57
-                v119 = v68 < v115
-                v120 = v118 & v119
-                v121 = zero(Int64)
-                if v120
-                    v121 = v56
+                v117 = v68 > v57
+                v118 = v68 < v114
+                v119 = v117 & v118
+                v120 = zero(Int64)
+                if v119
+                    v120 = v56
                 else
-                    v122 = v68 == v57
-                    v123 = Ptr{Int8}(C_NULL)
-                    if v122
-                        v124 = Int64(v115)
-                        v125 = Int64(v124)
-                        v126 = K.aligned_alloc(64, v125)
-                        v127 = Ptr{Int8}(v126)
-                        v123 = v127
+                    v121 = v68 == v57
+                    v122 = Ptr{Int8}(C_NULL)
+                    if v121
+                        v123 = Int64(v114)
+                        v124 = Int64(v123)
+                        v125 = K.aligned_alloc(64, v124)
+                        v126 = Ptr{Int8}(v125)
+                        v122 = v126
                     else
-                        v123 = v53
+                        v122 = v53
                     end
-                    v128 = v123
-                    v129 = Int64(v67)
-                    v130 = K.at(v128, v129)
-                    v131 = Ptr{Float64}(v130)
-                    v132 = Int64(v72)
-                    v133 = K.at(v128, v132)
-                    v134 = Ptr{Int8}(v133)
-                    unsafe_store!(v54, v87, v67 + 1)
-                    v135 = lam_bar(v48, v50, v51, v131, v134, v54)
-                    v136 = v135 != v57
-                    v137 = v136 != 0
+                    v127 = v122
+                    v128 = Int64(v67)
+                    v129 = K.at(v127, v128)
+                    v130 = Ptr{Float64}(v129)
+                    v131 = Int64(v71)
+                    v132 = K.at(v127, v131)
+                    v133 = Ptr{Int8}(v132)
+                    unsafe_store!(v54, v86, v67 + 1)
+                    v134 = lam_bar(v48, v50, v51, v130, v133, v54)
+                    v135 = v134 != v57
+                    v136 = v135 != 0
+                    v137 = Int64(v136)
                     v138 = Int64(v137)
-                    v139 = Int64(v138)
-                    v140 = v139 == v57
-                    v141 = zero(Int64)
-                    if v140
-                        v142 = Int64(v71)
-                        v143 = K.at(v128, v142)
-                        v144 = Ptr{Float64}(v143)
-                        v145 = Int64(v99)
-                        v146 = Int64(v145)
-                        v147 = Int64(v146)
-                        v148 = K.at(v128, v147)
-                        v149 = Ptr{Int8}(v148)
-                        unsafe_store!(v54, v103, v67 + 1)
-                        v150 = lam_bar(v48, v49, v131, v144, v149, v54)
-                        v151 = v150 != v57
-                        v152 = v151 ? v55 : v57
-                        v153 = v152 == v57
-                        if v153
-                            v154 = 8
-                            v155 = v154 * v48
-                            K.copy(v52, v144, v155)
+                    v139 = v138 == v57
+                    v140 = zero(Int64)
+                    if v139
+                        v141 = Int64(v98)
+                        v142 = Int64(v141)
+                        v143 = Int64(v142)
+                        v144 = K.at(v127, v143)
+                        v145 = Ptr{Int8}(v144)
+                        unsafe_store!(v54, v102, v67 + 1)
+                        v146 = lam_bar(v48, v49, v130, v52, v145, v54)
+                        v147 = v146 != v57
+                        v148 = v147 ? v55 : v57
+                        v149 = v148 == v57
+                        if v149
                             unsafe_store!(v54, v68, v67 + 1)
                         end
-                        v141 = v152
+                        v140 = v148
                     else
-                        v141 = v139
+                        v140 = v138
                     end
-                    v156 = v141
-                    if v122
-                        K.free(v128)
+                    v150 = v140
+                    if v121
+                        K.free(v127)
                     end
-                    v121 = v156
+                    v120 = v150
                 end
-                v157 = v121
-                v117 = v157
+                v151 = v120
+                v116 = v151
             end
-            v158 = v117
-            v102 = v158
+            v152 = v116
+            v101 = v152
         else
-            v102 = v100
+            v101 = v99
         end
-        v159 = v102
-        v86 = v159
+        v153 = v101
+        v85 = v153
     else
-        v86 = v84
+        v85 = v83
     end
-    v160 = v86
-    return v160
+    v154 = v85
+    return v154
 end
 

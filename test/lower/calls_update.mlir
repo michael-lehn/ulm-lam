@@ -4,19 +4,29 @@
 // RUN:   | FileCheck %s --check-prefix=ULMBLAS
 
 // LAPACK style (examples/calls): bar_ overwrites y with the solution, foo_
-// calls it twice on the same y, so neither has a workspace; foo_matlab
+// calls it twice on the same y, so neither has a workspace; bar__keep and
+// foo__keep are the wrappers the compiler adds (M, N read only); foo_matlab
 // copies y directly into its result, M and N into its workspace, and lets
 // foo_ work there.
 //
 // bar_ and foo_: the matrices and y by reference, nothing else; the calls
 // pass foo_'s y on, without a copy.
 // ULMBLAS-LABEL: emitc.func @bar_(%arg0: !emitc.size_t, %arg1: !emitc.ptr<f64> {{{.*}}}, %arg2: !emitc.ptr<f64> {{{.*}}}) -> i64
-// ULMBLAS-NOT: ulm_lam_copy
+// bar__keep, the generated wrapper: M read only (a copy in its workspace),
+// y updated as by bar_; its info is bar_'s.
+// ULMBLAS: emitc.verbatim "/* bar__keep: {{.*}}1  Cholesky factorisation of v2: not positive definite
+// ULMBLAS-LABEL: emitc.func @bar__keep(%arg0: !emitc.size_t, %arg1: !emitc.ptr<f64> {{{.*}}ulm_lam.in}, %arg2: !emitc.ptr<f64> {{{.*}}ulm_lam.updated}, %arg3: !emitc.ptr<i8> {{{.*}}}, %arg4: !emitc.ptr<i64> {{{.*}}}) -> i64
+// ULMBLAS: call_opaque "ulm_lam_copy"(%[[MC:.*]], %arg1,
+// ULMBLAS: call @bar_(%arg0, %[[MC]], %arg2)
 // ULMBLAS-LABEL: emitc.func @foo_(%arg0: !emitc.size_t, %arg1: !emitc.ptr<f64> {{{.*}}}, %arg2: !emitc.ptr<f64> {{{.*}}}, %arg3: !emitc.ptr<f64> {{{.*}}}) -> i64
 // ULMBLAS-NOT: ulm_lam_copy
 // ULMBLAS: call @bar_(%{{.*}}, %{{.*}}, %arg3)
 // ULMBLAS-NOT: ulm_lam_copy
 // ULMBLAS: call @bar_(%{{.*}}, %{{.*}}, %arg3)
+// foo__keep: copies of M and N, y updated in place.
+// ULMBLAS-LABEL: emitc.func @foo__keep(
+// ULMBLAS-COUNT-2: call_opaque "ulm_lam_copy"
+// ULMBLAS: call @foo_(%arg0, %{{.*}}, %{{.*}}, %arg3)
 // foo_matlab: y copied into the result x, then foo_ computes in x; no copy
 // after the call.
 // ULMBLAS-LABEL: emitc.func @foo_matlab(

@@ -29,6 +29,83 @@ function lam_bar_(a1, a2, a3)
 end
 
 #=
+/* bar__keep: matrices by reference (row-major), owned by the caller
+ *   v1  size_t          in
+ *   v2  double[v1][v1]  in     read only
+ *   v3  double[v1][1]   inout  updated in place
+ *   v4  int8_t *        work   workspace (bytes)
+ *   v5  int64_t *       info   -1: query, 0: allocate, >0: size of work
+ * returns info:
+ *     0  success
+ *     1  Cholesky factorisation of v2: not positive definite
+ *    -5  v5: workspace too small
+ * (info != 0: the outputs are unspecified)
+ */
+=#
+function lam_bar__keep(a1, a2, a3, a4, a5)
+    v11 = Int64(a1)
+    v12 = Ptr{Float64}(a2)
+    v13 = Ptr{Float64}(a3)
+    v14 = Ptr{Int8}(a4)
+    v15 = Ptr{Int64}(a5)
+    v16 = -5
+    v17 = 0
+    v18 = -1
+    v19 = -64
+    v20 = 63
+    v21 = 8
+    v22 = 0
+    v23 = unsafe_load(v15, v22 + 1)
+    v24 = v11 * v21
+    v25 = v24 * v11
+    v26 = v25 + v20
+    v27 = v26 & v19
+    v28 = Int64(v27)
+    v29 = Int64(v28)
+    v30 = v23 == v18
+    v31 = zero(Int64)
+    if v30
+        unsafe_store!(v15, v29, v22 + 1)
+        v31 = v17
+    else
+        v32 = v23 > v17
+        v33 = v23 < v29
+        v34 = v32 & v33
+        v35 = zero(Int64)
+        if v34
+            v35 = v16
+        else
+            v36 = v23 == v17
+            v37 = Ptr{Int8}(C_NULL)
+            if v36
+                v38 = K.aligned_alloc(64, v27)
+                v39 = Ptr{Int8}(v38)
+                v37 = v39
+            else
+                v37 = v14
+            end
+            v40 = v37
+            v41 = Int64(v22)
+            v42 = K.at(v40, v41)
+            v43 = Ptr{Float64}(v42)
+            v44 = 8
+            v45 = v44 * v11
+            v46 = v45 * v11
+            K.copy(v43, v12, v46)
+            v47 = lam_bar_(v11, v43, v13)
+            if v36
+                K.free(v40)
+            end
+            v35 = v47
+        end
+        v48 = v35
+        v31 = v48
+    end
+    v49 = v31
+    return v49
+end
+
+#=
 /* foo_: matrices by reference (row-major), owned by the caller
  *   v1  size_t          in
  *   v2  double[v1][v1]  inout  may be overwritten (unspecified on exit)
@@ -42,29 +119,117 @@ end
  */
 =#
 function lam_foo_(a1, a2, a3, a4)
-    v11 = Int64(a1)
-    v12 = Ptr{Float64}(a2)
-    v13 = Ptr{Float64}(a3)
-    v14 = Ptr{Float64}(a4)
-    v15 = 2
-    v16 = 0
-    v17 = lam_bar_(v11, v13, v14)
-    v18 = v17 != v16
-    v19 = v18 != 0
-    v20 = Int64(v19)
-    v21 = Int64(v20)
-    v22 = v21 == v16
-    v23 = zero(Int64)
-    if v22
-        v24 = lam_bar_(v11, v12, v14)
-        v25 = v24 != v16
-        v26 = v25 ? v15 : v16
-        v23 = v26
+    v50 = Int64(a1)
+    v51 = Ptr{Float64}(a2)
+    v52 = Ptr{Float64}(a3)
+    v53 = Ptr{Float64}(a4)
+    v54 = 2
+    v55 = 0
+    v56 = lam_bar_(v50, v52, v53)
+    v57 = v56 != v55
+    v58 = v57 != 0
+    v59 = Int64(v58)
+    v60 = Int64(v59)
+    v61 = v60 == v55
+    v62 = zero(Int64)
+    if v61
+        v63 = lam_bar_(v50, v51, v53)
+        v64 = v63 != v55
+        v65 = v64 ? v54 : v55
+        v62 = v65
     else
-        v23 = v21
+        v62 = v60
     end
-    v27 = v23
-    return v27
+    v66 = v62
+    return v66
+end
+
+#=
+/* foo__keep: matrices by reference (row-major), owned by the caller
+ *   v1  size_t          in
+ *   v2  double[v1][v1]  in     read only
+ *   v3  double[v1][v1]  in     read only
+ *   v4  double[v1][1]   inout  updated in place
+ *   v5  int8_t *        work   workspace (bytes)
+ *   v6  int64_t *       info   -1: query, 0: allocate, >0: size of work
+ * returns info:
+ *     0  success
+ *     1  call of bar_ returned info != 0
+ *     2  call of bar_ returned info != 0
+ *    -6  v6: workspace too small
+ * (info != 0: the outputs are unspecified)
+ */
+=#
+function lam_foo__keep(a1, a2, a3, a4, a5, a6)
+    v67 = Int64(a1)
+    v68 = Ptr{Float64}(a2)
+    v69 = Ptr{Float64}(a3)
+    v70 = Ptr{Float64}(a4)
+    v71 = Ptr{Int8}(a5)
+    v72 = Ptr{Int64}(a6)
+    v73 = -6
+    v74 = 0
+    v75 = -1
+    v76 = -64
+    v77 = 63
+    v78 = 8
+    v79 = 0
+    v80 = unsafe_load(v72, v79 + 1)
+    v81 = v67 * v78
+    v82 = v81 * v67
+    v83 = v82 + v77
+    v84 = v83 & v76
+    v85 = v84 + v84
+    v86 = Int64(v85)
+    v87 = Int64(v86)
+    v88 = v80 == v75
+    v89 = zero(Int64)
+    if v88
+        unsafe_store!(v72, v87, v79 + 1)
+        v89 = v74
+    else
+        v90 = v80 > v74
+        v91 = v80 < v87
+        v92 = v90 & v91
+        v93 = zero(Int64)
+        if v92
+            v93 = v73
+        else
+            v94 = v80 == v74
+            v95 = Ptr{Int8}(C_NULL)
+            if v94
+                v96 = K.aligned_alloc(64, v85)
+                v97 = Ptr{Int8}(v96)
+                v95 = v97
+            else
+                v95 = v71
+            end
+            v98 = v95
+            v99 = Int64(v79)
+            v100 = K.at(v98, v99)
+            v101 = Ptr{Float64}(v100)
+            v102 = 8
+            v103 = v102 * v67
+            v104 = v103 * v67
+            K.copy(v101, v68, v104)
+            v105 = Int64(v84)
+            v106 = K.at(v98, v105)
+            v107 = Ptr{Float64}(v106)
+            v108 = 8
+            v109 = v108 * v67
+            v110 = v109 * v67
+            K.copy(v107, v69, v110)
+            v111 = lam_foo_(v67, v101, v107, v70)
+            if v94
+                K.free(v98)
+            end
+            v93 = v111
+        end
+        v112 = v93
+        v89 = v112
+    end
+    v113 = v89
+    return v113
 end
 
 #=
@@ -84,82 +249,82 @@ end
  */
 =#
 function lam_foo_matlab(a1, a2, a3, a4, a5, a6, a7)
-    v28 = Int64(a1)
-    v29 = Ptr{Float64}(a2)
-    v30 = Ptr{Float64}(a3)
-    v31 = Ptr{Float64}(a4)
-    v32 = Ptr{Float64}(a5)
-    v33 = Ptr{Int8}(a6)
-    v34 = Ptr{Int64}(a7)
-    v35 = -7
-    v36 = 0
-    v37 = -1
-    v38 = -64
-    v39 = 63
-    v40 = 8
-    v41 = 0
-    v42 = unsafe_load(v34, v41 + 1)
-    v43 = v28 * v40
-    v44 = v43 * v28
-    v45 = v44 + v39
-    v46 = v45 & v38
-    v47 = v46 + v46
-    v48 = Int64(v47)
-    v49 = Int64(v48)
-    v50 = v42 == v37
-    v51 = zero(Int64)
-    if v50
-        unsafe_store!(v34, v49, v41 + 1)
-        v51 = v36
+    v114 = Int64(a1)
+    v115 = Ptr{Float64}(a2)
+    v116 = Ptr{Float64}(a3)
+    v117 = Ptr{Float64}(a4)
+    v118 = Ptr{Float64}(a5)
+    v119 = Ptr{Int8}(a6)
+    v120 = Ptr{Int64}(a7)
+    v121 = -7
+    v122 = 0
+    v123 = -1
+    v124 = -64
+    v125 = 63
+    v126 = 8
+    v127 = 0
+    v128 = unsafe_load(v120, v127 + 1)
+    v129 = v114 * v126
+    v130 = v129 * v114
+    v131 = v130 + v125
+    v132 = v131 & v124
+    v133 = v132 + v132
+    v134 = Int64(v133)
+    v135 = Int64(v134)
+    v136 = v128 == v123
+    v137 = zero(Int64)
+    if v136
+        unsafe_store!(v120, v135, v127 + 1)
+        v137 = v122
     else
-        v52 = v42 > v36
-        v53 = v42 < v49
-        v54 = v52 & v53
-        v55 = zero(Int64)
-        if v54
-            v55 = v35
+        v138 = v128 > v122
+        v139 = v128 < v135
+        v140 = v138 & v139
+        v141 = zero(Int64)
+        if v140
+            v141 = v121
         else
-            v56 = v42 == v36
-            v57 = Ptr{Int8}(C_NULL)
-            if v56
-                v58 = K.aligned_alloc(64, v47)
-                v59 = Ptr{Int8}(v58)
-                v57 = v59
+            v142 = v128 == v122
+            v143 = Ptr{Int8}(C_NULL)
+            if v142
+                v144 = K.aligned_alloc(64, v133)
+                v145 = Ptr{Int8}(v144)
+                v143 = v145
             else
-                v57 = v33
+                v143 = v119
             end
-            v60 = v57
-            v61 = 8
-            v62 = v61 * v28
-            K.copy(v32, v31, v62)
-            v63 = Int64(v41)
-            v64 = K.at(v60, v63)
-            v65 = Ptr{Float64}(v64)
-            v66 = 8
-            v67 = v66 * v28
-            v68 = v67 * v28
-            K.copy(v65, v29, v68)
-            v69 = Int64(v46)
-            v70 = K.at(v60, v69)
-            v71 = Ptr{Float64}(v70)
-            v72 = 8
-            v73 = v72 * v28
-            v74 = v73 * v28
-            K.copy(v71, v30, v74)
-            v75 = lam_foo_(v28, v65, v71, v32)
-            v76 = v75 != v36
-            v77 = v76 != 0
-            v78 = Int64(v77)
-            v79 = Int64(v78)
-            if v56
-                K.free(v60)
+            v146 = v143
+            v147 = 8
+            v148 = v147 * v114
+            K.copy(v118, v117, v148)
+            v149 = Int64(v127)
+            v150 = K.at(v146, v149)
+            v151 = Ptr{Float64}(v150)
+            v152 = 8
+            v153 = v152 * v114
+            v154 = v153 * v114
+            K.copy(v151, v115, v154)
+            v155 = Int64(v132)
+            v156 = K.at(v146, v155)
+            v157 = Ptr{Float64}(v156)
+            v158 = 8
+            v159 = v158 * v114
+            v160 = v159 * v114
+            K.copy(v157, v116, v160)
+            v161 = lam_foo_(v114, v151, v157, v118)
+            v162 = v161 != v122
+            v163 = v162 != 0
+            v164 = Int64(v163)
+            v165 = Int64(v164)
+            if v142
+                K.free(v146)
             end
-            v55 = v79
+            v141 = v165
         end
-        v80 = v55
-        v51 = v80
+        v166 = v141
+        v137 = v166
     end
-    v81 = v51
-    return v81
+    v167 = v137
+    return v167
 end
 

@@ -7,6 +7,12 @@
 # result.  An unchanged program reuses its result (named after a hash of
 # program, compiler and flags), kept in a scratch space of the package.
 #
+# f(args...) leaves the arguments as they are: it calls the wrapper f_keep
+# the compiler adds to every function f that may overwrite a matrix (the
+# copies in its workspace); f(args...; overwrite=true) calls f itself,
+# LAPACK style: no copies, the matrices are overwritten.  (Arguments updated
+# with update! are updated by both.)
+#
 # Calling convention (from the interface comment the compiler generates):
 #   * matrices: Matrix{Float64} (column-major; passed as the row-major
 #     transpose, no copy), vectors: Vector{Float64}; `in` arguments of
@@ -189,7 +195,8 @@ function interfaces(cpp::String)
         rows = Tuple{String,String}[]
         for line in split(split(m.captures[2], " * returns info:")[1], '\n')
             parts = split(lstrip(line, [' ', '*']))
-            isempty(parts) && continue
+            # (skip a description continued on the next line)
+            (isempty(parts) || !occursin(r"^v\d+$", parts[1])) && continue
             ctype = parts[2] * (length(parts) > 2 && parts[3] == "*" ? " *" : "")
             intent = endswith(ctype, "*") ? parts[4] : (length(parts) > 2 ? parts[3] : "in")
             push!(rows, (ctype, intent))
@@ -270,6 +277,7 @@ struct CompiledFunction
     has_workspace::Bool
     wsizes::Dict{Vector{Int},Int}  # the workspace size by the run-time sizes
     eltype::DataType               # of the library (Float64 or Float32)
+    keep::Any                      # the wrapper f_keep (a CompiledFunction), or nothing
 end
 
 mutable struct Library
@@ -420,8 +428,8 @@ function compile(functions::Vector{LamFunction}; name::AbstractString=cname(func
     isempty(jn) || for (fn_, cs) in codes, k in keys(cs)
         cs[k] = replace(cs[k], jn...)
     end
-    for (fname, rows) in ifaces
-        haskey(byname, fname) || continue
+    function compiled(fname, fn, keep)
+        rows = ifaces[fname]
         caller = if julia
             Base.invokelatest(getfield, mod, Symbol("lam_", fname))
         else
@@ -430,10 +438,16 @@ function compile(functions::Vector{LamFunction}; name::AbstractString=cname(func
             argnames = [Symbol("a$k") for k in 1:length(types)]
             eval(:(($(argnames...),) -> ccall($fptr, Int64, ($(types...),), $(argnames...))))
         end
-        L.functions[byname[fname].name] = CompiledFunction(L, fname, rows, byname[fname], caller,
-                                                       get(codes, fname, Dict{Int,String}()),
-                                                       !isempty(rows) && rows[end][2] == "info",
-                                                       Dict{Vector{Int},Int}(), eltype)
+        CompiledFunction(L, fname, rows, fn, caller, get(codes, fname, Dict{Int,String}()),
+                         !isempty(rows) && rows[end][2] == "info", Dict{Vector{Int},Int}(),
+                         eltype, keep)
+    end
+    for fname in keys(ifaces)
+        haskey(byname, fname) || continue
+        fn = byname[fname]
+        # f(...) calls the wrapper f_keep, if f has one
+        keep = haskey(ifaces, fname * "_keep") ? compiled(fname * "_keep", fn, nothing) : nothing
+        L.functions[fn.name] = compiled(fname, fn, keep)
     end
     L
 end
@@ -551,7 +565,8 @@ function arguments(f::CompiledFunction, args, query::Bool)
 end
 
 """The workspace a call needs (bytes)."""
-function workspace_size(f::CompiledFunction, args...)
+function workspace_size(f::CompiledFunction, args...; overwrite::Bool=false)
+    f.keep === nothing || overwrite || return workspace_size(f.keep, args...)
     f.has_workspace || return 0
     cargs, _, keep = arguments(f, args, true)
     info = Ref{Int64}(-1)
@@ -573,7 +588,9 @@ task_busy(lib::Library) =
 task_pending(lib::Library) =
     get!(() -> Any[], task_local_storage(), (:ulm_lam_pending, objectid(lib)))::Vector{Any}
 
-function (f::CompiledFunction)(args...; work::Union{Workspace,Nothing}=nothing)
+function (f::CompiledFunction)(args...; work::Union{Workspace,Nothing}=nothing,
+                               overwrite::Bool=false)
+    f.keep === nothing || overwrite || return f.keep(args...; work=work)
     lib = f.lib
     cargs, outs, keep = arguments(f, args, false)
     info = Ref{Int64}(0)
@@ -719,15 +736,19 @@ function eltype_of(args)
 end
 
 """
-    f(args...; work=nothing)
+    f(args...; work=nothing, overwrite=false)
 
 Call the ulm.lam function f with Julia arrays: compiled at the first call,
-for Float64, or for Float32 if all arrays are Float32.
+for Float64, or for Float32 if all arrays are Float32.  The arguments are
+left as they are (the wrapper f_keep is called); with `overwrite=true`, f
+itself: the matrices it may overwrite are overwritten (LAPACK style, no
+copies).
 """
-function (f::LamFunction)(args...; work::Union{Workspace,Nothing}=nothing)
+function (f::LamFunction)(args...; work::Union{Workspace,Nothing}=nothing,
+                          overwrite::Bool=false)
     # called from another ulm.lam function while it is traced: a call in the IR
     any(a -> a isa LamValue, args) && return call_lam(f, args)
-    library(f, eltype_of(args)).functions[f.name](args...; work=work)
+    library(f, eltype_of(args)).functions[f.name](args...; work=work, overwrite=overwrite)
 end
 
 """

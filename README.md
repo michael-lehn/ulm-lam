@@ -17,7 +17,10 @@ hand:
   only known then;
 - temporaries in one workspace that is reused across calls, loop state
   updated in place: no allocations inside loops;
-- failed factorisations reported like LAPACK's `info`, with a description.
+- failed factorisations reported like LAPACK's `info`, with a description;
+- LAPACK-style functions: a generated function may overwrite the matrices
+  it receives, and a wrapper that leaves them alone is generated with it
+  ([portable BLAS/LAPACK](#portable-blaslapack)).
 
 `@code_lam` shows what it derived.  The generated C++ calls the BLAS and
 LAPACK Julia uses (OpenBLAS, or whatever libblastrampoline forwards to,
@@ -36,6 +39,7 @@ for `Float32`; from Python `lam.compile(f, dtype="float32")`).
 - [Julia](#julia)
 - [Python](#python)
 - [Mojo](#mojo)
+- [Portable BLAS/LAPACK](#portable-blaslapack)
 - [What you can write](#what-you-can-write)
 - [Measurements](#measurements)
 - [How it works](#how-it-works)
@@ -77,7 +81,9 @@ if a factorisation fails, the call throws InfoError with
 
 `inv(M)` appears twice and is factorised once; $X^T M^{-1} X$ becomes
 $(L_1^{-1}X)^T(L_1^{-1}X)$, a triangular solve and a symmetric rank-k
-update; no inverse is formed, and neither `M` nor `X` is overwritten.
+update; no inverse is formed.  `gls(X, M, y)` leaves `M`, `X` and `y` as
+they are; `gls(X, M, y; overwrite=true)` lets the factorisations and solves
+work in them (see [Portable BLAS/LAPACK](#portable-blaslapack)).
 
 A loop with its state carried in place and callbacks into Julia: the
 Kalman filter as in the textbook,
@@ -131,7 +137,8 @@ def gls(X: Matrix("n", "m", "full_rank"), M: Matrix("n", "n", "spd"),
     return (X.T @ M.inv @ X).inv @ X.T @ M.inv @ y
 
 lib = lam.compile(gls)     # one shared library for all sizes
-b = lib.gls(X, M, y)       # NumPy arrays (or any float64 buffer), no copies
+b = lib.gls(X, M, y)       # NumPy arrays (or any float64 buffer), left as they are
+b = lib.gls(X, M, y, overwrite=True)   # LAPACK style: X, M, y overwritten, no copies
 print(lib.gls.code)        # the derivation, as @code_lam shows it in Julia
 print(lib.gls.cpp)         # the generated C++
 ```
@@ -147,6 +154,39 @@ program implements.  The example of my numerical linear algebra lectures,
 faster than the formula as written (n = 1000, 200 steps).  Details and the
 example: [mojo/README.md](mojo/README.md); `make mojo` runs its tests
 (Mojo via [pixi](https://pixi.sh)).
+
+## Portable BLAS/LAPACK
+
+ulm.lam is to BLAS and LAPACK what C is to assembly: a portable way to
+write them.  You write the formula; what you get is a LAPACK routine, and
+it behaves like one:
+
+- **It may overwrite its matrices**, as `dpotrf` overwrites A with its
+  Cholesky factor: the factorisations and solves work in the caller's
+  arrays, without copies and with little or no workspace.  A parameter
+  declared `In(...)` is read only; with `update!(y, ...)` (Python:
+  `lam.update`) a parameter holds a result on exit.
+- **Its temporaries are in one workspace the caller provides**, with a
+  size query (`info = -1`, LAPACK's `lwork = -1`); nothing is allocated in
+  a call.
+- **It returns LAPACK's `info`**: 0 on success, k if the k-th
+  factorisation failed (the interface comment says which), -i for an
+  illegal argument i.
+
+On top of every function `f` that may overwrite a matrix, ulm.lam
+generates the wrapper `f_keep` (MATLAB style): the same parameters, read
+only; it copies what `f` would overwrite into its own workspace and calls
+`f`, and its `info` is `f`'s.  From Julia and Python, `f(...)` calls
+`f_keep`, so arrays are never changed behind your back, and
+`f(...; overwrite=true)` (Python: `overwrite=True`) calls `f` itself.  From
+C, C++ and Mojo you call whichever you need.
+
+For GLS (generalised least squares) with X of size 2000 × 200, `gls` needs
+320 kB of workspace (the Cholesky factor of the 200 × 200 matrix);
+`gls_keep` needs 35.5 MB, mostly for the copy of M
+([examples/gls](examples/gls)).  In the
+[Mojo example](mojo/README.md), `control` factorises A in place, and
+`control_keep` leaves it alone.
 
 ## What you can write
 
@@ -165,7 +205,8 @@ example: [mojo/README.md](mojo/README.md); `make mojo` runs its tests
 | facts | `assume(A, :spd)` | `lam.assume(A, "spd")` |
 | loops | `loop(n, carry...) do i, x... end` | `with lam.loop(n, carry=[...]) as L:` |
 | callbacks | `extern(name, argtypes, result)`, `bind!` | `lam.extern(...)`, `lib.bind(...)` |
-| overwritable parameter | `InOut(Mat(...))` | `InOut(Matrix(...))` |
+| read-only parameter (default: may be overwritten) | `In(Mat(...))` | `In(Matrix(...))` |
+| call without copies (LAPACK style) | `f(args...; overwrite=true)` | `lib.f(..., overwrite=True)` |
 | several results | a tuple | a tuple |
 | inspect | `@code_lam f(args...)` | `print(lib.f.code)`, `lib.f.cpp` |
 
@@ -444,30 +485,25 @@ next step, e.g. the QR factorisation of a numerically rank-deficient
 matrix.  What a compiler should optimise for, and what it must keep, is
 open.
 
-**Workspace: LAPACK style or MATLAB style?**  LAPACK's way is a workspace
-given by the caller, with a query for its size (`lwork = -1`); ulm.lam
-does the same, and the query accumulates over calls: if `foo` calls `bar`,
-`foo`'s workspace contains `bar`'s part, and nothing is allocated inside
-nested calls.  How much workspace there is depends on how the functions
-are written.  The guideline: write the functions that do the work LAPACK
-style, with `inout` parameters where a matrix may be overwritten and
-results written into parameters (`update!` in Julia, `lam.update` in
-Python), so that the workspace is minimal, often none at all; and put a
-user-friendly MATLAB-style wrapper with read-only parameters on top.  The
-copies, and the workspace for them, are then in the wrapper only:
+**Workspace: LAPACK style or MATLAB style?**  Settled: LAPACK style,
+with a generated MATLAB-style wrapper ([Portable
+BLAS/LAPACK](#portable-blaslapack)).  The workspace query accumulates over
+calls: if `foo` calls `bar`, `foo`'s workspace contains `bar`'s part, and
+nothing is allocated inside nested calls.  Functions that may overwrite
+their matrices and write results into parameters (`update!` in Julia,
+`lam.update` in Python) need little or no workspace; the copies, and the
+workspace for them, are in the wrapper only:
 
 ```julia
-@lam bar!(M::InOut(Mat(:n, :n, :spd)), y::InOut(Vec(:n))) = update!(y, M \ y)
-@lam foo!(M::InOut(Mat(:n, :n, :spd)), N::InOut(Mat(:n, :n, :spd)), y::InOut(Vec(:n))) =
+@lam bar!(M::Mat(:n, :n, :spd), y::Vec(:n)) = update!(y, M \ y)
+@lam foo!(M::Mat(:n, :n, :spd), N::Mat(:n, :n, :spd), y::Vec(:n)) =
     update!(y, bar!(M, bar!(N, y)))
-@lam foo(M::Mat(:n, :n, :spd), N::Mat(:n, :n, :spd), y::Vec(:n)) = foo!(M, N, y)
 ```
 
-`bar!` and `foo!` need no workspace; `foo` copies `y` directly into its
-result and `M`, `N` into its workspace, and calls `foo!`, which is the
-wrapper one would write by hand.  Written MATLAB style throughout, every
-level pays for its own copies ([examples/calls](examples/calls), section
-"Functions calling functions" of the design document).  Open is whether
-the compiler should do more here: derive the LAPACK-style variant from a
-MATLAB-style function itself, or warn where a copy could be avoided by an
-`inout` parameter.
+`bar!` and `foo!` need no workspace; the generated `foo__keep` copies `M`
+and `N` into its workspace and calls `foo!`, which is the wrapper one
+would write by hand.  Written MATLAB style throughout (every parameter
+`In(...)`), every level pays for its own copies
+([examples/calls](examples/calls), section "Functions calling functions"
+of the design document).  Open is whether the compiler should warn where
+an `In` parameter costs a copy that the caller could avoid.

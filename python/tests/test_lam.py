@@ -15,7 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ulm import lam  # noqa: E402
-from ulm.lam import Float, Index, InOut, LamError, Matrix, Vector  # noqa: E402
+from ulm.lam import Float, In, Index, InOut, LamError, Matrix, Vector  # noqa: E402
 
 N, K = 40, 6
 rnd = random.Random(4)
@@ -91,7 +91,7 @@ def gls(X: Matrix(N, K, "full_rank"), M: Matrix(N, N, "spd"), y: Vector(N)):
 
 
 @lam.function
-def gls_inout(X: Matrix(N, K, "full_rank"), M: InOut(Matrix(N, N, "spd")),
+def gls_inout(X: In(Matrix(N, K, "full_rank")), M: InOut(Matrix(N, N, "spd")),
               y: InOut(Vector(N))):
     return (X.T @ M.inv @ X).inv @ X.T @ M.inv @ y
 
@@ -172,11 +172,29 @@ class Lam(unittest.TestCase):
     def test_inout_may_overwrite(self):
         M, y = array("d", flat(self.M)), array("d", self.y)
         X = array("d", flat(self.X))
-        b = self.lib.gls_inout(X, M, y)
+        b = self.lib.gls_inout(X, M, y, overwrite=True)
         self.assertLess(rel(b, self.b), 1e-12)
         self.assertEqual(values(X), flat(self.X))  # in: unchanged
         self.assertNotEqual(values(M), flat(self.M))  # inout: overwritten
-        self.assertLess(self.lib.gls_inout.workspace_size(X, M, y),
+        self.assertLess(
+            self.lib.gls_inout.workspace_size(X, M, y, overwrite=True),
+            self.lib.gls.workspace_size(X, M, y))
+
+    def test_keep_wrapper_leaves_arguments(self):
+        # lib.f calls f_keep: the copies in its workspace, the arguments
+        # as they were
+        M, y = array("d", flat(self.M)), array("d", self.y)
+        X = array("d", flat(self.X))
+        b = self.lib.gls(X, M, y)
+        self.assertLess(rel(b, self.b), 1e-12)
+        self.assertEqual(values(M), flat(self.M))
+        self.assertEqual(values(X), flat(self.X))
+        self.assertEqual(values(y), list(self.y))
+        self.assertIsNotNone(self.lib.gls.keep)
+        b = self.lib.gls(X, M, y, overwrite=True)  # gls itself
+        self.assertLess(rel(b, self.b), 1e-12)
+        self.assertNotEqual(values(M), flat(self.M))
+        self.assertLess(self.lib.gls.workspace_size(X, M, y, overwrite=True),
                         self.lib.gls.workspace_size(X, M, y))
 
     def test_loop_carried_update_and_callback(self):
@@ -719,7 +737,8 @@ class WithNumPy(unittest.TestCase):
         lib = Lam.lib
         Mt = np.array(Lam.M).T  # a view, not C-contiguous
         with self.assertRaisesRegex(LamError, "C-contiguous"):
-            lib.gls_inout(np.array(Lam.X), Mt, np.array(Lam.y))
+            lib.gls_inout(np.array(Lam.X), Mt, np.array(Lam.y),
+                          overwrite=True)
 
     def test_callbacks_get_views(self):
         lib = Lam.lib
@@ -1004,9 +1023,9 @@ class Errors(unittest.TestCase):
 
     def test_update_needs_inout(self):
         @lam.function
-        def bad(A: Matrix(3, 3)):
+        def bad(A: In(Matrix(3, 3))):
             lam.update(A, A @ A)
-        with self.assertRaisesRegex(LamError, "must be InOut"):
+        with self.assertRaisesRegex(LamError, "read only"):
             lam.module([bad])
 
     def test_wrong_argument(self):

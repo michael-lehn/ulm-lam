@@ -1,8 +1,9 @@
 """Generate examples/gp_cluster/generated/gp.cpp (calling ulmBLAS) and
 gp_cblas.cpp (the same calls on CBLAS/LAPACK, backend="cblas"): the GP
-prediction of python/examples/gp.py, with K as inout (it may be
-overwritten by its Cholesky factor: no n x n copy, at n = 100000 that is
-80 GB)."""
+prediction of python/examples/gp.py.  K may be overwritten by its
+Cholesky factor (the default, as in LAPACK: no n x n copy, at n = 100000
+that is 80 GB); Ks, Kss and y are read only (In), as in the measurements
+of the design document."""
 
 import shutil
 import sys
@@ -12,12 +13,12 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[1] / "python"))
 
 from ulm import lam  # noqa: E402
-from ulm.lam import InOut, Matrix, Vector  # noqa: E402
+from ulm.lam import In, Matrix, Vector  # noqa: E402
 
 
 @lam.function
-def gp(K: InOut(Matrix("n", "n", "spd")), Ks: Matrix("n", "m"),
-       Kss: Matrix("m", "m", "symmetric"), y: Vector("n")):
+def gp(K: Matrix("n", "n", "spd"), Ks: In(Matrix("n", "m")),
+       Kss: In(Matrix("m", "m", "symmetric")), y: In(Vector("n"))):
     mean = Ks.T @ K.inv @ y
     cov = Kss - Ks.T @ K.inv @ Ks
     return mean, cov

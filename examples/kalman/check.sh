@@ -6,7 +6,8 @@
 # factor of S; after bufferization it has no allocation or copy.
 #
 # adaptive.mlir (R updated in place in every step): the update is a
-# ulm_lamk.call that updates the loop-carried R in place, each step factorises
+# ulm_lamk.call that updates the loop-carried R in place (in the caller's R0,
+# which estimate_adaptive may overwrite), each step factorises
 # R_i and S (2 potrf) and computes W once (1 trsm), and the bufferized loop
 # has no allocation and exactly two copies (R_i for the in-place potrf, H
 # for the in-place trsm).
@@ -35,7 +36,7 @@ check "observe(i, y) by reference" 'grep -q "func.func private @observe(index, m
 "$ROOT/scripts/ulm-lam-compile.sh" "$HERE/adaptive.mlir" "$OUT/adaptive"
 SEL="$OUT/adaptive.selected.mlir" BUF="$OUT/adaptive.bufferized.mlir"
 check "adaptive: no ulm_lam op left" '! grep -q "ulm.lam\.\(mul\|add\|transpose\|inverse\)" "$SEL"'
-check "adaptive: in-place update of R (ulm_lamk.call)" 'loop_body "$BUF" | grep -qE "ulm_lamk.call @update_covariance\(%arg[0-9]+\) outs\(%(alloc|view)[_0-9]*\)"'
+check "adaptive: in-place update of R (ulm_lamk.call)" 'loop_body "$BUF" | grep -qE "ulm_lamk.call @update_covariance\(%arg[0-9]+\) outs\(%(alloc|view|arg)[_0-9]*\)"'
 check "adaptive: 2 potrf and 1 trsm per step" '[ "$(count "$SEL" ulm_lamk.potrf)" = 2 ] && [ "$(count "$SEL" ulm_lamk.trsm)" = 1 ]'
 check "adaptive: no allocation in the loop" '[ "$(count "$BUF" memref.alloc)" = 0 ]'
 check "adaptive: two copies per step (R_i, H)" '[ "$(count "$BUF" memref.copy)" = 2 ]'

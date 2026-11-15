@@ -1,5 +1,8 @@
 //
 //  driver.cc - run estimate() generated from estimate.mlir and check it.
+//  The driver calls the wrapper estimate_keep, which leaves H and R as they
+//  are (estimate itself may overwrite them, LAPACK style): every run uses
+//  the same H and R.
 //
 //  observe(i, y) produces the measurement of step i: y_i = H x_i + e_i with
 //  a slowly moving state x_i and correlated noise e_i.  record(i, b) keeps
@@ -44,11 +47,12 @@ constexpr int TSTEPS = 200, REPS = 3;
 
 extern "C" {
 int64_t
-estimate(double *H, double *R, size_t n, int8_t *work,
-         int64_t *workspace_info); // generated, returns info
+estimate_keep(double *H, double *R, size_t n, int8_t *work,
+              int64_t *workspace_info); // generated, returns info
 int64_t
-estimate_nolicm(double *H, double *R, size_t n, int8_t *work,
-                int64_t *workspace_info); // generated (returns info), no LICM
+estimate_nolicm_keep(
+    double *H, double *R, size_t n, int8_t *work,
+    int64_t *workspace_info); // generated (returns info), no LICM
 void
 observe(size_t i, double *y);
 void
@@ -216,17 +220,20 @@ main()
 	double t = best(f, steps), setup = best(f, 0);
 	runs.push_back({name, steps, t, setup, b});
     };
-    Workspace ws(
-        [](int8_t *w, int64_t *i) { estimate(H.data(), R.data(), 0, w, i); });
+    Workspace ws([](int8_t *w, int64_t *i) {
+	estimate_keep(H.data(), R.data(), 0, w, i);
+    });
     Workspace wsNoLicm([](int8_t *w, int64_t *i) {
-	estimate_nolicm(H.data(), R.data(), 0, w, i);
+	estimate_nolicm_keep(H.data(), R.data(), 0, w, i);
     });
     std::printf("workspace: %lld bytes (without LICM: %lld)\n",
                 (long long)ws.size, (long long)wsNoLicm.size);
-    run("ulm.lam",
-        [&](size_t n) { estimate(H.data(), R.data(), n, ws.work, ws.info()); });
+    run("ulm.lam", [&](size_t n) {
+	estimate_keep(H.data(), R.data(), n, ws.work, ws.info());
+    });
     run("ulm.lam without LICM", [&](size_t n) {
-	estimate_nolicm(H.data(), R.data(), n, wsNoLicm.work, wsNoLicm.info());
+	estimate_nolicm_keep(H.data(), R.data(), n, wsNoLicm.work,
+	                     wsNoLicm.info());
     });
     run("explicit inverses", [](size_t n) { estimateExplicit(n); }, STEPS);
     run("explicit, hoisted", [](size_t n) { estimateExplicitHoisted(n); });

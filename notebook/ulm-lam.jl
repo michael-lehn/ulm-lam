@@ -16,7 +16,7 @@ macro bind(def, element)
     #! format: on
 end
 
-# ╔═╡ 3cf30fed-aeaf-44ba-90c4-11e13c165e70
+# ╔═╡ 096e49b1-e841-4bbf-9570-82d482450ae0
 md"""
 # ulm.lam: write the formula, get the BLAS/LAPACK calls an expert would write
 
@@ -46,7 +46,7 @@ Julia and ulm.lam in the container; starting takes a minute or two).  Change
 a formula and `@code_lam` shows the new derivation.
 """
 
-# ╔═╡ bfc58bba-e510-4df9-977a-1b2f70d7a95a
+# ╔═╡ c0e39006-4cd0-41de-805c-06018ad8fc7a
 begin
     import Pkg
     # the notebook's environment (see the README; on Binder set by the image)
@@ -55,7 +55,7 @@ begin
     using AbstractGPs, KernelFunctions, PlutoUI
 end
 
-# ╔═╡ 99c79bc4-d12f-408b-bce1-bb791912fa23
+# ╔═╡ 1bed9c95-561e-468c-a132-5f3ad3b87fdc
 md"""
 ## A Kalman filter, as in the textbook
 
@@ -66,7 +66,7 @@ sizes (`:n` and `:m` are known only at run time) and what you know about them
 here they deliver the measurements and receive the estimates.
 """
 
-# ╔═╡ 97d4ad9d-ce0e-4043-88c7-227cadf785f8
+# ╔═╡ 5acb6531-51f8-4e8e-b1aa-47049a9b67b6
 begin
     measure = extern(:measure, [Index], Vec(:m))
     estimate = extern(:estimate, [Index, Vec(:n)])
@@ -87,10 +87,10 @@ begin
     end
 end
 
-# ╔═╡ b5ea53f5-9d15-4fbe-a36e-76ce30953796
+# ╔═╡ 3d4035f4-6280-441c-8429-dc78e2517764
 @code_lam kalman(F, Q, H, R, x0, P0, steps)
 
-# ╔═╡ 0bb2a186-9820-45ee-a7f3-716b4971523b
+# ╔═╡ 74ba8a10-d366-4f09-a66d-e48a20315a7b
 md"""
 ``S^{-1}`` is never formed: ``K = P H^T S^{-1}`` is two triangular solves
 with the Cholesky factor of ``S``.  ``H P`` is computed once and reused
@@ -102,7 +102,7 @@ The model: a field on a periodic grid, transported and diffused, observed by
 ``m`` sensors.  Compared with the same formulas in plain Julia:
 """
 
-# ╔═╡ ee47a312-0fd3-4e78-8ee7-8e8f814f384a
+# ╔═╡ 8cbd0969-30cf-4d42-97b9-154ab9822b8c
 function model(n, m, steps)
     c, ν = 0.4, 0.2
     F = zeros(n, n)
@@ -127,7 +127,7 @@ function model(n, m, steps)
     F, Q, H, R, zeros(n), Matrix(1.0I, n, n), zs, truth
 end
 
-# ╔═╡ a0a59531-284d-433d-9e2b-fa2396e7693e
+# ╔═╡ c8449da0-90c2-4e23-a917-0ecdc1dee1e8
 begin
     steps = 20
     F, Q, H, R, x0, P0, zs, truth = model(1000, 100, steps)
@@ -135,7 +135,7 @@ begin
     bind!(kalman; measure = i -> zs[i+1], estimate = (i, x) -> (estimates[:, i+1] .= x))
 end;
 
-# ╔═╡ 9271c5a5-3c94-4ca3-ba5c-4838a1500770
+# ╔═╡ 5317daa9-f45c-4b11-9538-4699cc821b2c
 function kalman_literal(F, Q, H, R, x, P, zs)
     for z in zs
         x = F * x
@@ -148,14 +148,14 @@ function kalman_literal(F, Q, H, R, x, P, zs)
     x, P
 end
 
-# ╔═╡ 37f3abc7-72b1-4b11-a0bd-3661894dbdf7
+# ╔═╡ fd1cd650-ce96-4575-a79f-1b705097eaa6
 md"""
 And as an expert would write it in Julia: preallocated buffers, `mul!` in
 place, the Cholesky factorisation of ``S`` instead of its inverse,
 ``H P`` once, ``K H P`` as ``K (H P)``:
 """
 
-# ╔═╡ 52ae06ef-b048-43ff-b113-0431ea93aaa4
+# ╔═╡ 8164e36a-a4c2-43ef-927c-3c57d10a76bd
 function kalman_expert(F, Q, H, R, x, P, zs)
     x, P = copy(x), copy(P)
     xp, FP, HP, S, Kt, r = similar(x), similar(P), similar(H), similar(R),
@@ -174,14 +174,14 @@ function kalman_expert(F, Q, H, R, x, P, zs)
     x, P
 end
 
-# ╔═╡ 27c17087-44c2-401b-a065-126c3f9d5031
+# ╔═╡ c9e577b3-e29f-4b02-b0ee-608b152576d5
 compare("ulm.lam" => () -> kalman(F, Q, H, R, x0, P0, steps),
         "Julia, the formula as written" =>
             () -> kalman_literal(F, Q, H, R, x0, P0, zs),
         "Julia, written by an expert" =>
             () -> kalman_expert(F, Q, H, R, x0, P0, zs))
 
-# ╔═╡ e8fcb0f1-15cf-4c72-b541-62b1849f817a
+# ╔═╡ 75fa4376-60a6-4c70-895b-000c102b852f
 let (x, P) = kalman(F, Q, H, R, x0, P0, steps),
     (x2, P2) = kalman_literal(F, Q, H, R, x0, P0, zs),
     (x3, P3) = kalman_expert(F, Q, H, R, x0, P0, zs)
@@ -189,7 +189,7 @@ let (x, P) = kalman(F, Q, H, R, x0, P0, steps),
      norm(x - x3) / norm(x3), norm(P - P3) / norm(P3))
 end
 
-# ╔═╡ 6447109e-14c1-4e9d-aaa5-cbf5b7ab0d82
+# ╔═╡ 173e36b1-71f5-45e6-88b9-35458334189e
 md"""
 ## Training a linear layer: what PyTorch does, as formulas
 
@@ -199,7 +199,7 @@ pass, the gradients and the update step are written as formulas; the batches
 come from Julia functions:
 """
 
-# ╔═╡ 5eb16b23-2882-4753-8813-46889fcb9d6b
+# ╔═╡ ac9fb332-c623-4ee9-995d-beab2398e0db
 begin
     batch_x = extern(:batch_x, [Index], Mat(:B, :p))
     batch_y = extern(:batch_y, [Index], Mat(:B, :k))
@@ -213,10 +213,10 @@ begin
     end
 end
 
-# ╔═╡ ba85ed12-cf62-4517-96ed-4cb1183c3237
+# ╔═╡ ec69554b-352e-4b06-9236-edd032e0848f
 @code_lam train(W0, b0, ones, step, steps)
 
-# ╔═╡ 4d0c317e-140f-47c3-8216-88006bf55422
+# ╔═╡ 17c646af-c1f9-4a0e-abce-5278bdd50f02
 md"""
 Four BLAS calls per step, as an expert writes them, and no allocation: the
 residual ``R = X W + \mathbf{1} b^T - Y`` is computed in the buffer into
@@ -230,7 +230,7 @@ the same function is as fast as PyTorch on the same BLAS and 5× faster than
 PyTorch's autograd for a small layer (`python/examples/torch_linear.py`).
 """
 
-# ╔═╡ 1abdf8ed-e330-4ccc-b4f5-506f88a0ab94
+# ╔═╡ b0aeaa7d-90b5-4ae9-9ccc-9db91ee1aac5
 begin
     Random.seed!(6)
     B, p, k, nsteps = 256, 1024, 256, 20
@@ -245,7 +245,7 @@ begin
     W0, b0, onesB, lr_step = zeros(p, k), zeros(k), ones(B), 2 * 0.01 / B
 end;
 
-# ╔═╡ 72093c4a-adae-4b91-a456-b3600779fda9
+# ╔═╡ eefcae66-874c-47bf-89bf-3072976a9375
 function train_julia(W, b, Xs, Ys, step)
     for (X, Y) in zip(Xs, Ys)
         R = X * W .+ b' .- Y
@@ -255,7 +255,7 @@ function train_julia(W, b, Xs, Ys, step)
     W, b
 end
 
-# ╔═╡ b5eeec03-e164-4a76-bafa-77addf9ef5c9
+# ╔═╡ aab3d322-01bb-4b3a-99ed-df34e797336e
 function train_expert(W, b, Xs, Ys, step)    # in place, BLAS calls only
     W, b = copy(W), copy(b)
     R, o = similar(Ys[1]), ones(size(Ys[1], 1))
@@ -266,18 +266,18 @@ function train_expert(W, b, Xs, Ys, step)    # in place, BLAS calls only
     W, b
 end
 
-# ╔═╡ d889d772-1f3b-476e-b8cf-6a27e52c9934
+# ╔═╡ 6f047e06-58a8-4e58-920c-fddccfe1092f
 compare("ulm.lam" => () -> train(W0, b0, onesB, lr_step, nsteps),
         "Julia, the formulas as written" => () -> train_julia(W0, b0, Xs, Ys, lr_step),
         "Julia, written by an expert" => () -> train_expert(W0, b0, Xs, Ys, lr_step))
 
-# ╔═╡ 6ed036da-1e1f-45c4-b4d2-edf341df3727
+# ╔═╡ abedce2d-5059-4a01-afa6-29ebb1a8581f
 let (W, b) = train(W0, b0, onesB, lr_step, nsteps),
     (W2, b2) = train_julia(W0, b0, Xs, Ys, lr_step)
     (norm(W - W2) / norm(W2), norm(b - b2) / norm(b2))
 end
 
-# ╔═╡ ae409110-ec80-4c4e-80c4-e3c5ea2daace
+# ╔═╡ e8482fb5-213a-4d30-9334-fa2ca46a20f1
 md"""
 Machine learning mostly computes in single precision.  Called with `Float32`
 arrays, a `@lam` function is compiled for `Float32` (a second library, as
@@ -285,7 +285,7 @@ Julia specialises on argument types): the same derivation on `sgemm`,
 `spotrf`, …
 """
 
-# ╔═╡ 42699d34-da60-41cd-a393-708ae746a4ca
+# ╔═╡ 4714441d-4b5a-4c07-adb8-8374f97cee19
 let (W32, b32, o32) = (Float32.(W0), Float32.(b0), Float32.(onesB))
     compare("ulm.lam, Float64" => () -> (use32[] = false;
                                          train(W0, b0, onesB, lr_step, nsteps)),
@@ -293,7 +293,7 @@ let (W32, b32, o32) = (Float32.(W0), Float32.(b0), Float32.(onesB))
                                          train(W32, b32, o32, Float32(lr_step), nsteps)))
 end
 
-# ╔═╡ 0c1edc97-a9e8-4a7f-a8cb-a5d12d3e6beb
+# ╔═╡ 8a1c6160-fd1b-4bb4-872a-05534f9de950
 md"""
 ## Inverses without inverses: generalised least squares
 
@@ -308,18 +308,18 @@ In Julia, with the properties as part of the types (`:n` and `:m` are sizes
 known only at run time):
 """
 
-# ╔═╡ 25d6307e-a965-41f7-9104-a237d85cc5dd
+# ╔═╡ e0cbace3-ef50-43ed-bccf-7ae0530642c2
 @lam function gls(X::Mat(:n, :m, :full_rank), M::Mat(:n, :n, :spd), y::Vec(:n))
     inv(X' * inv(M) * X) * X' * inv(M) * y
 end
 
-# ╔═╡ e4242cef-7de5-4391-bf2f-33966503a97e
+# ╔═╡ b8cf0e48-3a65-4c43-a73d-4379dcd3fa13
 md"""
 Call it with ordinary Julia arrays.  The first call compiles it (about half a
 second), later calls reuse the library.
 """
 
-# ╔═╡ 646c2d8a-ae7b-4a0c-b6a2-0cf93ae29174
+# ╔═╡ 2163ca0c-1217-4ee2-9dec-761fbe0cb38c
 begin
     Random.seed!(1)
     n, m = 2000, 50
@@ -328,18 +328,18 @@ begin
     y = randn(n)
 end;
 
-# ╔═╡ 24e65e03-0561-4c9e-af66-cbebbd079faf
+# ╔═╡ 04ead300-9c56-4024-9e1a-5a26d5f005c6
 β = gls(X, M, y)
 
-# ╔═╡ 6ec6922d-1271-44ff-a939-f5f73f985369
+# ╔═╡ b3b826ad-c781-4c50-aabf-9e09c74aa6a5
 md"""
 ## Why it is fast: `@code_lam`
 """
 
-# ╔═╡ dd9de990-6eea-4d02-8121-2c6bf7758f7c
+# ╔═╡ 522c09ae-2166-472d-a109-5e9aa4df8c2a
 @code_lam gls(X, M, y)
 
-# ╔═╡ a48cca86-ecbf-4fc4-b504-fcbaee8a2f85
+# ╔═╡ c5fb5fa0-ed72-4233-b81f-ec285192c59c
 md"""
 What happened to the formula:
 
@@ -357,25 +357,25 @@ The same function written as plain Julia, and the version a numerical analyst
 writes by hand:
 """
 
-# ╔═╡ b2640230-4621-4457-a0e2-af6609ae25fd
+# ╔═╡ 47abec61-53e6-467f-bfc3-102da99d9498
 gls_literal(X, M, y) = inv(X' * inv(M) * X) * X' * inv(M) * y
 
-# ╔═╡ f178487c-2b51-4746-82f7-fcc5fede5dcf
+# ╔═╡ c3337891-483f-4432-879a-5848b852ca40
 function gls_by_hand(X, M, y)
     C = cholesky(Symmetric(M))
     V = C.L \ X
     cholesky(Symmetric(V' * V)) \ (V' * (C.L \ y))
 end
 
-# ╔═╡ 2e20ac14-68f5-493b-b5af-03d2b50c599b
+# ╔═╡ 9272bdd3-0c6e-46d1-a960-973991531db4
 compare("ulm.lam" => () -> gls(X, M, y),
         "Julia, the formula as written" => () -> gls_literal(X, M, y),
         "Julia, by hand" => () -> gls_by_hand(X, M, y))
 
-# ╔═╡ e2f414c9-1cdc-468d-89db-c3401cd1ab97
+# ╔═╡ 41c7df53-a92c-4a1f-8602-f9730ffbf285
 norm(β - gls_by_hand(X, M, y)) / norm(β)   # the same result
 
-# ╔═╡ 4291ee80-fc56-4333-9e3f-48661300891f
+# ╔═╡ a3794dd2-10ab-4e19-8de5-8d5504726ce8
 md"""
 ## Gaussian process regression, compared with AbstractGPs.jl
 
@@ -385,17 +385,17 @@ test points, ``K_{**}`` of the test points, ``\sigma^2`` the noise variance,
 a run-time `Float`):
 """
 
-# ╔═╡ b8b04660-f826-410b-bdfa-de1f79386e4b
+# ╔═╡ 8f071b69-9fcd-41b1-b706-c1b9fb0b75a9
 @lam function gp(K::Mat(:n, :n, :symmetric), s2::Float, Ks::Mat(:n, :m),
                  Kss::Mat(:m, :m, :symmetric), y::Vec(:n))
     Kn = assume(K + s2 * I, :spd)    # what we know, the compiler cannot derive
     (Ks' * inv(Kn) * y, Kss - Ks' * inv(Kn) * Ks)
 end
 
-# ╔═╡ 143ef898-b3dd-4246-96f8-b230ef74d5c0
+# ╔═╡ 88b4219e-8b5e-437c-baf9-ecf6abf48f03
 @code_lam gp(K, s2, Ks, Kss, y)
 
-# ╔═╡ 0c918607-545d-475f-a1d6-096b8860d6eb
+# ╔═╡ 79d0ff78-e500-4cc9-a384-0a7b9f507cba
 md"""
 One Cholesky factorisation for both results, ``\sigma^2`` added to the
 diagonal in place, ``K_*^T K_n^{-1} K_*`` as ``V^T V`` with
@@ -404,7 +404,7 @@ what [AbstractGPs.jl](https://github.com/JuliaGaussianProcesses/AbstractGPs.jl)
 does by hand.  ulm.lam derives it from the formula:
 """
 
-# ╔═╡ dcfd6f15-4aa9-4ecb-929e-d8f70e77a2dd
+# ╔═╡ fa205d56-d06e-4d54-9c90-9b8cdc28e6d4
 begin
     kernel = SqExponentialKernel()
     s2 = 0.01
@@ -422,25 +422,25 @@ begin
     end
 end;
 
-# ╔═╡ f731d8c5-b525-4283-b4c7-758dab389906
+# ╔═╡ 35b2cbe3-a2e0-41b9-9ad4-71a24a035d6b
 compare("ulm.lam (kernel matrices from KernelFunctions.jl)" =>
             () -> gp_ulmlam(xtrain, xtest, ytrain),
         "Julia, the formula as written" => () -> gp_literal(xtrain, xtest, ytrain),
         "AbstractGPs.jl" => () -> gp_abstractgps(xtrain, xtest, ytrain))
 
-# ╔═╡ b4a90f44-bbc6-4d4a-8750-fdafbe516469
+# ╔═╡ 4f04367d-ea43-43c6-b0ce-1a40ac260d41
 let (μ, Σ) = gp_ulmlam(xtrain, xtest, ytrain),
     (μ2, Σ2) = gp_abstractgps(xtrain, xtest, ytrain)
     (norm(μ - μ2) / norm(μ2), norm(Σ - Σ2) / norm(Σ2))
 end
 
-# ╔═╡ 8cf2a9a0-6dee-48f4-a2cf-7553d33c6722
+# ╔═╡ c715a964-c769-484f-a15b-291014531f54
 md"""
 As fast as the hand-written package, with half the memory: ulm.lam's
 temporaries live in one workspace that is reused across calls.
 """
 
-# ╔═╡ 8e84b4c7-17ca-40a0-aedd-6b6ab288e9f3
+# ╔═╡ a26d3eea-afef-4f3a-8bbb-dfc0d79f3e78
 md"""
 ## Decisions at run time: linear attention
 
@@ -451,18 +451,18 @@ run time, so ulm.lam generates both orders and picks the cheaper one when it
 is called:
 """
 
-# ╔═╡ 55442c2f-2032-4eb2-841b-7c0bc820ac74
+# ╔═╡ f48f0a28-00b9-4664-a61e-ce072bce0c13
 @lam attention(Q::Mat(:N, :d), K::Mat(:N, :d), V::Mat(:N, :e)) = Q * K' * V
 
-# ╔═╡ 4d105510-9cb2-4b8f-9974-424885c93ca8
+# ╔═╡ ed9217a6-6368-4287-bf08-a85bafa4dcf3
 @code_lam attention(Q, K, V)
 
-# ╔═╡ 445cbbbb-6eb7-4dab-8e1b-cf8d914718a0
+# ╔═╡ b281f812-4daa-49cc-91b6-a0d12063bf46
 md"""
 Sequence length ``N`` (head dimension ``d = 64``): $(@bind N Select([256, 1024, 4096, 8192]; default = 4096))
 """
 
-# ╔═╡ fe4ff7f4-ccef-4a65-8cae-c01b1c9c643d
+# ╔═╡ abfb10a4-97b9-40f9-9840-d3490e8a3110
 begin
     ϕ(x) = x > 0 ? x + 1 : exp(x)
     Qa, Ka, Va = ϕ.(randn(N, 64)), ϕ.(randn(N, 64)), randn(N, 64)
@@ -471,7 +471,7 @@ begin
             "Julia, Q * (K' * V)" => () -> Qa * (Ka' * Va))
 end
 
-# ╔═╡ e49efdee-9522-47df-9316-86d7d6c73b6d
+# ╔═╡ 047d0a4f-b425-4bb4-8696-486a972b5af9
 md"""
 (Julia's `*(Q, K', V)` with three arguments also picks the order; ulm.lam
 does it for any chain inside a larger expression, and together with the
@@ -479,24 +479,30 @@ rest: transposes, symmetry, solves, scalars.)
 
 ## LAPACK style, and a MATLAB-style wrapper
 
-Functions that call functions are best written as LAPACK writes them: a
-matrix that may be overwritten is `InOut`, a result goes into a parameter
-(`update!`), and then no workspace is needed.  Here `bar!` overwrites ``y``
-with ``M^{-1} y`` and ``M`` with its Cholesky factor (as `potrf` and `potrs`
-do), and `foo!` calls it twice: ``y \leftarrow M^{-1} (N^{-1} y)``.  Who
-wants it convenient writes a wrapper with read-only parameters, MATLAB
-style; the copies, and the workspace for them, are then in the wrapper only.
+ulm.lam is to BLAS and LAPACK what C is to assembly, and a generated
+function is a LAPACK routine: it may overwrite the matrices it receives
+(declare a parameter `In(...)` to make it read only), a result goes into a
+parameter (`update!`), and then no workspace is needed.  Here `bar!`
+overwrites ``y`` with ``M^{-1} y`` and ``M`` with its Cholesky factor (as
+`potrf` and `potrs` do), and `foo!` calls it twice:
+``y \leftarrow M^{-1} (N^{-1} y)``.  For every such function ulm.lam also
+generates a wrapper that leaves the matrices alone, and calling `foo!(...)`
+from Julia calls that wrapper; `foo!(...; overwrite=true)` calls `foo!`
+itself.  A wrapper written by hand, MATLAB style, has read-only
+parameters; the copies, and the workspace for them, are then in the
+wrapper only.
 """
 
-# ╔═╡ e0fc682e-9c11-4451-bafd-91222cb89fa5
+# ╔═╡ 92870bcc-6e83-4055-a900-a6dc645d8f2c
 begin
-    @lam bar!(M::InOut(Mat(:n, :n, :spd)), y::InOut(Vec(:n))) = update!(y, M \ y)
-    @lam foo!(M::InOut(Mat(:n, :n, :spd)), N::InOut(Mat(:n, :n, :spd)), y::InOut(Vec(:n))) =
+    @lam bar!(M::Mat(:n, :n, :spd), y::Vec(:n)) = update!(y, M \ y)
+    @lam foo!(M::Mat(:n, :n, :spd), N::Mat(:n, :n, :spd), y::Vec(:n)) =
         update!(y, bar!(M, bar!(N, y)))
-    @lam foo_matlab(M::Mat(:n, :n, :spd), N::Mat(:n, :n, :spd), y::Vec(:n)) = foo!(M, N, y)
+    @lam foo_matlab(M::In(Mat(:n, :n, :spd)), N::In(Mat(:n, :n, :spd)), y::In(Vec(:n))) =
+        foo!(M, N, y)
 end
 
-# ╔═╡ f4693f5d-630c-4c70-a015-54d7b8f3f53d
+# ╔═╡ d29cc5fd-3189-4400-85ce-ae7d46e1e534
 begin
     nl = 1000
     Mspd = (A_ = randn(nl, nl); A_ * A_' + nl * I)
@@ -504,23 +510,23 @@ begin
     yv = randn(nl)
 end;
 
-# ╔═╡ 247855e9-8840-4377-862f-b123e56eca62
+# ╔═╡ f4d7d94b-20bb-4ddc-a1b1-de5a508e1736
 @code_lam foo!(Mspd, Nspd, yv)
 
-# ╔═╡ bff18d9a-5683-44ae-84c4-58bd51999ddd
+# ╔═╡ 173e2abb-5f0d-49bc-8d97-36f2520cd376
 @code_lam bar!(Mspd, yv)
 
-# ╔═╡ bc8b30cb-5caf-4562-a374-04e4badb6b4a
+# ╔═╡ d54a9fa4-777b-4239-9b7a-c51acc6ddced
 @code_lam foo_matlab(Mspd, Nspd, yv)
 
-# ╔═╡ 05a849c9-c80d-498f-8da7-f0d3b4256566
+# ╔═╡ 7cb69253-fc45-47fb-b161-1181c127e3b4
 let lib = UlmLAM.library(foo_matlab)                 # with foo! and bar!
-    (bar! = workspace_size(lib.bar!, Mspd, yv),
-     foo! = workspace_size(lib.foo!, Mspd, Nspd, yv),
+    (bar! = workspace_size(lib.bar!, Mspd, yv; overwrite=true),
+     foo! = workspace_size(lib.foo!, Mspd, Nspd, yv; overwrite=true),
      foo_matlab = workspace_size(lib.foo_matlab, Mspd, Nspd, yv))
 end
 
-# ╔═╡ 18b1222c-a775-417a-aa7c-b0af199f8edb
+# ╔═╡ 569b4188-1c50-41a3-b690-cde1200d9dd0
 md"""
 Workspace in bytes: none for `bar!` and `foo!`; the wrapper needs the copies
 of ``M`` and ``N`` and nothing else.  It copies ``y`` directly into its
@@ -528,26 +534,26 @@ result, in which `foo!` then computes: `x = copy(y); foo!(copy(M), copy(N), x)`,
 the wrapper one would write by hand.
 """
 
-# ╔═╡ 4ede9e3e-a6af-4ddc-b344-966b59edd857
+# ╔═╡ 3fa62149-24a9-4bc4-a5f2-e452c69940d1
 let M1 = copy(Mspd), N1 = copy(Nspd), y1 = copy(yv)
-    foo!(M1, N1, y1)                                 # y1 is the solution now
+    foo!(M1, N1, y1; overwrite=true)                 # y1 is the solution now
     x = foo_matlab(Mspd, Nspd, yv)                    # arguments unchanged
     (error = norm(y1 - Mspd \ (Nspd \ yv)) / norm(y1),
      same_as_wrapper = y1 == x,
      M1_holds_cholesky_factor = triu(M1) ≈ cholesky(Symmetric(Mspd)).U)
 end
 
-# ╔═╡ a3964c43-89ae-415a-8991-a95f45088291
+# ╔═╡ dc761b94-64d9-4747-8f1c-2858f6ec93a4
 md"""
 ## Any BLAS
 
 ulm.lam calls the BLAS and LAPACK Julia uses, through libblastrampoline:
 """
 
-# ╔═╡ c5ba81a4-92f3-4343-8f40-fbd28f99aa52
+# ╔═╡ 489799c2-8189-4b64-a6f6-e25139d7075a
 BLAS.get_config()
 
-# ╔═╡ 1bb5b753-20a2-4189-83d7-3b8540b3a6d2
+# ╔═╡ 0e1f5288-4ea5-41b9-bdd8-d3b2d2ee2e49
 md"""
 With [UlmBLAS.jl](https://github.com/michael-lehn/UlmBLAS.jl) (`Pkg.add("UlmBLAS")`),
 `using UlmBLAS; UlmBLAS.forward()` makes ulmBLAS the BLAS of Julia, and with
@@ -563,10 +569,10 @@ with NumPy arrays.
 of linear algebra on matrices whose types carry the properties.
 """
 
-# ╔═╡ 46c2c1f8-7f52-4edf-9bb3-057b29c90c52
+# ╔═╡ 211d4686-e35e-43a4-b717-357909ea603d
 Text(first(UlmLAM.lam_module([gls])))
 
-# ╔═╡ 84a29c56-a00e-4a64-8b6d-f7cb9022aab1
+# ╔═╡ 3d99aaad-9c29-4a11-8154-036d6cc62213
 md"""
 MLIR passes then
 
@@ -594,7 +600,7 @@ MLIR passes then
 | facts | `assume(A, props...)` for what the compiler cannot derive |
 | control | `loop(n, carry...) do i, x... end`, several results as a tuple |
 | Julia code | `extern(name, argtypes, result)` and `bind!(f; name = g)` |
-| in place | `InOut(Mat(...))`: a parameter the function may overwrite; `update!(p, value)`: it holds `value` on exit |
+| in place | a parameter may be overwritten (as in LAPACK), `In(Mat(...))` is read only; `update!(p, value)`: it holds `value` on exit; `f(...)` leaves the arrays alone, `f(...; overwrite=true)` lets them be overwritten |
 | inspect | `@code_lam f(args...)` |
 
 In Python the same with `@lam.function`, `Matrix("n", "m", "spd")`, `@`,
@@ -603,12 +609,12 @@ In Python the same with `@lam.function`, `Matrix("n", "m", "spd")`, `@`,
 So far: real double precision, dense matrices.
 """
 
-# ╔═╡ 919e9d45-9bf2-4bfa-94b2-79566cefa6c6
+# ╔═╡ 5a474864-d86d-4e70-b81e-8e46a9127a09
 md"""
 ## Appendix: the timing helper
 """
 
-# ╔═╡ cbde9e6f-c517-4a88-9770-c76436de766c
+# ╔═╡ cb2b8d57-ecbb-44f2-8642-fe3c77a7e5d0
 """Time (best of several runs) and memory allocated per call, relative to
 the first case.  The cases run in alternating rounds, after a warm-up of
 all of them, so that none is measured in a quieter or busier moment."""
@@ -633,68 +639,68 @@ function compare(cases...; seconds = 20)
 end
 
 # ╔═╡ Cell order:
-# ╟─3cf30fed-aeaf-44ba-90c4-11e13c165e70
-# ╠═bfc58bba-e510-4df9-977a-1b2f70d7a95a
-# ╟─99c79bc4-d12f-408b-bce1-bb791912fa23
-# ╠═97d4ad9d-ce0e-4043-88c7-227cadf785f8
-# ╠═b5ea53f5-9d15-4fbe-a36e-76ce30953796
-# ╟─0bb2a186-9820-45ee-a7f3-716b4971523b
-# ╠═ee47a312-0fd3-4e78-8ee7-8e8f814f384a
-# ╠═a0a59531-284d-433d-9e2b-fa2396e7693e
-# ╠═9271c5a5-3c94-4ca3-ba5c-4838a1500770
-# ╟─37f3abc7-72b1-4b11-a0bd-3661894dbdf7
-# ╠═52ae06ef-b048-43ff-b113-0431ea93aaa4
-# ╠═27c17087-44c2-401b-a065-126c3f9d5031
-# ╠═e8fcb0f1-15cf-4c72-b541-62b1849f817a
-# ╟─6447109e-14c1-4e9d-aaa5-cbf5b7ab0d82
-# ╠═5eb16b23-2882-4753-8813-46889fcb9d6b
-# ╠═ba85ed12-cf62-4517-96ed-4cb1183c3237
-# ╟─4d0c317e-140f-47c3-8216-88006bf55422
-# ╠═1abdf8ed-e330-4ccc-b4f5-506f88a0ab94
-# ╠═72093c4a-adae-4b91-a456-b3600779fda9
-# ╠═b5eeec03-e164-4a76-bafa-77addf9ef5c9
-# ╠═d889d772-1f3b-476e-b8cf-6a27e52c9934
-# ╠═6ed036da-1e1f-45c4-b4d2-edf341df3727
-# ╟─ae409110-ec80-4c4e-80c4-e3c5ea2daace
-# ╠═42699d34-da60-41cd-a393-708ae746a4ca
-# ╟─0c1edc97-a9e8-4a7f-a8cb-a5d12d3e6beb
-# ╠═25d6307e-a965-41f7-9104-a237d85cc5dd
-# ╟─e4242cef-7de5-4391-bf2f-33966503a97e
-# ╠═646c2d8a-ae7b-4a0c-b6a2-0cf93ae29174
-# ╠═24e65e03-0561-4c9e-af66-cbebbd079faf
-# ╟─6ec6922d-1271-44ff-a939-f5f73f985369
-# ╠═dd9de990-6eea-4d02-8121-2c6bf7758f7c
-# ╟─a48cca86-ecbf-4fc4-b504-fcbaee8a2f85
-# ╠═b2640230-4621-4457-a0e2-af6609ae25fd
-# ╠═f178487c-2b51-4746-82f7-fcc5fede5dcf
-# ╠═2e20ac14-68f5-493b-b5af-03d2b50c599b
-# ╠═e2f414c9-1cdc-468d-89db-c3401cd1ab97
-# ╟─4291ee80-fc56-4333-9e3f-48661300891f
-# ╠═b8b04660-f826-410b-bdfa-de1f79386e4b
-# ╠═143ef898-b3dd-4246-96f8-b230ef74d5c0
-# ╟─0c918607-545d-475f-a1d6-096b8860d6eb
-# ╠═dcfd6f15-4aa9-4ecb-929e-d8f70e77a2dd
-# ╠═f731d8c5-b525-4283-b4c7-758dab389906
-# ╠═b4a90f44-bbc6-4d4a-8750-fdafbe516469
-# ╟─8cf2a9a0-6dee-48f4-a2cf-7553d33c6722
-# ╟─8e84b4c7-17ca-40a0-aedd-6b6ab288e9f3
-# ╠═55442c2f-2032-4eb2-841b-7c0bc820ac74
-# ╠═4d105510-9cb2-4b8f-9974-424885c93ca8
-# ╟─445cbbbb-6eb7-4dab-8e1b-cf8d914718a0
-# ╠═fe4ff7f4-ccef-4a65-8cae-c01b1c9c643d
-# ╟─e49efdee-9522-47df-9316-86d7d6c73b6d
-# ╠═e0fc682e-9c11-4451-bafd-91222cb89fa5
-# ╠═f4693f5d-630c-4c70-a015-54d7b8f3f53d
-# ╠═247855e9-8840-4377-862f-b123e56eca62
-# ╠═bff18d9a-5683-44ae-84c4-58bd51999ddd
-# ╠═bc8b30cb-5caf-4562-a374-04e4badb6b4a
-# ╠═05a849c9-c80d-498f-8da7-f0d3b4256566
-# ╟─18b1222c-a775-417a-aa7c-b0af199f8edb
-# ╠═4ede9e3e-a6af-4ddc-b344-966b59edd857
-# ╟─a3964c43-89ae-415a-8991-a95f45088291
-# ╠═c5ba81a4-92f3-4343-8f40-fbd28f99aa52
-# ╟─1bb5b753-20a2-4189-83d7-3b8540b3a6d2
-# ╠═46c2c1f8-7f52-4edf-9bb3-057b29c90c52
-# ╟─84a29c56-a00e-4a64-8b6d-f7cb9022aab1
-# ╟─919e9d45-9bf2-4bfa-94b2-79566cefa6c6
-# ╠═cbde9e6f-c517-4a88-9770-c76436de766c
+# ╟─096e49b1-e841-4bbf-9570-82d482450ae0
+# ╠═c0e39006-4cd0-41de-805c-06018ad8fc7a
+# ╟─1bed9c95-561e-468c-a132-5f3ad3b87fdc
+# ╠═5acb6531-51f8-4e8e-b1aa-47049a9b67b6
+# ╠═3d4035f4-6280-441c-8429-dc78e2517764
+# ╟─74ba8a10-d366-4f09-a66d-e48a20315a7b
+# ╠═8cbd0969-30cf-4d42-97b9-154ab9822b8c
+# ╠═c8449da0-90c2-4e23-a917-0ecdc1dee1e8
+# ╠═5317daa9-f45c-4b11-9538-4699cc821b2c
+# ╟─fd1cd650-ce96-4575-a79f-1b705097eaa6
+# ╠═8164e36a-a4c2-43ef-927c-3c57d10a76bd
+# ╠═c9e577b3-e29f-4b02-b0ee-608b152576d5
+# ╠═75fa4376-60a6-4c70-895b-000c102b852f
+# ╟─173e36b1-71f5-45e6-88b9-35458334189e
+# ╠═ac9fb332-c623-4ee9-995d-beab2398e0db
+# ╠═ec69554b-352e-4b06-9236-edd032e0848f
+# ╟─17c646af-c1f9-4a0e-abce-5278bdd50f02
+# ╠═b0aeaa7d-90b5-4ae9-9ccc-9db91ee1aac5
+# ╠═eefcae66-874c-47bf-89bf-3072976a9375
+# ╠═aab3d322-01bb-4b3a-99ed-df34e797336e
+# ╠═6f047e06-58a8-4e58-920c-fddccfe1092f
+# ╠═abedce2d-5059-4a01-afa6-29ebb1a8581f
+# ╟─e8482fb5-213a-4d30-9334-fa2ca46a20f1
+# ╠═4714441d-4b5a-4c07-adb8-8374f97cee19
+# ╟─8a1c6160-fd1b-4bb4-872a-05534f9de950
+# ╠═e0cbace3-ef50-43ed-bccf-7ae0530642c2
+# ╟─b8cf0e48-3a65-4c43-a73d-4379dcd3fa13
+# ╠═2163ca0c-1217-4ee2-9dec-761fbe0cb38c
+# ╠═04ead300-9c56-4024-9e1a-5a26d5f005c6
+# ╟─b3b826ad-c781-4c50-aabf-9e09c74aa6a5
+# ╠═522c09ae-2166-472d-a109-5e9aa4df8c2a
+# ╟─c5fb5fa0-ed72-4233-b81f-ec285192c59c
+# ╠═47abec61-53e6-467f-bfc3-102da99d9498
+# ╠═c3337891-483f-4432-879a-5848b852ca40
+# ╠═9272bdd3-0c6e-46d1-a960-973991531db4
+# ╠═41c7df53-a92c-4a1f-8602-f9730ffbf285
+# ╟─a3794dd2-10ab-4e19-8de5-8d5504726ce8
+# ╠═8f071b69-9fcd-41b1-b706-c1b9fb0b75a9
+# ╠═88b4219e-8b5e-437c-baf9-ecf6abf48f03
+# ╟─79d0ff78-e500-4cc9-a384-0a7b9f507cba
+# ╠═fa205d56-d06e-4d54-9c90-9b8cdc28e6d4
+# ╠═35b2cbe3-a2e0-41b9-9ad4-71a24a035d6b
+# ╠═4f04367d-ea43-43c6-b0ce-1a40ac260d41
+# ╟─c715a964-c769-484f-a15b-291014531f54
+# ╟─a26d3eea-afef-4f3a-8bbb-dfc0d79f3e78
+# ╠═f48f0a28-00b9-4664-a61e-ce072bce0c13
+# ╠═ed9217a6-6368-4287-bf08-a85bafa4dcf3
+# ╟─b281f812-4daa-49cc-91b6-a0d12063bf46
+# ╠═abfb10a4-97b9-40f9-9840-d3490e8a3110
+# ╟─047d0a4f-b425-4bb4-8696-486a972b5af9
+# ╠═92870bcc-6e83-4055-a900-a6dc645d8f2c
+# ╠═d29cc5fd-3189-4400-85ce-ae7d46e1e534
+# ╠═f4d7d94b-20bb-4ddc-a1b1-de5a508e1736
+# ╠═173e2abb-5f0d-49bc-8d97-36f2520cd376
+# ╠═d54a9fa4-777b-4239-9b7a-c51acc6ddced
+# ╠═7cb69253-fc45-47fb-b161-1181c127e3b4
+# ╟─569b4188-1c50-41a3-b690-cde1200d9dd0
+# ╠═3fa62149-24a9-4bc4-a5f2-e452c69940d1
+# ╟─dc761b94-64d9-4747-8f1c-2858f6ec93a4
+# ╠═489799c2-8189-4b64-a6f6-e25139d7075a
+# ╟─0e1f5288-4ea5-41b9-bdd8-d3b2d2ee2e49
+# ╠═211d4686-e35e-43a4-b717-357909ea603d
+# ╟─3d99aaad-9c29-4a11-8154-036d6cc62213
+# ╟─5a474864-d86d-4e70-b81e-8e46a9127a09
+# ╠═cb2b8d57-ecbb-44f2-8642-fe3c77a7e5d0

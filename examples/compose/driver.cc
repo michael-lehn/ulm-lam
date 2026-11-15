@@ -6,10 +6,13 @@
 //  workspace (it needs M doubles of scratch memory): it follows the
 //  convention itself.  Checks:
 //    * the query of estimate_all returns its own requirement plus the
-//      answers of gls and postprocess (each rounded up to 64 bytes);
+//      answers of gls and postprocess (each rounded up to 64 bytes); gls
+//      may overwrite X and M (LAPACK style), so estimate_all passes it
+//      copies, in its own workspace;
 //    * with a given workspace, with *workspace_info = 0 (estimate_all
 //      allocates) and per step, the estimates equal those of separate calls
-//      of the generated gls;
+//      of the generated gls (its wrapper gls_keep, which leaves X and M
+//      as they are);
 //    * every call of postprocess got a part of estimate_all's workspace that
 //      is large enough, and estimate_all leaves *workspace_info unchanged;
 //    * a workspace that is too small: info = -5 (argument 5,
@@ -32,7 +35,10 @@ constexpr int N = 2000, M = 200, STEPS = 3;
 extern "C" {
 int64_t
 gls(double *X, double *M, double *y, double *b, int8_t *work,
-    int64_t *workspace_info); // generated, returns info
+    int64_t *workspace_info); // generated, returns info; overwrites X, M, y
+int64_t
+gls_keep(double *X, double *M, double *y, double *b, int8_t *work,
+         int64_t *workspace_info); // generated: gls on copies
 int64_t
 estimate_all(double *X, double *M, size_t n, int8_t *work,
              int64_t *workspace_info); // generated, returns info
@@ -116,7 +122,9 @@ main()
     gls(nullptr, nullptr, nullptr, nullptr, nullptr, &qGls);
     postprocess(0, nullptr, nullptr, &qPost);
     auto up = [](int64_t x) { return (x + 63) / 64 * 64; };
-    int64_t own = up(N * sizeof(double)) + up(M * sizeof(double)); // y, b
+    int64_t own = up(N * sizeof(double)) + up(M * sizeof(double)) + // y, b
+                  up(N * M * sizeof(double)) +
+                  up(N * N * sizeof(double)); // the copies of X, M for gls
     std::printf("query: estimate_all %lld = own %lld + gls %lld + "
                 "postprocess %lld\n",
                 (long long)qAll, (long long)own, (long long)qGls,
@@ -129,12 +137,12 @@ main()
     std::vector<double> ref(M * STEPS), y(N);
     {
 	Workspace ws([&](int8_t *w, int64_t *i) {
-	    gls(X.data(), Mat.data(), y.data(), ref.data(), w, i);
+	    gls_keep(X.data(), Mat.data(), y.data(), ref.data(), w, i);
 	});
 	for (int i = 0; i < STEPS; ++i) {
 	    observe(i, y.data());
-	    gls(X.data(), Mat.data(), y.data(), ref.data() + i * M, ws.work,
-	        ws.info());
+	    gls_keep(X.data(), Mat.data(), y.data(), ref.data() + i * M,
+	             ws.work, ws.info());
 	}
     }
     auto same = [&] {
@@ -175,8 +183,8 @@ main()
 	for (int i = 0; i < N; ++i)
 	    Bad[i * N + i] = -1;
 	calls = 0;
-	int64_t g = gls(X.data(), Bad.data(), y.data(), ref.data(), nullptr,
-	                &(small = 0));
+	int64_t g = gls_keep(X.data(), Bad.data(), y.data(), ref.data(),
+	                     nullptr, &(small = 0));
 	r = estimate_all(X.data(), Bad.data(), STEPS, ws.work, ws.info());
 	std::printf("      M indefinite: gls info %lld, estimate_all info "
 	            "%lld\n",

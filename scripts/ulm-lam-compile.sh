@@ -5,7 +5,9 @@
 # BACKEND=cblas, CBLAS and LAPACK).  Writes
 #   OUTPREFIX.selected.mlir    after kernel selection (ulm_lamk on tensors)
 #   OUTPREFIX.bufferized.mlir  after bufferization (ulm_lamk on memrefs)
-#   OUTPREFIX.emitc.mlir       after convert-ulm-lamk-to-ulmblas
+#   OUTPREFIX.emitc.mlir       after convert-ulm-lamk-to-ulmblas (in the
+#                              generic form: the custom form of
+#                              emitc.expression loses do_not_inline)
 #   OUTPREFIX.cpp              C++17, formatted with clang-format
 # and copies the C++ into SHOWDIR (the examples keep their generated code
 # in examples/*/generated/).
@@ -31,13 +33,13 @@ BUFFERIZE='ulm-lam-results-to-out-params, eliminate-empty-tensors,
 	func.func(buffer-loop-hoisting), buffer-deallocation-pipeline, canonicalize,
 	ulm-lam-workspace, canonicalize, cse, ulm-lam-info, canonicalize'
 # BACKEND=cblas: the same calls on CBLAS/LAPACK (include/ulm_lam/cblas_backend.h)
-LOWER="convert-ulm-lamk-to-ulmblas{backend=${BACKEND:-ulmblas}}, reconcile-unrealized-casts, form-expressions"
+LOWER="convert-ulm-lamk-to-ulmblas{backend=${BACKEND:-ulmblas}}, reconcile-unrealized-casts, form-expressions, ulm-lam-call-statements"
 
 opt "$IN" --pass-pipeline="builtin.module($SELECT)" -o "$OUT.selected.mlir"
 opt "$OUT.selected.mlir" --pass-pipeline="builtin.module($BUFFERIZE)" \
 	-o "$OUT.bufferized.mlir"
 opt "$OUT.bufferized.mlir" --pass-pipeline="builtin.module($LOWER)" \
-	-o "$OUT.emitc.mlir"
+	--mlir-print-op-generic -o "$OUT.emitc.mlir"
 "$LLVM/bin/mlir-translate" --mlir-to-cpp "$OUT.emitc.mlir" -o "$OUT.cpp"
 # Format with the clang-format style found from the output location
 # (the project's or the user's .clang-format).

@@ -27,12 +27,12 @@ ulm_lam_copy(void *dst, const void *src, std::size_t bytes)
 }
 
 /* gls: matrices by reference (row-major), owned by the caller
- *   v1  double[2000][200]   in    read only
- *   v2  double[2000][2000]  in    read only
- *   v3  double[2000][1]     in    read only
- *   v4  double[200][1]      out   written
- *   v5  int8_t *            work  workspace (bytes)
- *   v6  int64_t *           info  -1: query, 0: allocate, >0: size of work
+ *   v1  double[2000][200]   inout  may be overwritten (unspecified on exit)
+ *   v2  double[2000][2000]  inout  may be overwritten (unspecified on exit)
+ *   v3  double[2000][1]     inout  may be overwritten (unspecified on exit)
+ *   v4  double[200][1]      out    written
+ *   v5  int8_t *            work   workspace (bytes)
+ *   v6  int64_t *           info   -1: query, 0: allocate, >0: size of work
  * returns info:
  *     0  success
  *     1  Cholesky factorisation of v2: not positive definite
@@ -43,7 +43,7 @@ ulm_lam_copy(void *dst, const void *src, std::size_t bytes)
 extern "C" int64_t
 gls(double *v1, double *v2, double *v3, double *v4, int8_t *v5, int64_t *v6)
 {
-    int64_t v7 = 35536000;
+    int64_t v7 = 320000;
     double v8 = 1.00000000000000000e+00;
     double v9 = 0.0e+00;
     int64_t v10 = 0;
@@ -61,59 +61,143 @@ gls(double *v1, double *v2, double *v3, double *v4, int8_t *v5, int64_t *v6)
 	    bool v15 = v12 == v10;
 	    int8_t *v16;
 	    if (v15) {
-		void *v17 = aligned_alloc(64, 35536000);
+		void *v17 = aligned_alloc(64, 320000);
 		v16 = (int8_t *)v17;
 	    } else {
 		v16 = v5;
 	    }
 	    int8_t *v18 = v16;
-	    int64_t v19 = (int64_t)v11;
-	    double *v20 = (double *)(v18 + v19);
-	    ulm_lam_copy(v20, v2, 32000000);
-	    int64_t v21 =
-	        ulmBLAS::potrf<std::ptrdiff_t>(true, 2000, v20, 2000, 1);
-	    bool v22 = (bool)(v21 != v10);
-	    uint64_t v23 = (uint64_t)v22;
-	    int64_t v24 = (int64_t)v23;
-	    int64_t v25;
-	    if (v24 == v10) {
-		int64_t v26 = (int64_t)32000000;
-		double *v27 = (double *)(v18 + v26);
-		int64_t v28 = (int64_t)32320000;
-		double *v29 = (double *)(v18 + v28);
-		ulm_lam_copy(v29, v1, 3200000);
+	    int64_t v19 =
+	        ulmBLAS::potrf<std::ptrdiff_t>(true, 2000, v2, 2000, 1);
+	    bool v20 = (bool)(v19 != v10);
+	    uint64_t v21 = (uint64_t)v20;
+	    int64_t v22 = (int64_t)v21;
+	    int64_t v23;
+	    if (v22 == v10) {
+		int64_t v24 = (int64_t)v11;
+		double *v25 = (double *)(v18 + v24);
 		(void)ulmBLAS::trtrs<std::ptrdiff_t>(true, false, false, false,
-		                                     2000, 200, v20, 2000, 1,
-		                                     v29, 200, 1);
-		ulmBLAS::sylrk<std::ptrdiff_t>(200, 2000, v8, v29, 1, 200, v9,
-		                               v27, 200, 1);
-		int64_t v30 =
-		    ulmBLAS::potrf<std::ptrdiff_t>(true, 200, v27, 200, 1);
-		int64_t v31 = v30 != v10 ? 2 : v10;
-		if (v31 == v10) {
-		    int64_t v32 = (int64_t)35520000;
-		    double *v33 = (double *)(v18 + v32);
-		    ulm_lam_copy(v33, v3, 16000);
-		    ulmBLAS::trlsv<std::ptrdiff_t>(2000, false, v20, 2000, 1,
-		                                   v33, 1);
-		    ulmBLAS::gemv<std::ptrdiff_t>(200, 2000, v8, v29, 1, 200,
-		                                  v33, 1, v9, v4, 1);
-		    ulmBLAS::trlsv<std::ptrdiff_t>(200, false, v27, 200, 1, v4,
+		                                     2000, 200, v2, 2000, 1, v1,
+		                                     200, 1);
+		ulmBLAS::sylrk<std::ptrdiff_t>(200, 2000, v8, v1, 1, 200, v9,
+		                               v25, 200, 1);
+		int64_t v26 =
+		    ulmBLAS::potrf<std::ptrdiff_t>(true, 200, v25, 200, 1);
+		int64_t v27 = v26 != v10 ? 2 : v10;
+		if (v27 == v10) {
+		    ulmBLAS::trlsv<std::ptrdiff_t>(2000, false, v2, 2000, 1, v3,
 		                                   1);
-		    ulmBLAS::trusv<std::ptrdiff_t>(200, false, v27, 1, 200, v4,
+		    ulmBLAS::gemv<std::ptrdiff_t>(200, 2000, v8, v1, 1, 200, v3,
+		                                  1, v9, v4, 1);
+		    ulmBLAS::trlsv<std::ptrdiff_t>(200, false, v25, 200, 1, v4,
+		                                   1);
+		    ulmBLAS::trusv<std::ptrdiff_t>(200, false, v25, 1, 200, v4,
 		                                   1);
 		}
-		v25 = v31;
+		v23 = v27;
 	    } else {
-		v25 = v24;
+		v23 = v22;
 	    }
-	    int64_t v34 = v25;
+	    int64_t v28 = v23;
 	    if (v15) {
 		free(v18);
 	    }
-	    v14 = v34;
+	    v14 = v28;
 	}
 	v13 = v14;
     }
     return v13;
+}
+/* gls_keep: matrices by reference (row-major), owned by the caller
+ *   v1  double[2000][200]   in    read only
+ *   v2  double[2000][2000]  in    read only
+ *   v3  double[2000][1]     in    read only
+ *   v4  double[200][1]      out   written
+ *   v5  int8_t *            work  workspace (bytes)
+ *   v6  int64_t *           info  -1: query, 0: allocate, >0: size of work
+ * returns info:
+ *     0  success
+ *     1  Cholesky factorisation of v2: not positive definite
+ *     2  Cholesky factorisation of a computed matrix: not positive definite
+ *    -6  v6: workspace too small
+ * (info != 0: the outputs are unspecified)
+ */
+extern "C" int64_t
+gls_keep(double *v1, double *v2, double *v3, double *v4, int8_t *v5,
+         int64_t *v6)
+{
+    int64_t v7 = 0;
+    int64_t v8 = -1;
+    size_t v9 = 0;
+    int64_t v10 = v6[v9];
+    int64_t v11 = (int64_t)v9;
+    double *v12 = (double *)(v5 + v11);
+    int64_t v13 = (int64_t)1;
+    double *v14 = (double *)(v5 + v13);
+    int64_t v15 = (int64_t)2;
+    double *v16 = (double *)(v5 + v15);
+    int64_t v17 = (int64_t)3;
+    double *v18 = (double *)(v5 + v17);
+    v6[v9] = v8;
+    int64_t v19 = gls(v12, v14, v16, v18, v5, v6);
+    int64_t v20;
+    if (v19 == v7) {
+	int64_t v21 = v6[v9];
+	uint64_t v22 = (uint64_t)v21;
+	uint64_t v23 = (uint64_t)63;
+	int64_t v24 = (int64_t)(v22 + v23);
+	uint64_t v25 = (uint64_t)v24;
+	uint64_t v26 = (uint64_t)-64;
+	int64_t v27 = (int64_t)(v25 & v26);
+	uint64_t v28 = (uint64_t)v27;
+	uint64_t v29 = (uint64_t)35216000;
+	int64_t v30 = (int64_t)(v28 + v29);
+	v6[v9] = v10;
+	int64_t v31;
+	if (v10 == v8) {
+	    v6[v9] = v30;
+	    v31 = v7;
+	} else {
+	    int64_t v32;
+	    if (v10 > v7 & v10 < v30) {
+		v32 = -6;
+	    } else {
+		bool v33 = v10 == v7;
+		int8_t *v34;
+		if (v33) {
+		    ptrdiff_t v35 = (ptrdiff_t)v30;
+		    size_t v36 = (size_t)v35;
+		    void *v37 = aligned_alloc(64, v36);
+		    v34 = (int8_t *)v37;
+		} else {
+		    v34 = v5;
+		}
+		int8_t *v38 = v34;
+		int64_t v39 = (int64_t)v9;
+		double *v40 = (double *)(v38 + v39);
+		ulm_lam_copy(v40, v1, 3200000);
+		int64_t v41 = (int64_t)3200000;
+		double *v42 = (double *)(v38 + v41);
+		ulm_lam_copy(v42, v2, 32000000);
+		int64_t v43 = (int64_t)35200000;
+		double *v44 = (double *)(v38 + v43);
+		ulm_lam_copy(v44, v3, 16000);
+		int64_t v45 = (int64_t)35216000;
+		v6[v9] = v21;
+		int64_t v46 = gls(v40, v42, v44, v4, v38 + v45, v6);
+		if (v46 == v7) {
+		    v6[v9] = v10;
+		}
+		if (v33) {
+		    free(v38);
+		}
+		v32 = v46;
+	    }
+	    v31 = v32;
+	}
+	v20 = v31;
+    } else {
+	v20 = v19;
+    }
+    return v20;
 }

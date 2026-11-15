@@ -14,6 +14,7 @@ LICM= "$ROOT/scripts/ulm-lam-compile.sh" "$HERE/estimate.mlir" "$OUT/estimate_no
 "$CXX" "${ULMFLAGS[@]}" -Wall -Wextra -pedantic -c "$OUT/estimate.cpp" \
 	-o "$OUT/estimate.o"
 "$CXX" "${ULMFLAGS[@]}" -Wall -Wextra -pedantic -Destimate=estimate_nolicm \
+	-Destimate_keep=estimate_nolicm_keep \
 	-c "$OUT/estimate_nolicm.cpp" -o "$OUT/estimate_nolicm.o"
 "$CXX" "${ULMFLAGS[@]}" "$OUT/estimate.o" "$OUT/estimate_nolicm.o" \
 	"$HERE/driver.cc" -o "$OUT/estimate" "${ULMLIBS[@]}"

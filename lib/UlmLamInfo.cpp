@@ -52,6 +52,7 @@
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/StringSet.h"
 
+#include <algorithm>
 #include <string>
 
 using namespace mlir;
@@ -61,6 +62,9 @@ namespace {
 
 constexpr llvm::StringLiteral kErrorFn = "ulm_lam_workspace_error";
 constexpr llvm::StringLiteral kInfoAttr = "ulm_lam.info";
+constexpr llvm::StringLiteral kWrapsAttr = "ulm_lam.wraps";
+/// The code of a check whose info is passed on unchanged.
+constexpr int64_t kPassOn = -1;
 
 struct UlmLamInfo : PassWrapper<UlmLamInfo, OperationPass<ModuleOp>>
 {
@@ -132,8 +136,15 @@ struct UlmLamInfo : PassWrapper<UlmLamInfo, OperationPass<ModuleOp>>
 		defined.insert(f.getSymName());
 	    }
 
-	// 1. number the checks and describe them (before calls change)
+	// 1. number the checks and describe them (before calls change);
+	// the wrappers f_keep last: they pass on the info of f and its
+	// descriptions (their only check is the call of f)
+	std::stable_partition(funcs.begin(), funcs.end(), [](func::FuncOp f) {
+	    return !f->hasAttr(kWrapsAttr);
+	});
 	for (func::FuncOp f : funcs) {
+	    if (passOn(f))
+		continue;
 	    SmallVector<Attribute> text;
 	    f.walk<WalkOrder::PreOrder>([&](Operation *op) {
 		// (a workspace query, generated at entry, is not numbered)
@@ -199,6 +210,33 @@ struct UlmLamInfo : PassWrapper<UlmLamInfo, OperationPass<ModuleOp>>
 		e.erase();
     }
 
+    /// A wrapper f_keep of f (ulm-lam-results-to-out-params): its info is
+    /// that of the call of f, with f's descriptions.
+    bool
+    passOn(func::FuncOp w)
+    {
+	auto wraps = w->getAttrOfType<StringAttr>(kWrapsAttr);
+	if (!wraps)
+	    return false;
+	auto module = w->getParentOfType<ModuleOp>();
+	auto f = module.lookupSymbol<func::FuncOp>(wraps.getValue());
+	if (!f || !f->hasAttr(kInfoAttr))
+	    return false;
+	SmallVector<Operation *> checks;
+	w.walk([&](Operation *op) {
+	    if (isCheck(op) && !isErrorCall(op) &&
+	        !op->hasAttr("ulm_lam.query"))
+		checks.push_back(op);
+	});
+	auto c = checks.size() == 1 ? dyn_cast<func::CallOp>(checks[0])
+	                            : func::CallOp();
+	if (!c || c.getCallee() != wraps.getValue())
+	    return false;
+	codes[c] = kPassOn;
+	w->setAttr(kInfoAttr, f->getAttr(kInfoAttr));
+	return true;
+    }
+
     // ---- descriptions ----------------------------------------------------
 
     /// "v3" for argument 2 of f, "a copy of v3" for a buffer filled from
@@ -212,10 +250,9 @@ struct UlmLamInfo : PassWrapper<UlmLamInfo, OperationPass<ModuleOp>>
 		return "v" + std::to_string(a.getArgNumber() + 1);
 	    return "";
 	};
-	if (std::string n = argName(m); !n.empty())
-	    return n;
 	// a kernel other than the factorisation that writes m (e.g. adddiag:
-	// K + s^2 I is factorised, not K)
+	// K + s^2 I is factorised, not K; also in place, in a parameter that
+	// may be overwritten)
 	bool changed = llvm::any_of(m.getUsers(), [&](Operation *u) {
 	    auto d = dyn_cast<DestinationStyleOpInterface>(u);
 	    return d &&
@@ -224,6 +261,8 @@ struct UlmLamInfo : PassWrapper<UlmLamInfo, OperationPass<ModuleOp>>
 	           llvm::any_of(d.getDpsInits(),
 	                        [&](Value v) { return v == m; });
 	});
+	if (std::string n = argName(m); !n.empty())
+	    return changed ? "a matrix computed from " + n : n;
 	for (Operation *u : m.getUsers()) {
 	    Value src;
 	    if (auto c = dyn_cast<memref::CopyOp>(u); c && c.getTarget() == m)
@@ -271,8 +310,8 @@ struct UlmLamInfo : PassWrapper<UlmLamInfo, OperationPass<ModuleOp>>
 	    return cst(-static_cast<int64_t>(f.getNumArguments()));
 	Value info = op->getResults().back();
 	int64_t k = codes.lookup(op);
-	if (k == 0) // a workspace query: its info is passed on
-	    return info;
+	if (k == 0 || k == kPassOn) // a workspace query, or the call of
+	    return info;            // the function a wrapper wraps
 	Value failed = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::ne,
 	                                     info, cst(0));
 	return arith::SelectOp::create(b, loc, failed, cst(k), cst(0));

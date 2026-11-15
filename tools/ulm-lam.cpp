@@ -1310,7 +1310,8 @@ main(int argc, char **argv)
     std::string lower =
         "builtin.module(convert-ulm-lamk-to-ulmblas{backend=" + backend +
         "}, reconcile-unrealized-casts" +
-        (emit == "cpp" ? ", form-expressions" : "") + ")";
+        (emit == "cpp" ? ", form-expressions, ulm-lam-call-statements" : "") +
+        ")";
 
     auto stage = [&](const char *what) -> LogicalResult {
 	if (stagesPrefix.empty())

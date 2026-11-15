@@ -437,20 +437,26 @@ rest: transposes, symmetry, solves, scalars.)
 
 ## LAPACK style, and a MATLAB-style wrapper
 
-Functions that call functions are best written as LAPACK writes them: a
-matrix that may be overwritten is `InOut`, a result goes into a parameter
-(`update!`), and then no workspace is needed.  Here `bar!` overwrites ``y``
-with ``M^{-1} y`` and ``M`` with its Cholesky factor (as `potrf` and `potrs`
-do), and `foo!` calls it twice: ``y \leftarrow M^{-1} (N^{-1} y)``.  Who
-wants it convenient writes a wrapper with read-only parameters, MATLAB
-style; the copies, and the workspace for them, are then in the wrapper only.
+ulm.lam is to BLAS and LAPACK what C is to assembly, and a generated
+function is a LAPACK routine: it may overwrite the matrices it receives
+(declare a parameter `In(...)` to make it read only), a result goes into a
+parameter (`update!`), and then no workspace is needed.  Here `bar!`
+overwrites ``y`` with ``M^{-1} y`` and ``M`` with its Cholesky factor (as
+`potrf` and `potrs` do), and `foo!` calls it twice:
+``y \leftarrow M^{-1} (N^{-1} y)``.  For every such function ulm.lam also
+generates a wrapper that leaves the matrices alone, and calling `foo!(...)`
+from Julia calls that wrapper; `foo!(...; overwrite=true)` calls `foo!`
+itself.  A wrapper written by hand, MATLAB style, has read-only
+parameters; the copies, and the workspace for them, are then in the
+wrapper only.
 ''')
 code(r'''
 begin
-    @lam bar!(M::InOut(Mat(:n, :n, :spd)), y::InOut(Vec(:n))) = update!(y, M \ y)
-    @lam foo!(M::InOut(Mat(:n, :n, :spd)), N::InOut(Mat(:n, :n, :spd)), y::InOut(Vec(:n))) =
+    @lam bar!(M::Mat(:n, :n, :spd), y::Vec(:n)) = update!(y, M \ y)
+    @lam foo!(M::Mat(:n, :n, :spd), N::Mat(:n, :n, :spd), y::Vec(:n)) =
         update!(y, bar!(M, bar!(N, y)))
-    @lam foo_matlab(M::Mat(:n, :n, :spd), N::Mat(:n, :n, :spd), y::Vec(:n)) = foo!(M, N, y)
+    @lam foo_matlab(M::In(Mat(:n, :n, :spd)), N::In(Mat(:n, :n, :spd)), y::In(Vec(:n))) =
+        foo!(M, N, y)
 end
 ''')
 code(r'''
@@ -472,8 +478,8 @@ code(r'''
 ''')
 code(r'''
 let lib = UlmLAM.library(foo_matlab)                 # with foo! and bar!
-    (bar! = workspace_size(lib.bar!, Mspd, yv),
-     foo! = workspace_size(lib.foo!, Mspd, Nspd, yv),
+    (bar! = workspace_size(lib.bar!, Mspd, yv; overwrite=true),
+     foo! = workspace_size(lib.foo!, Mspd, Nspd, yv; overwrite=true),
      foo_matlab = workspace_size(lib.foo_matlab, Mspd, Nspd, yv))
 end
 ''')
@@ -485,7 +491,7 @@ the wrapper one would write by hand.
 ''')
 code(r'''
 let M1 = copy(Mspd), N1 = copy(Nspd), y1 = copy(yv)
-    foo!(M1, N1, y1)                                 # y1 is the solution now
+    foo!(M1, N1, y1; overwrite=true)                 # y1 is the solution now
     x = foo_matlab(Mspd, Nspd, yv)                    # arguments unchanged
     (error = norm(y1 - Mspd \ (Nspd \ yv)) / norm(y1),
      same_as_wrapper = y1 == x,
@@ -544,7 +550,7 @@ MLIR passes then
 | facts | `assume(A, props...)` for what the compiler cannot derive |
 | control | `loop(n, carry...) do i, x... end`, several results as a tuple |
 | Julia code | `extern(name, argtypes, result)` and `bind!(f; name = g)` |
-| in place | `InOut(Mat(...))`: a parameter the function may overwrite; `update!(p, value)`: it holds `value` on exit |
+| in place | a parameter may be overwritten (as in LAPACK), `In(Mat(...))` is read only; `update!(p, value)`: it holds `value` on exit; `f(...)` leaves the arrays alone, `f(...; overwrite=true)` lets them be overwritten |
 | inspect | `@code_lam f(args...)` |
 
 In Python the same with `@lam.function`, `Matrix("n", "m", "spd")`, `@`,

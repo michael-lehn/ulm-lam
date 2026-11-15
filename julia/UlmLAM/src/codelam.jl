@@ -190,7 +190,7 @@ function render_once(f::LamFunction, body, choice, flags, infos, selected="",
     end
     sig = join(["$n::" * (t isa MatType ? (t.isvec ? "$(t.rows)" : "$(t.rows)×$(t.cols)") *
                 (isempty(t.props) ? "" : " " * join(t.props, ",")) *
-                (t.intent == :inout ? " inout" : "") : t isa FloatType ? "Float" : "Index")
+                (t.intent == :in ? " in" : "") : t isa FloatType ? "Float" : "Index")
                 for (n, t) in f.params], ", ")
     push!(r.lines, "$(f.name)($sig)")
     ind = "  "

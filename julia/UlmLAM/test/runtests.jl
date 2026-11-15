@@ -143,13 +143,18 @@ for backend in BACKENDS
             ref = M \ b
             M2 = copy(M)
             @test rel(lib.overwrite(M2, b), ref) < 1e-12
+            @test M2 == M                                   # the wrapper: M kept
+            @test rel(lib.overwrite(M2, b; overwrite=true), ref) < 1e-12
+            @test M2 != M                                   # overwritten
+            @test workspace_size(lib.overwrite, M, b; overwrite=true) <
+                  workspace_size(lib.overwrite, M, b)
             w = Workspace(workspace_size(lib.left_spd, M, randn(20, 3)))
             B = randn(20, 3)
             @test rel(lib.left_spd(M, B; work=w), M \ B) < 1e-12
         end
         @testset "errors" begin
             @test_throws LamError lib.gls(randn(5, 3), spd(6), randn(5))
-            @test_throws LamError lib.overwrite(Symmetric(spd(4)), randn(4))
+            @test_throws LamError lib.overwrite(Symmetric(spd(4)), randn(4); overwrite=true)
         end
     end
 end
@@ -167,11 +172,11 @@ end
     M, N, y = A * A' + n * I, B * B' + n * I, randn(n)
     ref = M \ (N \ y)
     M1, N1, y1 = copy(M), copy(N), copy(y)
-    @test lib.ufoo!(M1, N1, y1) === nothing
+    @test lib.ufoo!(M1, N1, y1; overwrite=true) === nothing
     @test norm(y1 - ref) / norm(ref) < 1e-12              # y is the solution
     @test triu(M1) ≈ cholesky(Symmetric(M)).U               # M its factor
-    @test workspace_size(lib.ubar!, M, y) == 0
-    @test workspace_size(lib.ufoo!, M, N, y) == 0
+    @test workspace_size(lib.ubar!, M, y; overwrite=true) == 0
+    @test workspace_size(lib.ufoo!, M, N, y; overwrite=true) == 0
     @test workspace_size(lib.ufoo, M, N, y) == 2 * cld(8 * n^2, 64) * 64  # copies of M, N (64-byte blocks)
     M2 = copy(M); y2 = copy(y)
     @test norm(lib.ufoo(M2, N, y2) - ref) / norm(ref) < 1e-12
@@ -182,7 +187,7 @@ end
     M3 = copy(M)
     @test lib.ukeep(M3, y) ≈ M \ y + y
     @test occursin("ubar!(N, y)", string(code_lam(ufoo!)))
-    @test_throws LamError UlmLAM.lam_module([@lam bad_upd(A::Mat(:n, :n), y::Vec(:n)) = update!(y, A * y)])
+    @test_throws LamError UlmLAM.lam_module([@lam bad_upd(A::Mat(:n, :n), y::In(Vec(:n))) = update!(y, A * y)])
 end
 
 @testset "selection: distribution, Gram, explicit inverses" begin

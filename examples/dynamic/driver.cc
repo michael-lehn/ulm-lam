@@ -3,13 +3,16 @@
 //  matrices of several sizes.  For every (n, m):
 //
 //  1. random X (n x m), M = A A^T + n I (spd), y
-//  2. query the workspace; it must be the sum of the temporaries, each
-//     rounded up to 64 bytes: L (n x n), the Cholesky factor of S (m x m),
-//     W = L^-1 X (n x m), L^-1 y (n)
-//  3. b = gls(n, m, X, M, y)
+//  2. query the workspace of gls_keep, the wrapper that leaves X, M, y as
+//     they are; it must be the sum of the temporaries, each rounded up to
+//     64 bytes: L (n x n), the Cholesky factor of S (m x m), W = L^-1 X
+//     (n x m), L^-1 y (n)
+//  3. b = gls_keep(n, m, X, M, y)
 //  4. check: relative residual of the normal equations
 //     X^T M^-1 (X b - y), with M^-1 applied by an independent LU solve
-//     (getrf + getrs), and that X, M, y are unchanged (intent in)
+//     (getrf + getrs), and that X, M, y are unchanged
+//  5. gls itself (LAPACK style) on copies: L in M, W in X, L^-1 y in y, so
+//     its workspace is the factor of S alone; the same b
 //
 #include <cmath>
 #include <cstdio>
@@ -24,7 +27,10 @@
 
 extern "C" int64_t
 gls(size_t n, size_t m, double *X, double *M, double *y, double *b,
-    int8_t *work, int64_t *workspace_info); // generated, returns info
+    int8_t *work, int64_t *workspace_info); // generated; overwrites X, M, y
+extern "C" int64_t
+gls_keep(size_t n, size_t m, double *X, double *M, double *y, double *b,
+         int8_t *work, int64_t *workspace_info); // generated: gls on copies
 
 static int64_t
 round64(int64_t bytes)
@@ -59,12 +65,21 @@ check(int n, int m, std::mt19937_64 &gen)
     std::vector<double> X0(X), M0(M), y0(y);
 
     Workspace ws([&](int8_t *w, int64_t *i) {
-	gls(n, m, X.data(), M.data(), y.data(), b.data(), w, i);
+	gls_keep(n, m, X.data(), M.data(), y.data(), b.data(), w, i);
     });
     int64_t expected = round64(8 * n * n) + round64(8 * m * m) +
                        round64(8 * n * m) + round64(8 * n);
-    int64_t info =
-        gls(n, m, X.data(), M.data(), y.data(), b.data(), ws.work, ws.info());
+    int64_t info = gls_keep(n, m, X.data(), M.data(), y.data(), b.data(),
+                            ws.work, ws.info());
+
+    //  gls itself on copies
+    std::vector<double> Xk(X), Mk(M), yk(y), bk(m);
+    Workspace wsk([&](int8_t *w, int64_t *i) {
+	gls(n, m, Xk.data(), Mk.data(), yk.data(), bk.data(), w, i);
+    });
+    int64_t infoK = gls(n, m, Xk.data(), Mk.data(), yk.data(), bk.data(),
+                        wsk.work, wsk.info());
+    bool kernel = infoK == 0 && bk == b && wsk.size == round64(8 * m * m);
 
     //  residual r = X^T M^-1 (X b - y), M^-1 by LU (independent of potrf)
     std::vector<double> U(n * 2), LU(M), r(m), q(m);
@@ -83,11 +98,13 @@ check(int n, int m, std::mt19937_64 &gen)
     ulmBLAS::gemv(m, n, 1.0, X.data(), 1, m, U.data() + 1, 2, 0.0, q.data(), 1);
     double res = nrm2(r) / nrm2(q);
     bool unchanged = X == X0 && M == M0 && y == y0;
-    bool ok = info == 0 && res < 1e-10 && ws.size == expected && unchanged;
+    bool ok =
+        info == 0 && res < 1e-10 && ws.size == expected && unchanged && kernel;
     std::printf("n = %4d, m = %3d: workspace %9lld bytes (expected %9lld), "
-                "residual %.1e, inputs %s  %s\n",
+                "residual %.1e, inputs %s; gls itself: %8lld bytes  %s\n",
                 n, m, (long long)ws.size, (long long)expected, res,
-                unchanged ? "unchanged" : "CHANGED", ok ? "ok" : "FAIL");
+                unchanged ? "unchanged" : "CHANGED", (long long)wsk.size,
+                ok ? "ok" : "FAIL");
     return ok;
 }
 
