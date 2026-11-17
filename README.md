@@ -35,7 +35,7 @@ precision (from Julia a function called with `Float32` arrays is compiled
 for `Float32`; from Python `lam.compile(f, dtype="float32")`).
 
 Next, an idea: [every operation where it is
-cheapest](#every-operation-where-it-is-cheapest-a-way-to-cheaper-ai).  A
+cheapest (a way to cheaper AI)](#every-operation-where-it-is-cheapest-a-way-to-cheaper-ai).  A
 computer today combines a CPU (central processing unit)
 with accelerators such as a GPU (graphics processing unit), an NPU (neural
 processing unit) or an FPGA (field-programmable gate array).  Because
