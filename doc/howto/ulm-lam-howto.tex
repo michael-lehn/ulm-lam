@@ -1135,7 +1135,9 @@ operands have these properties, the result has those'':
 \item \emph{Palindromic products:} \(Z\T Z\) is SPSD, and SPD if \(Z\) has
   full column rank; \(Z\T MZ\) is symmetric, SPSD or SPD if \(M\) is, SPD
   only if \(M\) is SPD and \(Z\) has full column rank. A product
-  \(F_1\cdots F_k\) is recognised as such when \(F_i\T=F_{k+1-i}\). Note
+  \(F_1\cdots F_k\) is recognised as such when \(F_i\T=F_{k+1-i}\) for
+  \(i=1,\dots,\lfloor k/2\rfloor\); for odd \(k\) the middle factor
+  \(F_{(k+1)/2}\) plays the role of \(M\), and its properties decide. Note
   that this rule needs the \emph{identity} of the operands, not only their
   properties: \(A\T A\) is SPSD, \(A\T B\) is not.
 \end{itemize}

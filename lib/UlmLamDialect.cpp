@@ -302,7 +302,6 @@ mulProperties(ValueRange f)
          (has(ps[1], P::non_singular) && has(ps[0], P::full_rank))))
 	r = r | P::full_rank;
     return r | palindromeProperties(f, ps);
-    return r;
 }
 
 P
