@@ -248,7 +248,7 @@ Definition Specification). The proportions in ulm.lam are (from
 \midrule
 TableGen declarations, written by hand & 810\\
 C++ generated from them by \texttt{mlir-tblgen} & 22\,102\\
-C++ written by hand (compiler passes, rules, lowering) & 9\,925\\
+C++ written by hand (compiler passes, rules, lowering) & 9\,983\\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -407,7 +407,9 @@ Properties closure(Properties p, ArrayRef<int64_t> shape) {
   P q = p;
   if (isStaticSquare(shape))
     q = q | P::square;
-  for (int iter = 0; iter < 3; ++iter) { // implications chain at most 3 deep
+  P prev;
+  do {                     // until nothing changes (a fixpoint)
+    prev = q;
     if (has(q, P::identity))
       q = q | P::lower_tri | P::upper_tri | P::spd | P::orthogonal |
           P::permutation | P::unit_diag;
@@ -419,10 +421,29 @@ Properties closure(Properties p, ArrayRef<int64_t> shape) {
     if (has(q, P::orthogonal))   q = q | P::full_rank;
     if (has(q, P::non_singular)) q = q | P::full_rank | P::square;
     if (has(q, P::square | P::full_rank)) q = q | P::non_singular;
-  }
+  } while (q != prev);
   return q;
 }
 \end{lstlisting}
+
+The rules are applied until nothing changes. Here they are ordered so
+that a rule only adds properties that no earlier rule needs as its
+premise: \texttt{spsd}, \texttt{symmetric}, \texttt{permutation},
+\texttt{orthogonal} and \texttt{square} are only derived above the rules
+that use them. The only exception is the last rule, which adds
+non-singular; but its consequences, full rank and square, are its own
+premises and are already there. Hence the first pass of the
+\texttt{do}-\texttt{while} loop computes the complete closure, and the
+second one only confirms that nothing changes (for a set that is already
+closed, the first pass does). However, if
+rules are added later or for some reason are reordered, one pass may no
+longer be enough, and nothing would report it: the compiler would just
+know fewer properties than it could. With the loop, the closure stays
+complete for any set and order of rules, at the price of that confirming pass,
+a few bit operations. A test makes sure of it: the pass
+\texttt{ulm-lam-test-closure} checks for all \(2^{15}\) sets of property
+bits, with an unknown and with a square shape, that applying the closure
+a second time adds nothing (\texttt{test/infer/closure.mlir}).
 
 \texttt{verifyEncoding} (about 25 lines) rejects contradictions: zero and
 full rank together, a square matrix of shape \(3\times4\), a stored

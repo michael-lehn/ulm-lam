@@ -26,12 +26,12 @@
 # hand-written C++
     1389 lib/ConvertUlmLamkToUlmBLAS.cpp
       49 lib/Plugin.cpp
-    1486 lib/UlmLamDialect.cpp
+    1496 lib/UlmLamDialect.cpp
      568 lib/UlmLamInfo.cpp
       31 lib/UlmLamkDialect.cpp
-    3652 lib/UlmLamPasses.cpp
+    3700 lib/UlmLamPasses.cpp
      772 lib/UlmLamResultsToOutParams.cpp
      529 lib/UlmLamWorkspace.cpp
      105 lib/UlmLamDialect.h
     1344 tools/ulm-lam.cpp
-    9925 total
+    9983 total

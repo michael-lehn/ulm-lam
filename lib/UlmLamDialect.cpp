@@ -100,7 +100,17 @@ mlir::ulm_lam::closure(::mlir::ulm_lam::Properties p, ArrayRef<int64_t> shape)
     P q = p;
     if (isStaticSquare(shape))
 	q = q | P::square;
-    for (int iter = 0; iter < 3; ++iter) { // implications chain at most 3 deep
+    // Apply the implications until nothing changes (a fixpoint).  The rules
+    // are ordered so that a rule only adds properties that no earlier rule
+    // needs as its premise (the last one adds non_singular, whose
+    // consequences full_rank and square are its own premises); hence the
+    // loop runs once.  If rules are added later or reordered, that may no
+    // longer hold, and the loop still computes the complete closure.
+    // test/infer/closure.mlir checks closure(closure(p)) == closure(p) for
+    // every property set.
+    P prev;
+    do {
+	prev = q;
 	if (has(q, P::identity))
 	    q = q | P::lower_tri | P::upper_tri | P::spd | P::orthogonal |
 	        P::permutation | P::unit_diag;
@@ -118,7 +128,7 @@ mlir::ulm_lam::closure(::mlir::ulm_lam::Properties p, ArrayRef<int64_t> shape)
 	    q = q | P::full_rank | P::square;
 	if (has(q, P::square | P::full_rank))
 	    q = q | P::non_singular;
-    }
+    } while (q != prev);
     return q;
 }
 

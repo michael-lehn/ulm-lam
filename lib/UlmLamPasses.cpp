@@ -3638,6 +3638,53 @@ struct UlmLamStripProperties
     }
 };
 
+//===----------------------------------------------------------------------===//
+// ulm-lam-test-closure (test/infer/closure.mlir)
+//===----------------------------------------------------------------------===//
+
+/// Checks for every set of property bits, with an unknown shape and with a
+/// static square one, that the closure is complete: applying it again adds
+/// nothing, closure(closure(p)) == closure(p).  It also checks that the
+/// closure keeps p (it only adds properties).
+struct UlmLamTestClosure
+    : PassWrapper<UlmLamTestClosure, OperationPass<ModuleOp>>
+{
+    MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(UlmLamTestClosure)
+    StringRef
+    getArgument() const final
+    {
+	return "ulm-lam-test-closure";
+    }
+    StringRef
+    getDescription() const final
+    {
+	return "Test: the closure of every property set is a fixpoint";
+    }
+    void
+    runOnOperation() override
+    {
+	const int64_t dyn = ShapedType::kDynamic;
+	const SmallVector<int64_t, 2> shapes[] = {{dyn, dyn}, {4, 4}};
+	constexpr uint32_t kBits = 15; // square ... upper_stored
+	unsigned checked = 0;
+	for (const auto &shape : shapes)
+	    for (uint32_t bits = 0; bits < (1u << kBits); ++bits) {
+		Properties p = static_cast<Properties>(bits);
+		Properties q = closure(p, shape);
+		if (!bitEnumContainsAll(q, p) || closure(q, shape) != q) {
+		    getOperation().emitError("closure is not a fixpoint for ")
+		        << stringifyProperties(p) << ": "
+		        << stringifyProperties(q) << " -> "
+		        << stringifyProperties(closure(q, shape));
+		    return signalPassFailure();
+		}
+		++checked;
+	    }
+	getOperation().emitRemark("closure: ")
+	    << checked << " property sets, each closure is a fixpoint";
+    }
+};
+
 } // namespace
 
 namespace ulm_lam {
@@ -3648,5 +3695,6 @@ registerUlmLamPasses()
     PassRegistration<UlmLamInferProperties>();
     PassRegistration<UlmLamSelectKernels>();
     PassRegistration<UlmLamStripProperties>();
+    PassRegistration<UlmLamTestClosure>();
 }
 } // namespace ulm_lam
