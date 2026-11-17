@@ -1,0 +1,25 @@
+% placement-styles.tex -- TikZ styles of the swimlane figures (needs the
+% colours cm and xfer, and the tikz libraries arrows.meta and fit).
+\tikzset{
+  lane/.style={fill=black!3, draw=none},
+  lanelabel/.style={font=\sffamily\small\bfseries, anchor=west},
+  op/.style={draw, rounded corners=2pt, fill=blue!6, font=\sffamily\footnotesize,
+    align=center, inner sep=2.5pt, minimum height=6mm},
+  mat/.style={draw, fill=black!8, font=\footnotesize, inner sep=2.5pt,
+    minimum height=5mm},
+  io/.style={draw, rounded corners=2pt, fill=green!8, font=\sffamily\footnotesize,
+    inner sep=2.5pt, minimum height=6mm},
+  t/.style={font=\sffamily\scriptsize, text=cm},
+  local/.style={-{Stealth[length=1.8mm]}},
+  move/.style={-{Stealth[length=2.2mm]}, very thick, xfer},
+  mv/.style={font=\sffamily\scriptsize, text=xfer!80!black, fill=white,
+    inner sep=1pt},
+  loopbox/.style={draw=cm, dashed, rounded corners=4pt},
+}
+% \lanes{width}: the four device lanes, CPU on top
+\newcommand{\lanes}[1]{%
+  \foreach \name/\y in {CPU/0, GPU/-1.5, NPU/-3, FPGA/-4.5} {
+    \fill[lane] (0,\y-0.6) rectangle (#1,\y+0.6);
+    \node[lanelabel] at (0.1,\y) {\name};
+  }}
+

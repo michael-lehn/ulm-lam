@@ -34,6 +34,17 @@ An early research prototype: dense real matrices, in double or single
 precision (from Julia a function called with `Float32` arrays is compiled
 for `Float32`; from Python `lam.compile(f, dtype="float32")`).
 
+Next, an idea: [every operation where it is
+cheapest](#every-operation-where-it-is-cheapest-a-way-to-cheaper-ai).  A
+computer today combines a CPU (central processing unit)
+with accelerators such as a GPU (graphics processing unit), an NPU (neural
+processing unit) or an FPGA (field-programmable gate array).  Because
+ulm.lam knows the mathematics and sees the loops, it could also decide which
+operation runs on which device, move data only when that pays off, and
+choose the plan at run time from the problem size.  Running AI (artificial
+intelligence) is mostly linear algebra and moving data, so this is a way to
+make it cheaper.
+
 ## Contents
 
 - [Julia](#julia)
@@ -46,6 +57,7 @@ for `Float32`; from Python `lam.compile(f, dtype="float32")`).
 - [Installation](#installation)
 - [Development](#development)
 - [What is open](#what-is-open)
+- [Every operation where it is cheapest: a way to cheaper AI](#every-operation-where-it-is-cheapest-a-way-to-cheaper-ai)
 - [Background](#background)
 - [Open questions](#open-questions)
 
@@ -437,6 +449,71 @@ open":
   differentiation at the matrix level; a connection to
   Reactant.jl/Enzyme-JAX; a `torch.compile` backend; a GPU backend; the
   Mojo backend on native Mojo kernels instead of Accelerate.
+
+## Every operation where it is cheapest: a way to cheaper AI
+
+A drone flies by camera.  For every frame it computes features of the image
+with a linear layer $W$, the building block of neural networks, estimates
+its state $x$ by solving a linear system with an SPD (symmetric positive
+definite) matrix $A$, and steers with $u = Kx$.  With ulm.lam this is a few
+lines of Julia:
+
+```julia
+const camera = extern(:camera, [Index], Vec(:m))       # the image of frame i
+const steer = extern(:steer, [Index, Vec(:k)])         # the motor commands
+
+@lam function fly(W::Mat(:n, :m), A::Mat(:n, :n, :spd), K::Mat(:k, :n), frames::Index)
+    loop(frames) do i
+        image = camera(i)
+        f = W * image          # features of the image: a linear layer
+        x = inv(A) * f         # the estimated state of the drone
+        steer(i, K * x)        # the controller
+    end
+end
+```
+
+Today ulm.lam compiles it into calls of BLAS and LAPACK on the CPU.
+`code_lam(fly)` shows the plan: the inverse becomes a Cholesky
+factorisation, computed once before the loop.
+
+```
+fly(W::n×m, A::n×n spd, K::k×n, frames::Index)
+  potrf    L1 ← chol(A)                      A = L1 L1ᵀ, Cholesky
+  for i = 0:frames-1
+    call     z1 ← camera(i)                    your Julia function
+    gemv     T1 ← W z1
+    trsv     T1 ← L1⁻¹ T1
+    trsv     T1 ← L1⁻ᵀ T1
+    gemv     T2 ← K T1
+    call     steer(i, T2)                      your Julia function
+```
+
+But our drone also has a GPU, an NPU and an FPGA.  Each is fast at some
+operations, but data has to be moved to it, so the best device depends on
+how much data has to be moved.  For a small camera (120 × 120 pixels, $W$
+has 104 MB (megabytes), an image 115 KB (kilobytes)) the compiler could
+generate this data flow, 99 µs (microseconds) per frame instead of
+1.05 ms (milliseconds) on the CPU:
+
+![The small-camera plan: the linear layer on the GPU, the Cholesky factorisation on the CPU, the solves and the controller on the FPGA](doc/placement/fig-small.svg)
+
+For a large camera (256 × 256 pixels), $W$ has 2.1 GB (gigabytes), twenty
+times as much.  It moves to the NPU once and stays there; a frame takes
+0.47 ms instead of 22.8 ms:
+
+![The large-camera plan: the linear layer on the NPU, the factorisation and the solves on the GPU, the controller on the CPU](doc/placement/fig-large.svg)
+
+Orange arrows move data between devices.  If the camera size is known only
+at run time, the generated code contains both plans and picks one when
+called; for only a few frames, $W$ is not moved at all.  Running AI is
+mostly linear algebra and moving data.  A compiler that knows the
+mathematics, sees the loops and has a cost model of the machine uses the
+hardware that is there, instead of a bigger GPU for everything.  That makes
+AI cheaper.
+
+*An idea, not implemented yet:* the devices are made up, the times come
+from a cost model ([model.py](doc/placement/model.py)).  The details are in
+[placement.pdf](doc/placement/placement.pdf).
 
 ## Background
 

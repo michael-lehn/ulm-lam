@@ -19,3 +19,9 @@ doc/howto/*.fls
 doc/howto/*.log
 doc/howto/*.out
 doc/howto/*.toc
+doc/placement/*.aux
+doc/placement/*.fdb_latexmk
+doc/placement/*.fls
+doc/placement/*.log
+doc/placement/*.out
+doc/placement/readme-figures.pdf

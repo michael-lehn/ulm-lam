@@ -1,0 +1,24 @@
+% readme-figures.tex -- the two plans as images for the README:
+%   lualatex readme-figures.tex
+%   pdftocairo -svg -f 1 -l 1 readme-figures.pdf fig-small.svg
+%   pdftocairo -svg -f 2 -l 2 readme-figures.pdf fig-large.svg
+% (white background, so that the figures stay readable in dark mode)
+\documentclass[tikz,border=6pt]{standalone}
+\usepackage{fontspec}
+\usepackage{unicode-math}
+\setmainfont{Libertinus Serif}
+\setsansfont{Libertinus Sans}
+\setmathfont{Libertinus Math}
+\usepackage{xcolor}
+\usetikzlibrary{arrows.meta,fit,backgrounds,calc}
+\definecolor{cm}{HTML}{6B6B6B}
+\definecolor{xfer}{HTML}{D9730D}
+\newcommand{\inv}{^{-1}}
+\newcommand{\invT}{^{-\mathsf{T}}}
+\input{placement-styles}
+\tikzset{every picture/.append style={show background rectangle,
+  background rectangle/.style={fill=white, draw=none}}}
+\begin{document}
+\input{fig-small}
+\input{fig-large}
+\end{document}

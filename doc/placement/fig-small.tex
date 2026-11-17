@@ -1,0 +1,29 @@
+% fig-small.tex -- the small-camera plan (see placement.tex)
+\begin{tikzpicture}[x=1cm,y=1cm]
+  \lanes{15.7}
+  % once
+  \node[font=\sffamily\scriptsize\bfseries, text=cm] at (3.3,0.95) {once};
+  \node[mat] (W) at (1.6,0.15) {\(W\)};
+  \node[mat] (A) at (2.35,0.15) {\(A\)};
+  \node[op] (potrf) at (3.85,0.15) {Cholesky};
+  \node[mat] (K) at (5.0,0.15) {\(K\)};
+  \node[mat] (Wg) at (1.6,-1.5) {\(W\)};
+  \node[mat] (Lf) at (3.85,-4.5) {\(L\)};
+  \node[mat] (Kf) at (5.0,-4.5) {\(K\)};
+  \draw[local] (A) -- (potrf);
+  \draw[move] (W) -- node[mv,left=2pt] {104 MB} (Wg);
+  \draw[move] (potrf) -- node[mv,pos=.75,left=1pt] {3.2 MB} (Lf);
+  \draw[move] (K) -- (Kf);
+  % per frame
+  \node[io] (cam) at (6.5,0) {camera};
+  \node[op] (gemv) at (8.4,-1.5) {\(f = W\,\mathit{image}\)\\[-1pt]\textcolor{cm}{\scriptsize 62 µs}};
+  \node[op] (trsv) at (10.7,-4.5) {\(x = L\invT L\inv f\)\\[-1pt]\textcolor{cm}{\scriptsize 8.5 µs}};
+  \node[op] (ctl) at (12.8,-4.5) {\(u = Kx\)\\[-1pt]\textcolor{cm}{\scriptsize 1.1 µs}};
+  \node[io] (steer) at (14.8,0) {steer};
+  \draw[move] (cam) -- node[mv,pos=.45,right=2pt] {115 KB} (gemv);
+  \draw[move] (gemv) -- node[mv,pos=.4,right=2pt] {7 KB} (trsv);
+  \draw[local] (trsv) -- (ctl);
+  \draw[move] (ctl) -- node[mv,pos=.5,right=2pt] {128 bytes} (steer);
+  \node[loopbox, fit={(5.6,1.0) (15.6,-5.3)}] (loop) {};
+  \node[font=\sffamily\scriptsize\bfseries, text=cm, anchor=north west] at (5.7,1.0) {per frame (loop)};
+\end{tikzpicture}

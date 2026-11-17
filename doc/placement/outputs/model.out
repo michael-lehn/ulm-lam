@@ -1,0 +1,52 @@
+small: image 14400, state 900, controls 16, frames 100000
+  best  ('GPU', 'CPU', 'FPGA', 'FPGA'): once 4.82 ms, per frame 99.2 us, total 9.9 s
+  CPU   ('CPU', 'CPU', 'CPU', 'CPU'): once 243.0 us, per frame 1.05 ms, total 105.3 s
+  next  ('GPU', 'GPU', 'FPGA', 'FPGA'): per frame 99.2 us, total 9.9 s
+  next  ('GPU', 'CPU', 'FPGA', 'CPU'): per frame 99.3 us, total 9.9 s
+  next  ('GPU', 'GPU', 'FPGA', 'CPU'): per frame 99.3 us, total 9.9 s
+large: image 65536, state 4096, controls 16, frames 100000
+  best  ('NPU', 'GPU', 'GPU', 'CPU'): once 140.77 ms, per frame 466.6 us, total 46.8 s
+  CPU   ('CPU', 'CPU', 'CPU', 'CPU'): once 22.91 ms, per frame 22.82 ms, total 2281.9 s
+  next  ('NPU', 'CPU', 'GPU', 'CPU'): per frame 466.6 us, total 46.8 s
+  next  ('NPU', 'GPU', 'GPU', 'FPGA'): per frame 472.9 us, total 47.4 s
+  next  ('NPU', 'CPU', 'GPU', 'FPGA'): per frame 472.9 us, total 47.5 s
+small, steps of the best placement:
+  once:
+    move W to GPU    4.16 ms
+    move K to FPGA   15.4 us
+    potrf on CPU     243.0 us
+    move L to FPGA   406.0 us
+  per frame:
+    image to GPU     14.6 us
+    gemv W on GPU    61.8 us
+    f to FPGA        12.2 us
+    2 trsv on FPGA   8.5 us
+    gemv K on FPGA   1.1 us
+    u to CPU         1.0 us
+large, steps of the best placement:
+  once:
+    move W to NPU    134.24 ms
+    move A to GPU    5.38 ms
+    potrf on GPU     1.16 ms
+  per frame:
+    image to NPU     52.8 us
+    gemv W on NPU    308.4 us
+    f to GPU         5.7 us
+    2 trsv on GPU    87.1 us
+    x to CPU         11.3 us
+    gemv K on CPU    1.3 us
+size scan (frames 100000):
+  from camera 16x16 (state 16): ('CPU', 'CPU', 'CPU', 'CPU')
+  from camera 56x56 (state 196): ('FPGA', 'CPU', 'CPU', 'CPU')
+  from camera 88x88 (state 484): ('FPGA', 'CPU', 'FPGA', 'CPU')
+  from camera 96x96 (state 576): ('GPU', 'CPU', 'CPU', 'CPU')
+  from camera 104x104 (state 676): ('GPU', 'CPU', 'FPGA', 'CPU')
+  from camera 120x120 (state 900): ('GPU', 'CPU', 'FPGA', 'FPGA')
+  from camera 136x136 (state 1156): ('NPU', 'CPU', 'FPGA', 'FPGA')
+  from camera 160x160 (state 1600): ('NPU', 'GPU', 'GPU', 'CPU')
+  from camera 304x304 (state 5776): ('GPU', 'GPU', 'GPU', 'CPU')
+  from camera 472x472 (state 13924): ('CPU', 'GPU', 'GPU', 'CPU')
+frame scan (large case):
+  from 1 frames: ('CPU', 'GPU', 'GPU', 'CPU')
+  from 5 frames: ('GPU', 'GPU', 'GPU', 'CPU')
+  from 100 frames: ('NPU', 'GPU', 'GPU', 'CPU')
