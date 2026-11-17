@@ -836,10 +836,17 @@ specify eleven rules:
 (A_1+\dots+A_k)\T = A_1\T+\dots+A_k\T, &&
 (\alpha A)\T = \alpha A\T,\\
 &(A\T)\T = A, && S\T = S \text{ for symmetric } S, && (A\inv)\inv = A,\\
-&A\,(B_1\cdots B_k)\,C = A B_1\cdots B_k C, &&
-A + (B_1+\dots+B_k) = A+B_1+\dots+B_k, && A\,I\,B = AB,\\
+&X\,(B_1\cdots B_k)\,Y = X B_1\cdots B_k Y, &&
+A + (B_1+\dots+B_k) = A+B_1+\dots+B_k, && X\,I\,Y = XY,\\
 &1\cdot A = A, && \alpha(\beta A) = (\alpha\beta)A.
 \end{align*}
+Here \(X\) and \(Y\) are products of zero or more factors, so the rules also
+cover \(A(B_1B_2) = AB_1B_2\) and \(IA = A\). The identity \(I\) is any factor
+known to be the identity: one written as \(I\), or a matrix declared to be
+the identity. A product that is used more than once, such as \(B_1B_2\) in
+\(A(B_1B_2)\) when \(B_1B_2\) is also a result, is not flattened: it is
+computed once.
+
 Each rule makes the expression smaller or moves a transpose closer to the
 leaves; therefore applying them in any order terminates, and at the end no
 rule applies.

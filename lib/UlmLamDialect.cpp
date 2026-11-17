@@ -712,8 +712,9 @@ struct PushTranspose : OpRewritePattern<TransposeOp>
     }
 };
 
-/// A B I C -> A B C: the identity as a factor is dropped (all of them:
-/// one is kept).
+/// A B I C -> A B C: a factor that is the identity is dropped (all of them:
+/// one is kept).  It is recognised by its properties, so both ulm_lam.identity
+/// and an argument declared as the identity are dropped.
 struct DropIdentity : OpRewritePattern<MulOp>
 {
     using OpRewritePattern::OpRewritePattern;
@@ -721,6 +722,9 @@ struct DropIdentity : OpRewritePattern<MulOp>
     matchAndRewrite(MulOp op, PatternRewriter &rewriter) const override
     {
 	auto isId = [](Value v) {
+	    auto t = tensorType(v.getType());
+	    if (has(closure(propertiesOf(t), t.getShape()), P::identity))
+		return true;
 	    while (auto as = v.getDefiningOp<AssumeOp>())
 		v = as.getOperand();
 	    return static_cast<bool>(v.getDefiningOp<IdentityOp>());
