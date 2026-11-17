@@ -98,9 +98,11 @@ julia:          ## the Julia frontend (julia/UlmLAM): tests and the showcases in
 	julia --project=julia/UlmLAM julia/examples/kalman_filter.jl
 	julia --project=julia/UlmLAM julia/examples/bayes.jl
 
-doc:            ## build doc/ulm-lam.pdf with LuaLaTeX
+doc:            ## build doc/ulm-lam.pdf and the How-To with LuaLaTeX
 	cd doc && latexmk
+	cd doc/howto && latexmk
 
 clean:
 	rm -rf build
 	cd doc && latexmk -C
+	cd doc/howto && latexmk -C

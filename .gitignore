@@ -13,3 +13,9 @@ doc/*.lst
 doc/*.out
 doc/*.toc
 julia/UlmLAM/Manifest.toml
+doc/howto/*.aux
+doc/howto/*.fdb_latexmk
+doc/howto/*.fls
+doc/howto/*.log
+doc/howto/*.out
+doc/howto/*.toc

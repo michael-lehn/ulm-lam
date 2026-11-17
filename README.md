@@ -351,6 +351,10 @@ The design document [`doc/ulm-lam.pdf`](doc/ulm-lam.pdf) describes the
 dialects, the derivations and the measurements, and compares ulm.lam with
 Linnea (`examples/linnea/`).
 
+How to build such a compiler, step by step, from the mathematics to what
+is written by hand, generated or provided by MLIR:
+[`doc/howto/ulm-lam-howto.pdf`](doc/howto/ulm-lam-howto.pdf).
+
 ## Installation
 
 Developed on macOS (Apple silicon) with Homebrew's LLVM.  The generated
@@ -414,6 +418,7 @@ showcases torch` runs the Python showcases.
 | `examples/` | design stages, loops, workspaces, run-time sizes, inverses, Linnea's versions of the problems, the cluster runs |
 | `python/examples/`, `julia/examples/` | the showcases |
 | `doc/` | the design document |
+| `doc/howto/` | How to build ulm.lam, step by step: each step starts with the mathematics (rules such as (AB)^T = B^T A^T, property inference, the generalised matrix chain), then shows how it is written for MLIR, and marks what is written by hand, what `mlir-tblgen` generates and what MLIR provides ([PDF](doc/howto/ulm-lam-howto.pdf); LuaLaTeX; the listings are produced by `doc/howto/examples/run.sh`) |
 
 ## What is open
 

@@ -1,0 +1,18 @@
+### bad-props.mlir
+bad-props.mlir:6:8: error: 'ulm_lam.mul' op inferred type(s) 'tensor<3x3xf64, #ulm_lam.props<non_singular, full_rank>>' are incompatible with return type(s) of operation 'tensor<3x3xf64, #ulm_lam.props<spd>>'
+  %C = ulm_lam.mul %A, %B : tensor<3x3xf64, #ulm_lam.props<spd>>,
+       ^
+bad-props.mlir:6:8: error: 'ulm_lam.mul' op failed to infer returned types
+  %C = ulm_lam.mul %A, %B : tensor<3x3xf64, #ulm_lam.props<spd>>,
+       ^
+bad-props.mlir:6:8: note: see current operation: %0 = "ulm_lam.mul"(%arg0, %arg1) : (tensor<3x3xf64, #ulm_lam.props<spd>>, tensor<3x3xf64, #ulm_lam.props<spd>>) -> tensor<3x3xf64, #ulm_lam.props<spd>>
+### bad-shapes.mlir
+bad-shapes.mlir:3:8: error: 'ulm_lam.mul' op factor 0 has 4 columns but factor 1 has 5 rows
+  %C = ulm_lam.mul %A, %B : tensor<3x4xf64>, tensor<5x2xf64> -> tensor<3x2xf64>
+       ^
+bad-shapes.mlir:3:8: note: see current operation: %0 = "ulm_lam.mul"(%arg0, %arg1) : (tensor<3x4xf64>, tensor<5x2xf64>) -> tensor<3x2xf64>
+### bad-type.mlir
+bad-type.mlir:3:8: error: 'ulm_lam.transpose' op operand #0 must be 2D tensor of 32-bit float or 64-bit float values, but got 'tensor<3x3xi32>'
+  %T = ulm_lam.transpose %A : tensor<3x3xi32> -> tensor<3x3xi32>
+       ^
+bad-type.mlir:3:8: note: see current operation: %0 = "ulm_lam.transpose"(%arg0) : (tensor<3x3xi32>) -> tensor<3x3xi32>
