@@ -19,7 +19,20 @@
 \usepackage{listings}
 \usepackage{xparse}
 \usepackage{tikz}
-\usetikzlibrary{positioning,arrows.meta}
+\usetikzlibrary{positioning,arrows.meta,fit,backgrounds}
+% graphs of the IR: operations are nodes, values are edges
+\tikzset{
+  irop/.style={draw, rounded corners=2pt, fill=blue!6, font=\ttfamily\small,
+    inner sep=3pt, minimum height=5mm},
+  irarg/.style={draw, fill=black!8, font=\small, inner sep=3pt,
+    minimum height=5mm},
+  irval/.style={font=\ttfamily\scriptsize, inner sep=1.5pt},
+  irnote/.style={font=\sffamily\scriptsize, text=orange!60!black},
+  irmerge/.style={draw=orange!80!black, dashed, rounded corners=4pt,
+    inner sep=3pt},
+}
+\newcommand{\irv}[1]{\%#1}   % a value name in a graph (no highlight)
+\usepackage{caption}
 \usepackage[hidelinks]{hyperref}
 \usepackage[nameinlink,capitalise,noabbrev]{cleveref}
 \crefname{section}{Step}{Steps}
@@ -993,8 +1006,80 @@ products into two. The input is the traced program of \cref{sec:build}:
 return %v8
 \end{lstlisting}
 
-\texttt{\%v3} is used only by \texttt{\%v4}, so it is merged into it;
-likewise \texttt{\%v6} into \texttt{\%v7} and \texttt{\%v7} into
+\Cref{fig:traced} shows the same program as a graph: the nodes are the
+operations, and the edges are the values, each labelled with its name. An
+edge leads from the operation that defines a value to every operation that
+uses it.
+
+\par\noindent\begin{minipage}{\linewidth}
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,>={Stealth[length=1.8mm]}]
+  \node[irarg] (X) at (0,1.2) {\(X\)};
+  \node[irarg] (M) at (0,-1.2) {\(M\)};
+  \node[irarg] (y) at (0,-2.4) {\(y\)};
+  \node[irop] (v1) at (2,1.2) {transpose};
+  \node[irop] (v2) at (2,-1.2) {inverse};
+  \node[irop] (v3) at (3.9,0) {mul};
+  \node[irop] (v4) at (5.4,0) {mul};
+  \node[irop] (v5) at (7.0,0) {inverse};
+  \node[irop] (v6) at (8.7,0) {mul};
+  \node[irop] (v7) at (10.2,0) {mul};
+  \node[irop] (v8) at (11.7,0) {mul};
+  \node[irarg,font=\ttfamily\small] (r) at (13.4,0) {return};
+  \draw[->] (X) -- node[irval,above]{\irv{p.X}} (v1);
+  \draw[->] (M) -- node[irval,above]{\irv{p.M}} (v2);
+  \draw[->] (v1.south) -- node[irval,left,pos=.4]{\irv{v1}} (v3.north west);
+  \draw[->] (v2.north) -- node[irval,left,pos=.4]{\irv{v2}} (v3.south west);
+  \draw[->] (v3) -- node[irval,above]{\irv{v3}} (v4);
+  \draw[->] (X.north) |- (0.5,2.2) -| node[irval,above,pos=.25]{\irv{p.X}} (v4.north);
+  \draw[->] (v4) -- node[irval,above]{\irv{v4}} (v5);
+  \draw[->] (v5) -- node[irval,above]{\irv{v5}} (v6);
+  \draw[->] (v1.east) -| node[irval,above,pos=.3]{\irv{v1}} (v6.north);
+  \draw[->] (v6) -- node[irval,above]{\irv{v6}} (v7);
+  \draw[->] (v2.east) -| node[irval,below,pos=.3]{\irv{v2}} (v7.south);
+  \draw[->] (v7) -- node[irval,above]{\irv{v7}} (v8);
+  \draw[->] (y.east) -| node[irval,below,pos=.3]{\irv{p.y}} (v8.south);
+  \draw[->] (v8) -- node[irval,above]{\irv{v8}} (r);
+  \begin{scope}[on background layer]
+    \node[irmerge,fit=(v3)(v4),label={[irnote]below:becomes \irv{2}}]{};
+    \node[irmerge,fit=(v6)(v7)(v8),label={[irnote]above:becomes \irv{4}}]{};
+  \end{scope}
+\end{tikzpicture}
+\captionof{figure}{The traced GLS program (\texttt{outputs/1-traced.mlir}) as a
+graph. The dashed boxes mark the products that the rules merge.}
+\label{fig:traced}
+
+\bigskip
+\begin{tikzpicture}[x=1cm,y=1cm,>={Stealth[length=1.8mm]}]
+  \node[irarg] (X) at (0,1.2) {\(X\)};
+  \node[irarg] (M) at (0,-1.2) {\(M\)};
+  \node[irarg] (y) at (0,-2.4) {\(y\)};
+  \node[irop] (a) at (2,1.2) {transpose};
+  \node[irop] (b) at (2,-1.2) {inverse};
+  \node[irop] (c) at (4.4,0) {mul};
+  \node[irop] (d) at (6.4,0) {inverse};
+  \node[irop] (e) at (8.7,0) {mul};
+  \node[irarg,font=\ttfamily\small] (r) at (10.6,0) {return};
+  \draw[->] (X) -- node[irval,above]{\irv{arg0}} (a);
+  \draw[->] (M) -- node[irval,above]{\irv{arg1}} (b);
+  \draw[->] (a.south) -- node[irval,left,pos=.4]{\irv{0}} (c.north west);
+  \draw[->] (b.north) -- node[irval,left,pos=.4]{\irv{1}} (c.south west);
+  \draw[->] (X.north) |- (0.5,2.2) -| node[irval,above,pos=.25]{\irv{arg0}} (c.north east);
+  \draw[->] (c) -- node[irval,above]{\irv{2}} (d);
+  \draw[->] (d) -- node[irval,above]{\irv{3}} (e);
+  \draw[->] (a.east) -| node[irval,above,pos=.3]{\irv{0}} (e.north);
+  \draw[->] (b.east) -| node[irval,below,pos=.3]{\irv{1}} (e.south west);
+  \draw[->] (y.east) -| node[irval,below,pos=.3]{\irv{arg2}} (e.south east);
+  \draw[->] (e) -- node[irval,above]{\irv{4}} (r);
+\end{tikzpicture}
+\captionof{figure}{The normalised GLS program (\texttt{outputs/2-normal.mlir}).}
+\label{fig:normal}
+\end{minipage}
+
+
+Applying the rules converts the graph of \cref{fig:traced} into the graph of
+\cref{fig:normal}. As you see, \texttt{\%v3} is used only by
+\texttt{\%v4}, so it is merged into it; likewise \texttt{\%v6} into \texttt{\%v7} and \texttt{\%v7} into
 \texttt{\%v8}. \texttt{\%v1} and \texttt{\%v2} are used twice, but they are
 not products, so nothing is merged. The printer numbers the values anew
 (\texttt{\%0}, \texttt{\%1}, \dots) and calls the parameters
