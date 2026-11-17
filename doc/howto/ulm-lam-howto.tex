@@ -978,9 +978,30 @@ asks for canonicalisation.
 \texttt{PatternRewriter} (which keep the IR consistent while it changes).}
 
 Applied to the GLS program, the rule for nested products merges five
-products into two:
+products into two. The input is the traced program of \cref{sec:build}:
 
-\shown{\texttt{outputs/2-normal.mlir} (operations only, types shortened)}
+\shown{\texttt{outputs/1-traced.mlir} (operations only, types removed)}
+\begin{lstlisting}[style=mlir]
+%v1 = ulm_lam.transpose %p.X                 // X^T
+%v2 = ulm_lam.inverse %p.M                   // M^-1
+%v3 = ulm_lam.mul %v1, %v2                   // X^T M^-1
+%v4 = ulm_lam.mul %v3, %p.X                  // (X^T M^-1) X
+%v5 = ulm_lam.inverse %v4                    // (X^T M^-1 X)^-1
+%v6 = ulm_lam.mul %v5, %v1                   // (X^T M^-1 X)^-1 X^T
+%v7 = ulm_lam.mul %v6, %v2                   // (...) M^-1
+%v8 = ulm_lam.mul %v7, %p.y                  // (...) y
+return %v8
+\end{lstlisting}
+
+\texttt{\%v3} is used only by \texttt{\%v4}, so it is merged into it;
+likewise \texttt{\%v6} into \texttt{\%v7} and \texttt{\%v7} into
+\texttt{\%v8}. \texttt{\%v1} and \texttt{\%v2} are used twice, but they are
+not products, so nothing is merged. The printer numbers the values anew
+(\texttt{\%0}, \texttt{\%1}, \dots) and calls the parameters
+\texttt{\%arg0}, \texttt{\%arg1}, \texttt{\%arg2} (for \(X\), \(M\),
+\(y\)):
+
+\shown{\texttt{outputs/2-normal.mlir} (operations only, types removed)}
 \begin{lstlisting}[style=mlir]
 %0 = ulm_lam.transpose %arg0                 // X^T
 %1 = ulm_lam.inverse %arg1                   // M^-1
