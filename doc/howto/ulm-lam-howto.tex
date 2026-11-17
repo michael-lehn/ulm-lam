@@ -753,14 +753,59 @@ which follows the \texttt{assemblyFormat}
 Each element of the format became one call. After parsing, the verifiers
 run. A frontend that writes text therefore needs neither MLIR's C++
 interface nor a C++ compiler; Julia and Python write text and hand it to
-the compiler executable.
+the compiler executable. Concretely, the frontend writes the text into a
+file in its cache directory (\texttt{gls.mlir}) and runs the executable
+\texttt{ulm-lam} on it, which parses the file with MLIR's parser and
+writes the C++ (or Julia) code.
+
+\subsection{Why ulm.lam takes Way 2}
+
+\begin{itemize}
+\item \emph{Users stay in their language.} ulm.lam is meant for Julia and
+  Python users who have their matrices at hand. With tracing, the formula
+  is part of their program, and they call it with their own arrays. A
+  formula language would need files of its own and a layer that passes
+  arrays in and results out; with tracing, that layer is the frontend.
+\item \emph{The host language supplies a language for free:} names,
+  functions, modules, generic code. A helper function that a user calls
+  inside a formula is simply traced. A formula language would have to
+  implement scopes and functions before it is as useful.
+\item \emph{Installation stays simple.} The frontends write text and need
+  no MLIR of their own: no bindings, no MLIR packages for Python or Julia
+  in exactly matching versions. Everything MLIR is in one executable,
+  linked statically, which Julia users get as the binary package
+  \texttt{ulm\_lam\_jll} and nothing else. Writing the IR of an
+  established compiler infrastructure as text and leaving parsing and
+  code generation to its tools is a common division of labour. The
+  self-hosting teaching compiler not-abc~\cite{notabc} does the same with
+  LLVM: it writes LLVM IR as text, and \texttt{clang} compiles it.
+\item \emph{Errors in the user's terms.} The frontends check dimensions
+  while tracing, so an error such as ``product of 2000x200 and 2000x1: 200
+  columns but 2000 rows'' comes with a stack trace that points to the
+  user's line. The verifiers of \cref{sec:ops} check the same again; for
+  the frontends they guard against mistakes of the frontend and of the
+  compiler's own passes.
+\end{itemize}
+
+The choice has two costs. First, the control flow of the host language
+runs while the formula is traced, not in the compiled code: a Python
+\texttt{for} loop is unrolled, and an \texttt{if} on a matrix is
+impossible. Loops therefore need a construct of their own
+(\texttt{lam.loop} in Python); a parser for a formula language would get
+loops and branches from its grammar. Second, the syntax of every
+operation exists twice: in the \texttt{assemblyFormat} of the TableGen
+definition, and in the strings the frontends write. A change of one without
+the other does not go unnoticed, since the test suites of both frontends
+run every program through the real compiler and fail with a parse error,
+but nothing keeps the two in step automatically.
 
 \paragraph{Summary of the step.}
 Whether by parser or by tracing, a frontend creates operations with
 generated functions (\texttt{create} or \texttt{parse}). We write the
 frontend (the Python frontend has 935 lines, mostly user interface: types
-with named sizes, loops, calls of other functions). We do not write
-anything that relates the text to the operations.
+with named sizes, loops, calls of other functions). The relation between
+text and operations is generated: the parser of every operation. The
+frontends only have to write the text that this parser expects.
 
 % =====================================================================
 \section{Rewrite rules: a normal form}
@@ -1642,6 +1687,12 @@ H.~Barthels, M.~Copik, P.~Bientinesi.
 \newblock The Generalized Matrix Chain Algorithm.
 \newblock \emph{CGO (International Symposium on Code Generation and
 Optimization)}, 2018.
+
+\bibitem{notabc}
+M.~Lehn.
+\newblock not-abc: a tiny, self-hosting programming language and compiler
+with an LLVM backend.
+\newblock \url{https://github.com/michael-lehn/not-abc}.
 
 \bibitem{mlir}
 C.~Lattner, M.~Amini, U.~Bondhugula, A.~Cohen, A.~Davis, J.~Pienaar,
