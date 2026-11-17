@@ -626,11 +626,25 @@ the product of the three.
 \end{maths}
 
 There are two ways to get from text to IR, and both use the generated code
-of \cref{sec:ops}.
+of \cref{sec:ops}. Which one fits depends on who reads the user's program.
+\begin{itemize}
+\item \emph{Way 1} is what you probably prefer when you design a language of
+  your own, a DSL (domain-specific language), for example a Matlab-like
+  language for formulas. Your own parser, say a recursive descent parser,
+  reads the program and creates the operations of ulm.lam directly. Since it
+  sees every construct of the language, it can also translate loops and
+  branches.
+\item \emph{Way 2} is what you want when you embed ulm.lam in a language such as
+  Julia or Python. There is no parser of ours: the host language parses the
+  program. We overload operators (\texttt{*}, \texttt{@}, transpose) and
+  define functions (\texttt{inv}) such that they emit MLIR for ulm.lam
+  instead of computing, and we compile the result from within the host
+  language.
+\end{itemize}
 
 \subsection{Way 1: a parser for a formula language}
 
-A DSL (domain-specific language) for formulas needs a lexer and a parser.
+A DSL for formulas needs a lexer and a parser.
 How these are written is not the subject of this document: a recursive
 descent parser with one function per level of precedence is enough. The
 interesting part is what the parser does when it has recognised a
